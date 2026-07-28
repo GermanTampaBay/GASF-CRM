@@ -1,0 +1,408 @@
+<?php
+/**
+ * Bulk upload — modules/email-crm/photos-upload.php
+ *
+ * The other way photos get into the collection.
+ *
+ * Everything else in this module arrives by email from a member, which is why
+ * it has an intake queue, an invitation, a reminder and a review step: we do
+ * not know who sent it, whether they took it, or whether we may use it. A
+ * volunteer emptying their own camera after an event has already answered all
+ * three, and making them post 25 photos to themselves to get them in would be
+ * a ceremony that protects nobody.
+ *
+ * So this is a shorter path, not a looser one. It skips the queue, the invite
+ * and the reminders. It does NOT skip the two things that exist for the
+ * subject's sake rather than the club's:
+ *
+ *   - Permission is recorded, with a note, exactly as a volunteer recording it
+ *     by hand for an emailed photo. The tickbox is not a formality; without it
+ *     the request is refused.
+ *   - Every file is scrubbed of EXIF before it becomes readable, by the same
+ *     publish path emailed photos go through. Uploads land in the private
+ *     review folder first and are published from there, so there is never a
+ *     moment where an unscrubbed file sits in the webroot.
+ *
+ * One file per request, deliberately. PHP's max_file_uploads defaults to 20,
+ * so a single POST carrying 25 photos silently drops five of them — no error,
+ * no warning, just fewer pictures than you dragged in. Uploading them one at a
+ * time also means a failure is one photo's problem rather than the batch's,
+ * and the person watching gets a progress line per file instead of a spinner.
+ */
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+
+/** Stills a browser will hand us that WordPress can actually process. */
+function gasf_crm_upload_types() {
+	return array( 'jpg', 'jpeg', 'png', 'gif', 'webp' );
+}
+
+/**
+ * Moving pictures.
+ *
+ * Kept to the two containers every phone and every browser agree on. The rest of
+ * WordPress's video list — wmv, flv, avi, mkv — plays nowhere useful without a
+ * conversion step this server cannot run, so accepting them would take the file
+ * and then leave somebody with a club video nothing will open.
+ */
+function gasf_crm_upload_video_types() {
+	return array( 'mp4', 'm4v', 'mov' );
+}
+
+/*
+ * A minute of phone video, near enough.
+ *
+ * 1080p runs about 130 MB a minute and 4K about three times that, so this is a
+ * short clip rather than a film — which is what a club actually posts. It is
+ * also under the 100 MB a request that sits in front of most Cloudflare plans:
+ * a bigger file is refused at the edge before PHP is ever reached, and no
+ * message this code could write would ever be seen.
+ */
+define( 'GASF_CRM_UPLOAD_MAX_VIDEO_BYTES', 96 * MB_IN_BYTES );
+
+/**
+ * Take one uploaded file into the collection, tagged with the batch's answers.
+ *
+ * @param array $f  One $_FILES entry.
+ * @param array $in Batch fields: taken, place, event, event_id, note.
+ * @return array|WP_Error The library card on success.
+ */
+function gasf_crm_photo_upload_one( array $f, array $in ) {
+	if ( ! function_exists( 'gasf_crm_photos_available' ) || ! gasf_crm_photos_available() ) {
+		return new WP_Error( 'gasf_crm_off', 'The photo catalogue is switched off, so there is nowhere to put these.', array( 'status' => 503 ) );
+	}
+
+	$name = (string) ( $f['name'] ?? '' );
+	if ( '' === $name || empty( $f['tmp_name'] ) ) {
+		return new WP_Error( 'gasf_crm_nofile', 'No file arrived.', array( 'status' => 400 ) );
+	}
+
+	if ( ! empty( $f['error'] ) ) {
+		// PHP's own upload errors, said in words. UPLOAD_ERR_INI_SIZE is the one
+		// that actually happens, and "the server refused it" is not a useful
+		// thing to read when the fix is a smaller file.
+		$why = array(
+			UPLOAD_ERR_INI_SIZE   => 'is bigger than this server accepts in one upload',
+			UPLOAD_ERR_FORM_SIZE  => 'is bigger than the form allows',
+			UPLOAD_ERR_PARTIAL    => 'only arrived partly — the connection dropped',
+			UPLOAD_ERR_NO_FILE    => 'did not arrive at all',
+			UPLOAD_ERR_NO_TMP_DIR => 'could not be stored — the server has no temp folder',
+			UPLOAD_ERR_CANT_WRITE => 'could not be written to disk',
+			UPLOAD_ERR_EXTENSION  => 'was blocked by the server',
+		);
+		return new WP_Error( 'gasf_crm_upload', sprintf( '%s %s.', $name,
+			$why[ (int) $f['error'] ] ?? 'could not be uploaded' ), array( 'status' => 400 ) );
+	}
+
+	$ext     = strtolower( (string) pathinfo( $name, PATHINFO_EXTENSION ) );
+	$isVideo = in_array( $ext, gasf_crm_upload_video_types(), true );
+
+	if ( ! $isVideo && ! in_array( $ext, gasf_crm_upload_types(), true ) ) {
+		// HEIC named explicitly: it is what an iPhone produces by default, so it
+		// is the likeliest thing to be turned away, and "not a supported image"
+		// gives somebody no idea that the fix is a setting on their phone.
+		$hint = in_array( $ext, array( 'heic', 'heif' ), true )
+			? ' iPhones save HEIC by default — in Settings → Camera → Formats, choose "Most Compatible", or share the photos rather than sending the originals.'
+			: '';
+		return new WP_Error( 'gasf_crm_type', sprintf(
+			'%s is a .%s, which cannot be catalogued. JPEG, PNG, GIF and WebP work, and MP4 or MOV for video.%s',
+			$name, $ext ?: '?', $hint
+		), array( 'status' => 415 ) );
+	}
+
+	$size = (int) ( $f['size'] ?? 0 );
+	$cap  = $isVideo ? GASF_CRM_UPLOAD_MAX_VIDEO_BYTES : ( defined( 'GASF_CRM_PHOTO_MAX_BYTES' ) ? GASF_CRM_PHOTO_MAX_BYTES : 0 );
+	if ( $cap && $size > $cap ) {
+		return new WP_Error( 'gasf_crm_big', sprintf( '%s is %s, over the %s limit for one %s.',
+			$name, size_format( $size ), size_format( $cap ), $isVideo ? 'video' : 'photo' ), array( 'status' => 413 ) );
+	}
+
+	if ( $isVideo ) {
+		/*
+		 * Checked BEFORE the file is taken in, not after.
+		 *
+		 * A photo can be stripped, so it is accepted and cleaned. A video on this
+		 * server can only be stripped of the one box we know how to blank, and if
+		 * it turns out to carry something else there is nothing to be done with it
+		 * — so the answer has to come before it is in the collection, not after.
+		 */
+		$loc = gasf_crm_video_has_location( $f['tmp_name'] );
+		if ( $loc && false === strpos( $loc, 'GPS atom' ) ) {
+			return new WP_Error( 'gasf_crm_geo', sprintf(
+				'%s carries %s that cannot be removed on this server, so it has not been taken in. Turning location off in the camera app before recording, or re-saving the clip in an editor, clears it.',
+				$name, $loc
+			), array( 'status' => 415 ) );
+		}
+	} else {
+		// Refuse a decompression bomb before WordPress tries to make sixteen sizes of it.
+		$dim = @getimagesize( $f['tmp_name'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- a bad image is an expected input here.
+		if ( ! $dim || empty( $dim[0] ) || empty( $dim[1] ) ) {
+			return new WP_Error( 'gasf_crm_type', $name . ' does not look like an image we can read.', array( 'status' => 415 ) );
+		}
+		if ( defined( 'GASF_CRM_PHOTO_MAX_PIXELS' ) && ( $dim[0] * $dim[1] ) > GASF_CRM_PHOTO_MAX_PIXELS ) {
+			return new WP_Error( 'gasf_crm_big', sprintf( '%s is %s×%s, which is more than we resize in one go.',
+				$name, number_format_i18n( $dim[0] ), number_format_i18n( $dim[1] ) ), array( 'status' => 413 ) );
+		}
+	}
+
+	require_once ABSPATH . 'wp-admin/includes/image.php';
+	require_once ABSPATH . 'wp-admin/includes/file.php';
+	require_once ABSPATH . 'wp-admin/includes/media.php';
+
+	/*
+	 * This request is allowed to take a while.
+	 *
+	 * The site registers sixteen image sizes, so one photo means sixteen resizes
+	 * before anything else happens, and a modern phone camera makes that real
+	 * work. The default sixty seconds killed it mid-resize — PHP printed a fatal
+	 * error page, the browser tried to read it as JSON, and the volunteer saw
+	 * "Unexpected token '<'", which tells them nothing at all.
+	 *
+	 * Raised rather than worked around: the resizing is legitimate and there is
+	 * no version of this that is fast enough to fit in a minute on every photo.
+	 * Best effort — some hosts refuse, and then the scrub short-circuit added
+	 * alongside this is what keeps it inside the limit.
+	 */
+	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors -- refused on some hosts, not fatal.
+	@ini_set( 'max_execution_time', '300' );  // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
+
+	/*
+	 * Into the review folder, created private — the same two filters the email
+	 * intake uses, for the same reason.
+	 *
+	 * These photos are going public in a moment anyway, so it would be tempting
+	 * to write them straight into uploads. The reason not to is the scrub: EXIF
+	 * comes off in gasf_crm_photo_publish, and publishing from behind the
+	 * boundary means a file is never readable with its GPS still in it, not even
+	 * for the second between writing and stripping.
+	 */
+	$review = gasf_crm_photo_private_root();
+
+	/*
+	 * basedir moves too, not just path — and subdir has to carry the review
+	 * folder's name.
+	 *
+	 * WordPress derives _wp_attached_file by stripping basedir off the absolute
+	 * path, and gasf_crm_photo_is_private() decides purely on whether that
+	 * relative path starts with the review folder. Point basedir AT the review
+	 * folder instead of at its parent and the file is recorded as a bare
+	 * filename: publish then sees a photo it thinks is already public, returns
+	 * true without moving anything, and leaves an attachment marked private
+	 * whose recorded path points at a file that is not there.
+	 *
+	 * Which is exactly what it did the first time this was written. The upload
+	 * reported success three times over and produced three broken photos.
+	 */
+	$to_review = function ( $dirs ) use ( $review ) {
+		$dirs['basedir'] = dirname( $review );
+		$dirs['path']    = $review;
+		$dirs['subdir']  = '/' . GASF_CRM_PHOTO_REVIEW_DIR;
+		// No public URL exists for any of this. Pointed at the site root rather
+		// than a plausible-looking uploads path, so anything reaching for it
+		// fails obviously instead of 404ing like a broken image.
+		$dirs['baseurl'] = home_url();
+		$dirs['url']     = home_url();
+		return $dirs;
+	};
+	$hide = function ( $data ) {
+		$data['post_status'] = 'private';
+		return $data;
+	};
+
+	/*
+	 * Provenance, stamped the instant the row exists — NOT after the upload call
+	 * returns.
+	 *
+	 * gasf_crm_photo_sweep_orphans deletes private files in the review folder
+	 * that carry neither a queue claim nor provenance, on the reasonable grounds
+	 * that unreviewed bytes nobody owns are exactly what that folder exists to
+	 * prevent. A direct upload has no queue claim by definition, so provenance
+	 * is the only thing standing between it and the reaper.
+	 *
+	 * Written after media_handle_upload returned, it was missing for the whole
+	 * of the slow part: add_attachment fires inside wp_insert_attachment, and
+	 * the sixteen resizes happen afterwards. The sweep runs under the intake
+	 * lock, mail came in, and it removed uploads that were still being resized —
+	 * "removing unclaimed private image #19464 (interrupted import)" — leaving
+	 * the request to finish against a post that no longer existed.
+	 *
+	 * The email intake already solved this and says so in a comment above its
+	 * own $claim hook. This is the same fix for the same reason.
+	 */
+	$provenance = array(
+		'thread'      => 0,
+		'stream'      => 'photos',
+		'email'       => '',
+		'name'        => gasf_crm_display_name( get_current_user_id() ),
+		'subject'     => 'Uploaded directly',
+		'approved_by' => get_current_user_id(),
+		'approved_at' => current_time( 'mysql', true ),
+		'upload'      => true,
+	);
+	$stamp = function ( $new_id ) use ( $provenance ) {
+		update_post_meta( $new_id, '_gasf_photo_source', $provenance );
+		// A volunteer has vouched for it, which is what confirmed means — and it
+		// is what puts the photo in the library before it has a single tag.
+		update_post_meta( $new_id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
+	};
+
+	add_filter( 'upload_dir', $to_review, 99 );
+	add_filter( 'wp_insert_attachment_data', $hide, 99 );
+	add_action( 'add_attachment', $stamp, 1 );
+	// EXIF is read on the way in by the catalogue module's add_attachment hook,
+	// which is what puts the date, the time and the geofence guess on the photo
+	// before the scrub below takes them out of the file.
+	$id = media_handle_upload( 'file', 0, array(), array( 'test_form' => false ) );
+	remove_action( 'add_attachment', $stamp, 1 );
+	remove_filter( 'wp_insert_attachment_data', $hide, 99 );
+	remove_filter( 'upload_dir', $to_review, 99 );
+
+	if ( is_wp_error( $id ) ) { return $id; }
+	$id = (int) $id;
+
+	// The sweep can still have reached it if this request was slow enough and an
+	// intake ran before the stamp landed. Saying so beats a confusing failure
+	// three steps further down, against a post that is no longer there.
+	if ( ! get_post( $id ) ) {
+		return new WP_Error( 'gasf_crm_gone', $name . ' was removed while it was still being processed. Please try it again.', array( 'status' => 500 ) );
+	}
+
+	// Permission, recorded the same way and against the same wording as a
+	// volunteer recording it by hand. Before publish, so a photo is never
+	// readable without its permission already on the record.
+	$rec = gasf_crm_photo_consent_record( $id, 'grant', (string) ( $in['note'] ?? '' ) );
+	if ( is_wp_error( $rec ) ) {
+		wp_delete_attachment( $id, true );
+		return $rec;
+	}
+
+	// Scrub every size, verify, move out of the review folder, hand over the
+	// file mode, flip to inherit. All of it already lives in publish.
+	$pub = gasf_crm_photo_publish( $id );
+	if ( is_wp_error( $pub ) ) {
+		wp_delete_attachment( $id, true );
+		return $pub;
+	}
+
+	/*
+	 * And then check it actually happened, rather than believing the return.
+	 *
+	 * publish() opens with "if this photo is not private, there is nothing to
+	 * do — return true". That is correct for its original caller, which only
+	 * ever hands it a photo from the review queue. For this one it is a trap: if
+	 * the upload lands anywhere publish does not recognise as private, it
+	 * cheerfully reports success having moved nothing, and the photo ends up
+	 * marked private, unscrubbed, pointing at a file that is not there — while
+	 * the person watching sees "added".
+	 *
+	 * This is not hypothetical. It happened on the first run of this function,
+	 * three times, and the only reason it was caught is that somebody looked at
+	 * the database afterwards instead of at the green ticks.
+	 *
+	 * A success that cannot be verified is not a success worth reporting.
+	 *
+	 * Asked as "has it left the review folder, and is the file there" rather
+	 * than by reading post_status. get_post_status() reports 'publish' for an
+	 * unattached attachment whose stored status is 'inherit' — core translates
+	 * it — so a check for 'inherit' fails on a photo that published perfectly.
+	 * Which it did, on the run right after this guard was added: three good
+	 * uploads deleted by the thing meant to protect them.
+	 *
+	 * gasf_crm_photo_is_private() is the codebase's own answer to the only
+	 * question that matters here, and it reads the path rather than a status
+	 * core is entitled to reinterpret.
+	 */
+	$path = get_attached_file( $id );
+	if ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) {
+		gasf_mec_log( sprintf( 'CRM upload: media #%d did not publish cleanly (still private=%s, file=%s) — removed',
+			$id, gasf_crm_photo_is_private( $id ) ? 'yes' : 'no', $path ?: 'none' ) );
+		wp_delete_attachment( $id, true );
+		return new WP_Error( 'gasf_crm_pub', $name . ' could not be filed away safely, so it has not been kept. Nothing was published.', array( 'status' => 500 ) );
+	}
+
+	/*
+	 * The batch's answers, applied through the ordinary tag writer.
+	 *
+	 * The photo's OWN date wins over the batch's. Somebody uploading an evening's
+	 * photos gives one date for the lot, and that is right for the ones with no
+	 * EXIF — but a camera that recorded the real day knows better than a form,
+	 * and overwriting it would throw away the only evidence in favour of a
+	 * default. Same for the place: an explicit choice from the form wins, since
+	 * that is a human saying where they were, but with the box left blank a
+	 * geofence guess is better than nothing.
+	 */
+	$own_date  = (string) get_post_meta( $id, '_gasf_photo_taken', true );
+	$own_place = (int) get_post_meta( $id, '_gasf_photo_place_guess', true );
+	$own_place = $own_place ? get_term( $own_place, 'gasf_photo_place' ) : null;
+
+	$place = trim( (string) ( $in['place'] ?? '' ) );
+	if ( '' === $place && $own_place && ! is_wp_error( $own_place ) ) { $place = $own_place->name; }
+
+	$saved = gasf_crm_photo_library_save( $id, array(
+		'people'   => array(),                                   // the whole point: tagged afterwards
+		'place'    => $place,
+		'event'    => trim( (string) ( $in['event'] ?? '' ) ),
+		'event_id' => (int) ( $in['event_id'] ?? 0 ),
+		'taken'    => $own_date ?: trim( (string) ( $in['taken'] ?? '' ) ),
+		'caption'  => '',
+	) );
+	// A tagging failure here is recoverable by editing the photo, and the photo
+	// itself is already safe — scrubbed, consented, in the library. Losing it
+	// over a bad place name would be the worse outcome.
+	if ( is_wp_error( $saved ) ) {
+		gasf_mec_log( sprintf( 'CRM upload: media #%d uploaded but its batch tags did not apply — %s',
+			$id, $saved->get_error_message() ) );
+	}
+
+	gasf_mec_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
+		$id, $name, gasf_crm_display_name( get_current_user_id() ) ) );
+
+	return gasf_crm_photo_library_card( $id );
+}
+
+add_action( 'rest_api_init', function () {
+
+	$guard = function () {
+		$sess = gasf_crm_rest_guard();
+		if ( is_wp_error( $sess ) || ! $sess ) { return $sess ?: false; }
+		return gasf_crm_user_can_stream( 'photos' );
+	};
+
+	register_rest_route( 'gasf/v1', '/crm/photos/upload', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+
+			/*
+			 * The tickbox is a gate, not a field.
+			 *
+			 * Checked here rather than trusted from the form, because the form is
+			 * the one place it cannot be enforced: a request that never went
+			 * through the page would simply omit it. The club cannot publish a
+			 * photograph of somebody without an answer to "may we", and an upload
+			 * with no answer is not a faster route to the same place — it is a
+			 * photo that should not have been taken in.
+			 */
+			if ( '1' !== (string) $req->get_param( 'consent' ) ) {
+				return new WP_Error( 'gasf_crm_consent',
+					'Please tick the permission box — we cannot take photos in without it.',
+					array( 'status' => 400 ) );
+			}
+
+			$files = $req->get_file_params();
+			if ( empty( $files['file'] ) ) {
+				return new WP_Error( 'gasf_crm_nofile', 'No file arrived with that request.', array( 'status' => 400 ) );
+			}
+
+			$card = gasf_crm_photo_upload_one( $files['file'], array(
+				'taken'    => (string) $req->get_param( 'taken' ),
+				'place'    => (string) $req->get_param( 'place' ),
+				'event'    => (string) $req->get_param( 'event' ),
+				'event_id' => (int) $req->get_param( 'event_id' ),
+				'note'     => (string) $req->get_param( 'note' ),
+			) );
+
+			if ( is_wp_error( $card ) ) { return $card; }
+			return array( 'ok' => true, 'photo' => $card );
+		},
+	) );
+} );
