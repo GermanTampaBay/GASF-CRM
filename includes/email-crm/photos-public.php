@@ -210,6 +210,38 @@ function gasf_crm_door_onproperty() {
 	return $out;
 }
 
+/**
+ * A posted place name, resolved to the term's OWN spelling — or ''.
+ *
+ * Term names are stored with entities ("Welton Brewing Co &amp; Oyster Bar")
+ * and browsers decode them on the way through a form, so the same place
+ * arrives as "&" and is stored as "&amp;" — two spellings of one name that
+ * string comparison treats as strangers. The photo card has warned about this
+ * exact term since before the doors existed. Comparison happens decoded;
+ * what travels onward is the term's raw name, which is what every downstream
+ * matcher expects.
+ *
+ * @param string     $posted What the form sent.
+ * @param array|null $rows   Tree rows to search, or null for every place.
+ */
+function gasf_crm_door_place_resolve( $posted, $rows = null ) {
+	$want = html_entity_decode( trim( (string) $posted ), ENT_QUOTES );
+	if ( '' === $want ) { return ''; }
+
+	if ( null === $rows ) {
+		$terms = get_terms( array( 'taxonomy' => 'gasf_photo_place', 'hide_empty' => false ) );
+		$names = is_wp_error( $terms ) ? array() : wp_list_pluck( $terms, 'name' );
+	} else {
+		$names = array();
+		foreach ( $rows as $row ) { $names[] = $row['term']->name; }
+	}
+
+	foreach ( $names as $name ) {
+		if ( 0 === strcasecmp( html_entity_decode( $name, ENT_QUOTES ), $want ) ) { return $name; }
+	}
+	return '';
+}
+
 /* =====================================================================
  * Keeping the commodity bots out
  * ================================================================== */
@@ -441,14 +473,17 @@ function gasf_crm_door_receive( array $door ) {
 	// configured with, because a wrong-but-on-property answer beats trusting a
 	// public form's claim about where a photo was taken.
 	if ( $party ) {
-		$posted  = sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
-		$allowed = array();
-		foreach ( gasf_crm_door_onproperty() as $row ) { $allowed[] = $row['term']->name; }
-		$place = ( '' !== $posted && in_array( $posted, $allowed, true ) )
-			? $posted
-			: (string) ( $door['place'] ?? '' );
+		$place = gasf_crm_door_place_resolve(
+			sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) ),
+			gasf_crm_door_onproperty()
+		);
+		if ( '' === $place ) { $place = (string) ( $door['place'] ?? '' ); }
 	} else {
-		$place = sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
+		// A known place resolves to the term's own spelling; anything else is
+		// the "somewhere else" free text and travels as the guest typed it.
+		$posted = sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
+		$known  = gasf_crm_door_place_resolve( $posted );
+		$place  = '' !== $known ? $known : $posted;
 	}
 	// '__other' is the picker's own sentinel and is never a place name; if it
 	// arrives here the guest chose "somewhere else" and typed nothing.
