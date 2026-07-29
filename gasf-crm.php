@@ -3,7 +3,7 @@
  * Plugin Name:  GASF Email CRM & Photo Catalogue
  * Plugin URI:   https://github.com/GermanTampaBay/GASF-CRM
  * Description:  Shared-inbox CRM for the club's mailboxes, and the photo catalogue that grew out of it — intake, tagging, permissions, library, bulk upload.
- * Version:      2.9.1
+ * Version:      2.9.2
  * Author:       German-American Society of Tampa Bay
  * Text Domain:  gasf
  *

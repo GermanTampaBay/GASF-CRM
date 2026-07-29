@@ -507,6 +507,31 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	$taken   = $own_date ?: trim( (string) ( $in['taken'] ?? '' ) );
 	$caption = trim( (string) ( $in['caption'] ?? '' ) );
 
+	/*
+	 * Both of these belong to the PHOTO, not to whether it published, so they
+	 * are written before the hold branch returns.
+	 *
+	 * They used to sit below it, which meant a photo held for a volunteer got
+	 * neither. The origin record was simply missing. The fingerprint was worse
+	 * and older: without it a held photo can never be recognised as a duplicate
+	 * — not on arrival, and not afterwards either, because publishing re-encodes
+	 * the bytes, so the original fingerprint is gone for good if it was not
+	 * taken here. Every photo sent through the year-round door since it opened
+	 * was outside the duplicate defence.
+	 */
+	if ( ! empty( $src_md5 ) ) { update_post_meta( $id, '_gasf_photo_src_md5', $src_md5 ); }
+
+	// Anonymous uploads carry where the request came from. A volunteer's upload
+	// does not need it: their user id is already on the provenance, and logging
+	// a colleague's IP address every time they add a photo is surveillance
+	// rather than forensics.
+	if ( $anon && function_exists( 'gasf_crm_photo_origin' ) ) {
+		update_post_meta( $id, '_gasf_photo_origin', gasf_crm_photo_origin() + array(
+			'route' => (string) ( $anon['label'] ?? 'public link' ),
+			'by'    => (string) ( $anon['from'] ?? '' ),
+		) );
+	}
+
 	if ( $hold ) {
 		/*
 		 * A held photo is not in the library, and library_save refuses anything
@@ -568,18 +593,6 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			$id, $saved->get_error_message() ) );
 	}
 
-	if ( ! empty( $src_md5 ) ) { update_post_meta( $id, '_gasf_photo_src_md5', $src_md5 ); }
-
-	// Anonymous uploads carry where the request came from. A volunteer's upload
-	// does not need it: their user id is already on the provenance, and logging
-	// a colleague's IP address every time they add a photo is surveillance
-	// rather than forensics.
-	if ( $anon && function_exists( 'gasf_crm_photo_origin' ) ) {
-		update_post_meta( $id, '_gasf_photo_origin', gasf_crm_photo_origin() + array(
-			'route' => (string) ( $anon['label'] ?? 'public link' ),
-			'by'    => (string) ( $anon['from'] ?? '' ),
-		) );
-	}
 
 	gasf_crm_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
 		$id, $name, gasf_crm_display_name( get_current_user_id() ) ) );
