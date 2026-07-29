@@ -185,6 +185,31 @@ function gasf_crm_door_open_token() {
 	return $t;
 }
 
+/**
+ * The on-property places: the club's own branch of the place tree.
+ *
+ * What a party link's picker offers, and what its uploads may claim. A party
+ * happens on the grounds, so the grounds are the whole vocabulary — Welton
+ * included, because it is on the property and somebody at Oktoberfest is
+ * allowed to be eating a lobster roll. A rule over the tree rather than a list
+ * of names, so the next on-property venue is one taxonomy edit, not a deploy.
+ */
+function gasf_crm_door_onproperty() {
+	$home = function_exists( 'gasf_photo_home_place' ) ? gasf_photo_home_place() : 0;
+	if ( ! $home || ! function_exists( 'gasf_photo_place_tree' ) ) { return array(); }
+
+	$branch = array( (int) $home => true );
+	foreach ( (array) get_term_children( $home, 'gasf_photo_place' ) as $c ) {
+		$branch[ (int) $c ] = true;
+	}
+
+	$out = array();
+	foreach ( gasf_photo_place_tree( $home ) as $row ) {
+		if ( isset( $branch[ (int) $row['term']->term_id ] ) ) { $out[] = $row; }
+	}
+	return $out;
+}
+
 /* =====================================================================
  * Keeping the commodity bots out
  * ================================================================== */
@@ -404,9 +429,21 @@ function gasf_crm_door_receive( array $door ) {
 		if ( '' !== $n ) { $people[] = $n; }
 	}
 
-	// A party knows its own event, place and night. The year-round door has to
-	// ask, and takes whatever the guest was willing to say.
-	$place    = $party ? (string) ( $door['place'] ?? '' ) : sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
+	// A party knows its own event and night; the place is now the guest's to
+	// pick, but only from the grounds. Anything outside that vocabulary — a
+	// doctored request, a stale form — falls back to the place the link was
+	// configured with, because a wrong-but-on-property answer beats trusting a
+	// public form's claim about where a photo was taken.
+	if ( $party ) {
+		$posted  = sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
+		$allowed = array();
+		foreach ( gasf_crm_door_onproperty() as $row ) { $allowed[] = $row['term']->name; }
+		$place = ( '' !== $posted && in_array( $posted, $allowed, true ) )
+			? $posted
+			: (string) ( $door['place'] ?? '' );
+	} else {
+		$place = sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
+	}
 	// '__other' is the picker's own sentinel and is never a place name; if it
 	// arrives here the guest chose "somewhere else" and typed nothing.
 	if ( '__other' === $place ) { $place = ''; }
@@ -610,6 +647,30 @@ function gasf_crm_door_page( $door, $notice ) {
 	echo '<div id="pnames"><p class="pwrap"><input type="text" id="pname0" class="pname" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"></p></div>';
 	echo '<p><button type="button" id="paddp">+ Add another person</button></p>';
 	echo '<p class="gasf-door-fine">One name per box. Leave blank if you would rather not say.</p>';
+
+	if ( $party ) {
+		/*
+		 * Where on the grounds. The date and the occasion are the window's to
+		 * answer; the one thing the window cannot know is which corner of the
+		 * property somebody was standing in.
+		 */
+		$rows    = gasf_crm_door_onproperty();
+		$default = (string) ( $door['place'] ?? '' );
+		if ( $rows ) {
+			echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace">';
+			foreach ( $rows as $row ) {
+				printf(
+					'<option value="%s"%s>%s%s%s</option>',
+					esc_attr( $row['term']->name ),
+					selected( $row['term']->name, $default, false ),
+					esc_html( str_repeat( "\xC2\xA0", 4 * min( 2, (int) $row['depth'] ) ) ),
+					esc_html( $row['term']->name ),
+					! empty( $row['haskids'] ) ? esc_html( ' (anywhere)' ) : ''
+				);
+			}
+			echo '</select></p>';
+		}
+	}
 
 	if ( ! $party ) {
 		/*
@@ -1015,6 +1076,9 @@ function gasf_crm_door_script( $party ) {
 			fd.append('consent', document.getElementById('pconsent').checked ? '1' : '0');
 			fd.append('website', val('pwebsite'));
 			fd.append('stamp', val('pstamp'));
+			// The year-round form's place travels in extras; the party's picker
+			// is the only extra it has.
+			if (PARTY && document.getElementById('pplace')) { fd.append('place', val('pplace')); }
 			if (window.gasfDoorPass) {
 				fd.append('pass', window.gasfDoorPass);
 			} else if (typeof gasfTsToken !== 'undefined' && gasfTsToken) {
