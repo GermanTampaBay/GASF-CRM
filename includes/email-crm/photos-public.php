@@ -356,12 +356,26 @@ function gasf_crm_door_page( $door, $notice ) {
 	 * would be this page fighting the site it is trying to look like.
 	 */
 	global $wp_query;
-	$wp_query->is_404 = false;
+
+	/*
+	 * WordPress resolved this URL to nothing, so without help the theme renders
+	 * 404 chrome around a perfectly good page. Clearing is_404 alone is not
+	 * enough: the fallback query is the blog index, which put "blog" on the
+	 * body and had the theme treating this as a post list. Both are cleared, so
+	 * what is left is a plain page with no queried object — which is exactly
+	 * what this is.
+	 */
+	$wp_query->is_404     = false;
+	$wp_query->is_home    = false;
+	$wp_query->is_archive = false;
+	$wp_query->is_feed    = false;
 	status_header( 200 );
 
+	// PHP_INT_MAX because an SEO plugin also filters this, and lost the club's
+	// own page title to "Blog & Club News" the first time this shipped.
 	add_filter( 'pre_get_document_title', function () use ( $title ) {
 		return $title . ' – ' . get_bloginfo( 'name' );
-	} );
+	}, PHP_INT_MAX );
 	// Not indexed: these URLs carry a token, and a search engine holding one
 	// defeats the point of being able to revoke it.
 	add_filter( 'wp_robots', 'wp_robots_no_robots' );
