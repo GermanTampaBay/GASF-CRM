@@ -509,6 +509,22 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .gasf-door-box{border:1px solid rgba(128,128,128,.35);border-radius:4px;padding:14px 16px;margin:18px 0}
 	.gasf-door-entry .gasf-door-box h2{margin-top:0}
 	.gasf-door-entry .gasf-door-fine{font-size:.88em;opacity:.75;margin-top:-.4em}
+	/* Buttons, because the theme has none.
+	   Its only rule for <button> is the normalize "color: inherit", so on this
+	   dark site a button rendered as the browser's light-grey face inheriting
+	   white text — about 1.1:1, which is to say invisible. #0f6e56 is the
+	   site header's own green, measured off the live page rather than picked,
+	   and white on it is 6.2:1. If the club ever restyles, this is the one
+	   value here that has to move with it. */
+	.gasf-door-entry button{background:#0f6e56;color:#fff;border:1px solid #0f6e56;
+		border-radius:3px;padding:10px 18px;font:inherit;line-height:1.4;cursor:pointer}
+	.gasf-door-entry button:hover:not(:disabled){background:#0c5a46;border-color:#0c5a46}
+	.gasf-door-entry button:focus-visible{outline:2px solid #c4eded;outline-offset:2px}
+	.gasf-door-entry button:disabled{background:#3c4a45;border-color:#3c4a45;color:#e8efec;cursor:default}
+	/* Secondary: built from currentColor so it follows the theme's text colour
+	   instead of assuming this one. */
+	.gasf-door-entry #paddp{background:transparent;color:inherit;border:1px solid currentColor;opacity:.85}
+	.gasf-door-entry #paddp:hover{opacity:1;background:rgba(127,127,127,.15)}
 	.gasf-door-entry .gasf-door-pick{width:100%;padding:18px;font-size:1.05em}
 	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
 	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
