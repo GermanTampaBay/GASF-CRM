@@ -478,6 +478,23 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 	font:inherit;font-size:13px;background:var(--gasf-surface);color:var(--gasf-text);resize:vertical}
 .lbedit h3{margin:0 0 10px;font-size:15px}
 .lightbox.editing img{max-height:34vh}
+/* ---- the image editor ---- */
+.imged{margin:0 0 12px}
+.iewrap{position:relative;display:inline-block;max-width:100%;touch-action:none;user-select:none}
+.iewrap img{display:block;max-width:100%;max-height:46vh;filter:none}
+/* The kept region stays bright; the discard is dimmed by one enormous shadow
+   rather than four positioned veils. */
+.cropbox{position:absolute;box-shadow:0 0 0 9999px rgba(0,0,0,.55);border:1px solid #fff;
+	outline:1px dashed rgba(0,0,0,.6);cursor:move}
+.cropbox .ch{position:absolute;width:16px;height:16px;background:#fff;border:1px solid var(--gasf-dark)}
+.cropbox .ch[data-h=nw]{left:-8px;top:-8px;cursor:nwse-resize}
+.cropbox .ch[data-h=ne]{right:-8px;top:-8px;cursor:nesw-resize}
+.cropbox .ch[data-h=sw]{left:-8px;bottom:-8px;cursor:nesw-resize}
+.cropbox .ch[data-h=se]{right:-8px;bottom:-8px;cursor:nwse-resize}
+.ieslide{display:flex;align-items:center;gap:10px;margin:8px 0}
+.ieslide>span{flex:0 0 88px;font:700 10px/1.4 var(--slug);text-transform:uppercase;letter-spacing:.13em;color:var(--gasf-muted)}
+.ieslide input[type=range]{flex:1 1 auto;accent-color:var(--s-accent)}
+.ieslide b{flex:0 0 34px;text-align:right;font:700 12px/1 var(--slug)}
 @media(max-width:640px){.lf input,.lf select,.lf input[type=search]{min-width:0;width:100%}.lf{flex:1 1 100%}}
 
 .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;padding:10px}
@@ -3760,6 +3777,13 @@ function gasf_crm_render_inbox() {
 		// refuses anything not yet in the collection, so offering the button
 		// here would be a dead end.
 		if (p.lib) { bits.push('<button class="btn" id="lbeditbtn" type="button" style="margin-top:8px">Edit details</button>'); }
+		// Crop and light. Photos only — a clip has no still to crop — and the
+		// edited state is said out loud so nobody wonders why a photo looks
+		// different from the print they remember.
+		if (p.lib && p.kind !== 'video') {
+			bits.push('<button class="btn sec" id="lbimgbtn" type="button" style="margin-top:6px">Edit image&hellip;</button>' +
+				(p.edited ? ' <em class="muted">Edited &mdash; the original is kept and can be restored.</em>' : ''));
+		}
 
 		// The library passes the CARD (whose .lopen is the button); the review
 		// screens pass the button itself. Either way, focus has somewhere to
@@ -3775,6 +3799,9 @@ function gasf_crm_render_inbox() {
 		var eb = document.getElementById('lbeditbtn');
 		if (eb) { eb.onclick = function(){ lbEdit(p); }; }
 
+		var ib = document.getElementById('lbimgbtn');
+		if (ib) { ib.onclick = function(){ lbImage(p); }; }
+
 		var cb = document.getElementById('lbconsent');
 		if (cb) { cb.onclick = function(){ lbConsent(p); }; }
 
@@ -3786,6 +3813,148 @@ function gasf_crm_render_inbox() {
 		// longer reachable.
 		var first = box.querySelector('#lbclose');
 		if (first) { first.focus(); }
+	}
+
+	/* ===================== the image editor =====================
+	 *
+	 * Crop, brightness, contrast — and that is the whole tool. The volunteer
+	 * drags a box and two sliders; only the NUMBERS go to the server, which
+	 * renders them onto the kept original. Nothing pixel-shaped is uploaded,
+	 * so a phone is not pushing a canvas export back up its slow link, and
+	 * the applied result cannot differ from what the parameters said.
+	 *
+	 * The slider preview is a CSS filter and approximates what Imagick will
+	 * do — close enough to aim by, not identical. The crop preview is exact.
+	 */
+	function lbImage(p){
+		var box  = document.getElementById('lbox');
+		var edit = document.getElementById('lbedit');
+
+		edit.dataset.photo = p.id;
+		edit.innerHTML = '<h3>Crop &amp; light</h3>' +
+			'<div class="imged"><div class="iewrap">' +
+				'<img id="ieimg" src="' + esc(p.full || p.url) + '" alt="" draggable="false">' +
+				'<div class="cropbox" id="iecrop">' +
+					'<span class="ch" data-h="nw"></span><span class="ch" data-h="ne"></span>' +
+					'<span class="ch" data-h="sw"></span><span class="ch" data-h="se"></span>' +
+				'</div>' +
+			'</div></div>' +
+			'<label class="ieslide"><span>Brightness</span><input type="range" id="iebri" min="-100" max="100" value="0"><b id="iebriv">0</b></label>' +
+			'<label class="ieslide"><span>Contrast</span><input type="range" id="iecon" min="-100" max="100" value="0"><b id="ieconv">0</b></label>' +
+			'<div class="actions" style="margin-top:12px">' +
+				'<button class="btn" id="ieapply" type="button">Apply</button>' +
+				'<button class="btn sec" id="iecancel" type="button">Cancel</button>' +
+				(p.edited ? '<button class="btn warn" id="ierestore" type="button">Restore original</button>' : '') +
+				'<span class="muted" id="iemsg"></span>' +
+			'</div>';
+
+		document.getElementById('lbinfo').hidden = true;
+		edit.hidden = false;
+		box.classList.add('editing');
+
+		var img  = document.getElementById('ieimg');
+		var crop = document.getElementById('iecrop');
+		var st   = { x: 0, y: 0, w: 0, h: 0 };   // css px within the displayed image
+
+		function paint(){
+			crop.style.left   = st.x + 'px';
+			crop.style.top    = st.y + 'px';
+			crop.style.width  = st.w + 'px';
+			crop.style.height = st.h + 'px';
+		}
+		function full(){
+			st = { x: 0, y: 0, w: img.clientWidth, h: img.clientHeight };
+			paint();
+		}
+		// The image may not have dimensions yet; the box takes the full frame
+		// as soon as it does. A resize reflows the stage, so start over rather
+		// than scaling the box — a moved goalpost mid-drag helps nobody.
+		if (img.complete && img.clientWidth) { full(); } else { img.onload = full; }
+		window.addEventListener('resize', full);
+
+		/* One pointer interaction, three meanings: a corner handle resizes,
+		   the box moves, the empty stage draws a fresh box. Pointer events
+		   cover mouse and touch alike, and setPointerCapture keeps a drag
+		   alive when a fast finger leaves the element. */
+		var drag = null;
+		function pt(e){
+			var r = img.getBoundingClientRect();
+			return { x: Math.max(0, Math.min(r.width,  e.clientX - r.left)),
+			         y: Math.max(0, Math.min(r.height, e.clientY - r.top)) };
+		}
+		edit.querySelector('.iewrap').addEventListener('pointerdown', function(e){
+			if (e.button) { return; }
+			var q = pt(e), h = e.target.closest ? e.target.closest('.ch') : null;
+			if (h) {
+				drag = { kind: 'resize',
+				         fx: (h.dataset.h.indexOf('w') > -1) ? st.x + st.w : st.x,
+				         fy: (h.dataset.h.indexOf('n') > -1) ? st.y + st.h : st.y };
+			} else if (e.target === crop || crop.contains(e.target)) {
+				drag = { kind: 'move', dx: q.x - st.x, dy: q.y - st.y };
+			} else {
+				drag = { kind: 'resize', fx: q.x, fy: q.y };
+				st = { x: q.x, y: q.y, w: 0, h: 0 };
+			}
+			if (e.target.setPointerCapture) { e.target.setPointerCapture(e.pointerId); }
+			e.preventDefault();
+		});
+		edit.querySelector('.iewrap').addEventListener('pointermove', function(e){
+			if (!drag) { return; }
+			var q = pt(e);
+			if (drag.kind === 'move') {
+				st.x = Math.max(0, Math.min(img.clientWidth  - st.w, q.x - drag.dx));
+				st.y = Math.max(0, Math.min(img.clientHeight - st.h, q.y - drag.dy));
+			} else {
+				st.x = Math.min(q.x, drag.fx); st.w = Math.abs(q.x - drag.fx);
+				st.y = Math.min(q.y, drag.fy); st.h = Math.abs(q.y - drag.fy);
+			}
+			paint();
+		});
+		edit.querySelector('.iewrap').addEventListener('pointerup', function(){ drag = null; });
+
+		var bri = document.getElementById('iebri'), con = document.getElementById('iecon');
+		function tune(){
+			document.getElementById('iebriv').textContent = bri.value;
+			document.getElementById('ieconv').textContent = con.value;
+			// Approximate preview; the server's Imagick render is the truth.
+			img.style.filter = 'brightness(' + (1 + bri.value / 100) + ') contrast(' + (1 + con.value / 100) + ')';
+		}
+		bri.oninput = tune; con.oninput = tune;
+
+		function done(r){
+			window.removeEventListener('resize', full);
+			// The fresh card carries rv-busted URLs, so the new pixels are what
+			// everything shows from here — including the grid, via reload.
+			loadLib();
+			lbOpen(p.id, null, r.photo);
+		}
+		function fail(e){
+			document.getElementById('iemsg').textContent = e.message;
+		}
+
+		document.getElementById('ieapply').onclick = function(){
+			var W = img.clientWidth, H = img.clientHeight;
+			if (!W || !H) { return; }
+			this.disabled = true;
+			document.getElementById('iemsg').textContent = 'Applying…';
+			api('/photos/edit-image', { method: 'POST', body: JSON.stringify({
+				id: p.id, revision: p.revision,
+				crop: { x: st.x / W, y: st.y / H, w: st.w / W, h: st.h / H },
+				brightness: parseInt(bri.value, 10),
+				contrast:   parseInt(con.value, 10)
+			}) }).then(done).catch(function(e){ document.getElementById('ieapply').disabled = false; fail(e); });
+		};
+		document.getElementById('iecancel').onclick = function(){
+			window.removeEventListener('resize', full);
+			lbOpen(p.id, null, p);
+		};
+		var rst = document.getElementById('ierestore');
+		if (rst) { rst.onclick = function(){
+			if (!confirm('Put the original photo back? The crop and adjustments are discarded.')) { return; }
+			rst.disabled = true;
+			api('/photos/edit-image/restore', { method: 'POST', body: JSON.stringify({ id: p.id, revision: p.revision }) })
+				.then(done).catch(function(e){ rst.disabled = false; fail(e); });
+		}; }
 	}
 
 	/* The editor: the same form used everywhere else, on a light card. Its

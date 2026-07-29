@@ -246,11 +246,26 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 	$meta  = (array) wp_get_attachment_metadata( $id );
 	$src   = get_post_meta( $id, '_gasf_photo_source', true );
 
+	/*
+	 * Cache-busting for edited photos. The filenames do not change when an
+	 * edit is applied — the whole design keeps them stable — so every browser
+	 * that has ever shown the photo holds a cached uncropped copy under the
+	 * exact URL we are about to hand out again. The revision number rides
+	 * along as a query so an edit is visible the moment it lands, and a
+	 * never-edited photo keeps its clean URL.
+	 */
+	$rev    = (int) get_post_meta( $id, '_gasf_photo_rev', true );
+	$edited = (bool) get_post_meta( $id, '_gasf_photo_edit', true );
+	$bust   = function ( $u ) use ( $rev, $edited ) {
+		if ( ! $u || ! $edited ) { return $u; }
+		return $u . ( false === strpos( $u, '?' ) ? '?' : '&' ) . 'rv=' . $rev;
+	};
+
 	return array(
 		'id'      => $id,
-		'thumb'   => wp_get_attachment_image_url( $id, 'medium' ),
-		'full'    => wp_get_attachment_image_url( $id, 'large' ),
-		'url'     => wp_get_attachment_url( $id ),
+		'thumb'   => $bust( wp_get_attachment_image_url( $id, 'medium' ) ),
+		'full'    => $bust( wp_get_attachment_image_url( $id, 'large' ) ),
+		'url'     => $bust( wp_get_attachment_url( $id ) ),
 		'dlname'  => function_exists( 'gasf_photo_filename' ) ? gasf_photo_filename( $id ) : '',
 		// Decoded, not the stored form — the client escapes it once more. See
 		// gasf_crm_photo_display_title().
@@ -261,6 +276,9 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		// A clip has no thumbnail and no sizes, so the grid and the viewer both
 		// need to know before they try to put it in an <img>.
 		'kind'    => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
+		// Whether a sidecar original exists — it is what makes "Restore
+		// original" offerable honestly rather than as a button that might work.
+		'edited'  => (bool) get_post_meta( $id, '_gasf_photo_edit', true ),
 		'people'  => (array) ( $info['people'] ?? array() ),
 		'places'  => (array) ( $info['places'] ?? array() ),
 		'events'  => (array) ( $info['events'] ?? array() ),
