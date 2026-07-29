@@ -312,7 +312,31 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * The email intake already solved this and says so in a comment above its
 	 * own $claim hook. This is the same fix for the same reason.
 	 */
-	$provenance = array(
+	/*
+	 * Who is uploading, and does anybody have to say yes?
+	 *
+	 * A volunteer uploading through the CRM is vouching for the photo by the act
+	 * of uploading it: confirmed, published, in the library. A guest coming
+	 * through a public door is not vouching for anything, and what happens next
+	 * depends on which door they used — see photos-public.php. Inside a party
+	 * window the club has decided in advance to trust the room, so a guest's
+	 * photo is treated exactly like a volunteer's. Every other day it waits.
+	 */
+	$anon = isset( $in['anon'] ) && is_array( $in['anon'] ) ? $in['anon'] : null;
+	$hold = ! empty( $in['hold'] );
+
+	$provenance = $anon ? array(
+		'thread'      => 0,
+		'stream'      => 'photos',
+		'email'       => '',
+		'name'        => '' !== (string) ( $anon['from'] ?? '' ) ? (string) $anon['from'] : 'A guest',
+		'subject'     => sprintf( 'Sent through %s', (string) ( $anon['label'] ?? 'the club photo link' ) ),
+		'approved_by' => 0,
+		'approved_at' => $hold ? '' : current_time( 'mysql', true ),
+		'upload'      => true,
+		'door'        => (string) ( $anon['token'] ?? '' ),
+		'guest_ip'    => (string) ( $anon['ip'] ?? '' ),
+	) : array(
 		'thread'      => 0,
 		'stream'      => 'photos',
 		'email'       => '',
@@ -322,11 +346,21 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		'approved_at' => current_time( 'mysql', true ),
 		'upload'      => true,
 	);
-	$stamp = function ( $new_id ) use ( $provenance ) {
+
+	$stamp = function ( $new_id ) use ( $provenance, $hold ) {
+		// Provenance always, and early: the sweep removes private photos that
+		// carry neither a queue claim nor provenance, and a held photo lives in
+		// the review folder for as long as it takes a volunteer to look.
 		update_post_meta( $new_id, '_gasf_photo_source', $provenance );
-		// A volunteer has vouched for it, which is what confirmed means — and it
-		// is what puts the photo in the library before it has a single tag.
-		update_post_meta( $new_id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
+
+		// Confirmed means somebody has vouched for it — and it is what puts the
+		// photo in the library before it has a single tag. A held photo has
+		// nobody vouching for it yet, which is the entire point of holding it:
+		// without this stamp it appears in the volunteer review queue instead
+		// of the library.
+		if ( ! $hold ) {
+			update_post_meta( $new_id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
+		}
 	};
 
 	add_filter( 'upload_dir', $to_review, 99 );
@@ -353,18 +387,49 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	// Permission, recorded the same way and against the same wording as a
 	// volunteer recording it by hand. Before publish, so a photo is never
 	// readable without its permission already on the record.
-	$rec = gasf_crm_photo_consent_record( $id, 'grant', (string) ( $in['note'] ?? '' ) );
-	if ( is_wp_error( $rec ) ) {
-		wp_delete_attachment( $id, true );
-		return $rec;
+	if ( $anon ) {
+		/*
+		 * A guest's permission, written directly rather than through
+		 * consent_record, for two reasons. That function asks whether the
+		 * CURRENT USER may record permission, and a guest is not a user. And it
+		 * would sign the record with the logged-in volunteer's name, which here
+		 * would be a lie: nobody from the club was present. What actually
+		 * happened is that a person standing in the Biergarten read the wording
+		 * and ticked a box, so that is what goes on the record — with the time,
+		 * the door they came through and their IP, because "somebody said yes"
+		 * with nothing to check is not a record.
+		 */
+		update_post_meta( $id, '_gasf_photo_consent', array(
+			'granted'          => true,
+			'at'               => current_time( 'mysql', true ),
+			'note'             => (string) ( $in['note'] ?? '' ),
+			'recorded_by'      => 0,
+			'recorded_by_name' => '' !== (string) ( $anon['from'] ?? '' )
+				? (string) $anon['from'] . ' (guest)'
+				: 'A guest, in person',
+			'guest_ip'         => (string) ( $anon['ip'] ?? '' ),
+			'door'             => (string) ( $anon['label'] ?? '' ),
+			'version'          => GASF_CRM_PHOTO_CONSENT_VERSION,
+			// The wording they actually saw and agreed to, kept verbatim, so the
+			// scope of the permission survives any later edit of that text.
+			'text'             => gasf_crm_photo_consent_text(),
+		) );
+	} else {
+		$rec = gasf_crm_photo_consent_record( $id, 'grant', (string) ( $in['note'] ?? '' ) );
+		if ( is_wp_error( $rec ) ) {
+			wp_delete_attachment( $id, true );
+			return $rec;
+		}
 	}
 
 	// Scrub every size, verify, move out of the review folder, hand over the
 	// file mode, flip to inherit. All of it already lives in publish.
-	$pub = gasf_crm_photo_publish( $id );
-	if ( is_wp_error( $pub ) ) {
-		wp_delete_attachment( $id, true );
-		return $pub;
+	if ( ! $hold ) {
+		$pub = gasf_crm_photo_publish( $id );
+		if ( is_wp_error( $pub ) ) {
+			wp_delete_attachment( $id, true );
+			return $pub;
+		}
 	}
 
 	/*
@@ -396,7 +461,10 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * core is entitled to reinterpret.
 	 */
 	$path = get_attached_file( $id );
-	if ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) {
+	// A held photo is SUPPOSED to still be private, sitting unscrubbed in the
+	// review folder exactly like an emailed one. The only question worth asking
+	// of it is whether the file is really there.
+	if ( $hold ? ( ! $path || ! is_file( $path ) ) : ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) ) {
 		gasf_crm_log( sprintf( 'CRM upload: media #%d did not publish cleanly (still private=%s, file=%s) — removed',
 			$id, gasf_crm_photo_is_private( $id ) ? 'yes' : 'no', $path ?: 'none' ) );
 		wp_delete_attachment( $id, true );
@@ -421,13 +489,61 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	$place = trim( (string) ( $in['place'] ?? '' ) );
 	if ( '' === $place && $own_place && ! is_wp_error( $own_place ) ) { $place = $own_place->name; }
 
+	$people = array_values( array_filter( array_map(
+		'strval', (array) ( $in['people'] ?? array() )
+	) ) );
+	$event   = trim( (string) ( $in['event'] ?? '' ) );
+	$taken   = $own_date ?: trim( (string) ( $in['taken'] ?? '' ) );
+	$caption = trim( (string) ( $in['caption'] ?? '' ) );
+
+	if ( $hold ) {
+		/*
+		 * A held photo is not in the library, and library_save refuses anything
+		 * that is not — correctly, since that function is the library's own
+		 * write path. So the guest's answers are written straight onto the
+		 * photo, and the volunteer reviewing it sees a photo that already knows
+		 * what it is instead of a blank one plus a note to read.
+		 *
+		 * People are created as terms if they are new, which is what happens
+		 * anywhere else somebody types a name. The place is applied only if it
+		 * already exists: the guest picked from a list, and a typo inventing a
+		 * new room in the taxonomy is a worse outcome than a blank field. The
+		 * occasion stays free text for a volunteer to match against the
+		 * calendar, because a guest saying "Oktoberfest" cannot know which one.
+		 */
+		if ( $people ) { wp_set_object_terms( $id, $people, 'gasf_photo_person', false ); }
+		if ( '' !== $place ) {
+			$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
+			if ( $pt && ! is_wp_error( $pt ) ) {
+				wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
+			}
+		}
+		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
+		update_post_meta( $id, '_gasf_photo_guest', array(
+			'event'   => $event,
+			'caption' => $caption,
+			'from'    => (string) ( $anon['from'] ?? '' ),
+			'place'   => $place,
+			'people'  => $people,
+			'at'      => current_time( 'mysql', true ),
+		) );
+		if ( '' !== $caption ) {
+			wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
+		}
+
+		gasf_crm_log( sprintf( 'CRM upload: media #%d held for a volunteer (%s)', $id,
+			'' !== $event ? 'said to be ' . $event : 'no occasion given' ) );
+
+		return array( 'id' => $id, 'held' => true, 'name' => $name );
+	}
+
 	$saved = gasf_crm_photo_library_save( $id, array(
-		'people'   => array(),                                   // the whole point: tagged afterwards
+		'people'   => $people,
 		'place'    => $place,
-		'event'    => trim( (string) ( $in['event'] ?? '' ) ),
+		'event'    => $event,
 		'event_id' => (int) ( $in['event_id'] ?? 0 ),
-		'taken'    => $own_date ?: trim( (string) ( $in['taken'] ?? '' ) ),
-		'caption'  => '',
+		'taken'    => $taken,
+		'caption'  => $caption,
 	) );
 	// A tagging failure here is recoverable by editing the photo, and the photo
 	// itself is already safe — scrubbed, consented, in the library. Losing it

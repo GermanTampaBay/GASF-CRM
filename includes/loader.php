@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.16.0' );
+	define( 'GASF_CRM_SCHEMA', '1.17.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -84,6 +84,9 @@ if ( true ) {
 	require_once GASF_CRM_DIR . '/photos-edit.php';
 	// After photos-library.php: the backup walks the library and reads cards.
 	require_once GASF_CRM_DIR . '/photos-backup.php';
+	// After photos-upload.php: the public doors hand guests' photos to
+	// gasf_crm_photo_upload_one() rather than importing anything themselves.
+	require_once GASF_CRM_DIR . '/photos-public.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
 
