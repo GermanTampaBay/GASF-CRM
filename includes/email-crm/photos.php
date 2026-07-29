@@ -160,7 +160,7 @@ function gasf_crm_photo_consent_text() {
  * identifies a person and none of it is meant to: it is the thread a club
  * official or the police can pull on when a photo has to be answered for, and
  * it is worth exactly as much as the ISP is willing to say. A user agent can be
- * forged and an IP can be a coffee shop @@D@@ this is a starting point for an
+ * forged and an IP can be a coffee shop — this is a starting point for an
  * investigation, not evidence of who did it, and treating it as the latter
  * would be the real mistake.
  *
@@ -193,7 +193,7 @@ function gasf_crm_photo_origin_line( array $o ) {
 /**
  * What NOT ticking the box means.
  *
- * The tick is pre-set, and somebody clearing it has not refused @@D@@ they have
+ * The tick is pre-set, and somebody clearing it has not refused — they have
  * chosen the narrower of two grants. The club may still show the photo on its
  * own walls and screens and keep it in the archive; it may not put it on the
  * website, on social media, or in the newsletter. Stored verbatim against the
@@ -4068,6 +4068,27 @@ function gasf_crm_photo_card( $attachment_id ) {
 	$st      = gasf_crm_photo_state( $id );
 	$info    = function_exists( 'gasf_photo_info' ) ? gasf_photo_info( $id ) : array();
 	$pending = get_post_meta( $id, '_gasf_photo_pending', true );
+
+	/*
+	 * A door photo's answers live in _gasf_photo_guest, not in pending_json —
+	 * there is no submission row to hang a pending record on. The review form
+	 * initialises from 'pending', so without this translation a guest typing
+	 * "Super Bowl" into the occasion box wrote it into a record this screen
+	 * never read, and the volunteer stared at an empty field the submitter had
+	 * in fact filled in. Same shape, same fallback, no new client code.
+	 */
+	if ( ! is_array( $pending ) ) {
+		$g = get_post_meta( $id, '_gasf_photo_guest', true );
+		if ( is_array( $g ) ) {
+			$pending = array(
+				'people'   => array_map( 'strval', (array) ( $g['people'] ?? array() ) ),
+				'caption'  => (string) ( $g['caption'] ?? '' ),
+				'place'    => (string) ( $g['place'] ?? '' ),
+				'event'    => (string) ( $g['event'] ?? '' ),
+				'event_id' => (int) ( $g['event_id'] ?? 0 ),
+			);
+		}
+	}
 
 	// An attachment row whose file is gone. WordPress renders that as a broken
 	// image and says nothing, which is the worst of both — it looks like the

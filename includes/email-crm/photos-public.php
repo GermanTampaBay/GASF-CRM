@@ -613,28 +613,34 @@ function gasf_crm_door_page( $door, $notice ) {
 
 	if ( ! $party ) {
 		/*
-		 * The club itself goes first, alphabetical order after it. Most photos
-		 * sent through this link were taken at the club, and making the common
-		 * answer the first one you see is worth more than a tidy A-to-Z that
-		 * puts the Biergarten above the building containing it.
+		 * The same hierarchical list the tagging page shows — the club's branch
+		 * first, rooms indented under the building that contains them — built by
+		 * the same helper, so the two public forms cannot drift apart.
+		 *
+		 * No "not sure" option, deliberately. It was the path of least
+		 * resistance sitting above every real answer, and each shrug it
+		 * collected was a photo a volunteer had to place instead. The club
+		 * itself is the default: the overwhelmingly likely answer, and wrong in
+		 * a way that is cheap to correct.
 		 */
-		$places = get_terms( array( 'taxonomy' => 'gasf_photo_place', 'hide_empty' => false, 'orderby' => 'name' ) );
-		$club   = array();
-		$rest   = array();
-		foreach ( is_wp_error( $places ) ? array() : $places as $t ) {
-			if ( 0 === strcasecmp( $t->name, 'German-American Society' ) ) {
-				$club[] = $t;
-			} else {
-				$rest[] = $t;
-			}
+		$rows = array();
+		if ( function_exists( 'gasf_photo_place_tree_public' ) ) {
+			$home = function_exists( 'gasf_photo_home_place' ) ? gasf_photo_home_place() : 0;
+			$rows = gasf_photo_place_tree_public( $home ? array( $home ) : array(), $home );
 		}
 
-		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace"><option value="">&mdash; not sure &mdash;</option>';
-		foreach ( array_merge( $club, $rest ) as $t ) {
-			printf( '<option value="%s">%s</option>', esc_attr( $t->name ), esc_html( $t->name ) );
+		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace">';
+		foreach ( $rows as $row ) {
+			printf(
+				'<option value="%s">%s%s%s</option>',
+				esc_attr( $row['term']->name ),
+				esc_html( str_repeat( "\xC2\xA0", 4 * min( 2, (int) $row['depth'] ) ) ),
+				esc_html( $row['term']->name ),
+				! empty( $row['haskids'] ) ? esc_html( ' (anywhere)' ) : ''
+			);
 		}
 		// Somewhere the club has no term for yet. Typed answers are NOT turned
-		// into places on the spot @@D@@ a guest guessing at a room name would
+		// into places on the spot — a guest guessing at a room name would
 		// quietly grow the taxonomy a typo at a time. It travels as a note for
 		// whoever reviews the photo, who can make it a real place or correct it.
 		echo '<option value="__other">&mdash; somewhere else &mdash;</option>';
@@ -941,7 +947,9 @@ function gasf_crm_door_script( $party ) {
 				['pevent', 'ptaken', 'pcaption', 'peventid', 'pplaceother'].forEach(function(id){
 					var e = document.getElementById(id); if (e) { e.value = ''; }
 				});
-				var pl = document.getElementById('pplace'); if (pl) { pl.value = ''; }
+				// Back to the first option — the club — not to a blank: the
+				// select no longer has an empty choice to fall into.
+				var pl = document.getElementById('pplace'); if (pl) { pl.selectedIndex = 0; }
 				var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
 				var names = document.getElementById('pnames');
 				if (names) {
