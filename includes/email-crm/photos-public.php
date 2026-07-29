@@ -374,6 +374,14 @@ function gasf_crm_door_receive( array $door ) {
 	 */
 	$full_consent = '1' === (string) ( $_POST['consent'] ?? '' );
 
+	/*
+	 * Which posture, decided BEFORE the bot gate that depends on it. This
+	 * assignment used to sit further down, so the gate below read an undefined
+	 * variable, treated every door as year-round, and speed-floored the party
+	 * guests it exists to leave alone.
+	 */
+	$party = gasf_crm_door_is_party( $door );
+
 	if ( ! $party ) {
 		// The honeypot: a field labelled like a website box, hidden from every
 		// sighted, styled browser. Humans cannot see it; the form-filler kits
@@ -420,8 +428,6 @@ function gasf_crm_door_receive( array $door ) {
 	if ( empty( $_FILES['file'] ) ) {
 		return $fail( 'No photo arrived.' );
 	}
-
-	$party = gasf_crm_door_is_party( $door );
 
 	$people = array();
 	foreach ( (array) ( $_POST['people'] ?? array() ) as $n ) {
