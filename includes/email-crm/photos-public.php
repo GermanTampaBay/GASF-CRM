@@ -390,8 +390,19 @@ function gasf_crm_door_page( $door, $notice ) {
 	<div class="hgrid main-content-grid">
 		<main id="content" class="content hgrid-span-12">
 			<div id="content-wrap" class="content-wrap">
+
+				<div id="loop-meta" class=" loop-meta-wrap pageheader-bg-stretch loop-meta-withtext">
+					<div class="hgrid">
+						<div class=" loop-meta hgrid-span-12" itemscope="itemscope" itemtype="https://schema.org/WebPageElement">
+							<div class="entry-header">
+								<h1 class=" loop-title entry-title" itemprop="headline"><?php
+									echo esc_html( $party ? 'Photos from ' . $title : $title ); ?></h1>
+							</div>
+						</div>
+					</div>
+				</div>
+
 				<article class="entry gasf-door-entry">
-					<h1 class="entry-title"><?php echo esc_html( $party ? 'Photos from ' . $title : $title ); ?></h1>
 					<div class="entry-content">
 	<?php
 
