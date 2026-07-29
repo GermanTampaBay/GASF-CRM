@@ -284,7 +284,24 @@ function gasf_crm_door_receive( array $door ) {
 	// arrives here the guest chose "somewhere else" and typed nothing.
 	if ( '__other' === $place ) { $place = ''; }
 	$event    = $party ? (string) ( $door['event'] ?? '' ) : sanitize_text_field( wp_unslash( (string) ( $_POST['event'] ?? '' ) ) );
-	$event_id = $party ? (int) ( $door['event_id'] ?? 0 ) : 0;
+	$event_id = $party ? (int) ( $door['event_id'] ?? 0 ) : (int) ( $_POST['event_id'] ?? 0 );
+
+	/*
+	 * An event id from a guest is a claim, not a fact. Trust it only if it
+	 * names a real published event of the club's own type whose title is what
+	 * they submitted — otherwise a hand-edited form could pin somebody's photo
+	 * to an event it was never at. This mirrors the check the tagging page
+	 * already makes for the same reason.
+	 */
+	if ( $event_id && ! $party ) {
+		$ev_post = get_post( $event_id );
+		if ( ! $ev_post
+			|| ! defined( 'GASF_EVENTS_CPT' ) || GASF_EVENTS_CPT !== $ev_post->post_type
+			|| 'publish' !== $ev_post->post_status
+			|| 0 !== strcasecmp( trim( $ev_post->post_title ), trim( $event ) ) ) {
+			$event_id = 0;
+		}
+	}
 	$taken    = $party ? '' : sanitize_text_field( wp_unslash( (string) ( $_POST['taken'] ?? '' ) ) );
 	$caption  = $party ? '' : trim( sanitize_textarea_field( wp_unslash( (string) ( $_POST['caption'] ?? '' ) ) ) );
 	$from     = trim( sanitize_text_field( wp_unslash( (string) ( $_POST['from'] ?? '' ) ) ) );
@@ -493,12 +510,55 @@ function gasf_crm_door_page( $door, $notice ) {
 		echo '<p id="pplaceotherwrap" hidden><label for="pplaceother">Where?</label><br>';
 		echo '<input type="text" id="pplaceother" maxlength="80" placeholder="A park, a hall, somebody&rsquo;s garden&hellip;" autocomplete="off"></p>';
 
-		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
-		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
-		echo '<p class="gasf-door-fine">A name is plenty &mdash; a volunteer will match it to the club calendar.</p>';
-
+		/*
+		 * Date first, then the occasion, because the date is the cheap answer
+		 * that makes the expensive one free: pick a day and the club's own
+		 * events on it are offered, so nobody has to spell Schuhplattlerfest.
+		 */
 		echo '<p><label for="ptaken"><strong>When was it taken?</strong></label><br><input type="date" id="ptaken"></p>';
 		echo '<p class="gasf-door-fine">Leave this alone if the photo knows its own date &mdash; most phone photos do.</p>';
+
+		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
+		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
+		echo '<div id="pevlist" class="gasf-door-evlist"></div>';
+		echo '<input type="hidden" id="peventid" value="">';
+		echo '<p class="gasf-door-fine">A name is plenty &mdash; a volunteer will match it to the club calendar.</p>';
+
+		/*
+		 * The calendar travels with the page rather than behind an endpoint.
+		 *
+		 * This is the tagging page's trick and it is the right one twice over:
+		 * the club's calendar is already public on the website, so shipping it
+		 * exposes nothing, and an unauthenticated page that takes no queries
+		 * cannot be made to answer them. Filtering then happens in the browser,
+		 * which is also why it is instant on a phone with two bars.
+		 */
+		$ev_list = array();
+		if ( function_exists( 'gasf_photo_has_calendar' ) && gasf_photo_has_calendar() && defined( 'GASF_EVENTS_CPT' ) ) {
+			global $wpdb;
+			$rows = $wpdb->get_results( $wpdb->prepare(
+				"SELECT p.ID, p.post_title, CAST(m.meta_value AS UNSIGNED) ts
+				   FROM {$wpdb->posts} p
+				   JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_gasf_start_ts'
+				  WHERE p.post_type = %s AND p.post_status = 'publish'
+				  ORDER BY ts DESC LIMIT 1200",
+				GASF_EVENTS_CPT
+			), ARRAY_A );
+
+			$seen = array();
+			foreach ( (array) $rows as $r ) {
+				$key = strtolower( $r['post_title'] ) . '|' . (int) $r['ts'];
+				if ( isset( $seen[ $key ] ) ) { continue; }
+				$seen[ $key ] = true;
+				$ev_list[] = array(
+					'id'    => (int) $r['ID'],
+					'title' => (string) $r['post_title'],
+					'date'  => wp_date( 'Y-m-d', (int) $r['ts'] ),
+					'when'  => wp_date( 'j M Y', (int) $r['ts'] ),
+				);
+			}
+		}
+		printf( '<script>var GASF_DOOR_EVENTS=%s;</script>', wp_json_encode( $ev_list ) );
 
 		echo '<p><label for="pcaption"><strong>Anything you want to tell us?</strong></label><br>';
 		echo '<textarea id="pcaption" rows="3" maxlength="600" placeholder="Who, what, why it matters &mdash; anything at all."></textarea></p>';
@@ -566,6 +626,11 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
 	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
 	.gasf-door-entry .pwrap{margin:0 0 6px}
+	.gasf-door-entry .gasf-door-evlist{display:flex;flex-direction:column;gap:6px;margin:8px 0;max-width:420px}
+	.gasf-door-entry .gasf-door-evlist button{text-align:left;padding:9px 12px}
+	.gasf-door-entry .gasf-door-evlist button em{opacity:.8;font-style:normal}
+	.gasf-door-entry .gasf-door-evlist button[aria-pressed="true"]{outline:2px solid #c4eded;outline-offset:1px}
+	.gasf-door-entry .gasf-door-evnone{opacity:.75;font-size:.88em;margin:6px 0}
 	.gasf-door-entry .gasf-door-send{text-align:center;margin-top:20px}
 	.gasf-door-entry .gasf-door-send button{min-width:220px}
 	.gasf-door-entry .gasf-door-msg{text-align:center;min-height:1.4em}
@@ -622,6 +687,15 @@ function gasf_crm_door_script( $party ) {
 
 	function val(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 
+	// Event titles are club-authored, but they land in innerHTML below and an
+	// apostrophe in "Mother's Day Brunch" would break the markup regardless of
+	// who wrote it.
+	function esc(t){
+		return String(t).replace(/[&<>"']/g, function(c){
+			return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+		});
+	}
+
 	// "Somewhere else" reveals a box; anything else hides it, so a stale typed
 	// answer cannot be sent alongside a chosen one.
 	var placeSel = document.getElementById('pplace');
@@ -638,6 +712,61 @@ function gasf_crm_door_script( $party ) {
 		return val('pplace') === '__other' ? val('pplaceother').trim() : val('pplace');
 	}
 
+	/* -------- the club's calendar, offered rather than typed --------
+	   Most of these photos are of something the club put on, so a bare text box
+	   collects "oktoberfest", "Oktoberfest 2026" and "OKTOBER FEST" as three
+	   answers to one question. Typing still works and is kept as-is; this only
+	   makes the right answer easier than the wrong one. */
+	var EV = (typeof GASF_DOOR_EVENTS !== 'undefined') ? GASF_DOOR_EVENTS : [];
+	var evBox = document.getElementById('pevlist');
+	var evIn  = document.getElementById('pevent');
+	var evId  = document.getElementById('peventid');
+	var dateIn = document.getElementById('ptaken');
+
+	function evPaint(){
+		if (!evBox) { return; }
+		var q = evIn.value.trim().toLowerCase();
+		var d = dateIn ? dateIn.value : '';
+		var list, note = '';
+
+		if (q.length >= 2) {
+			list = EV.filter(function(e){ return e.title.toLowerCase().indexOf(q) !== -1; }).slice(0, 8);
+		} else if (d) {
+			list = EV.filter(function(e){ return e.date === d; });
+			// Say so rather than showing an empty box. The club's calendar does
+			// not reach back forever, and "nothing on that day" is a different
+			// fact from "this is still loading".
+			if (!list.length) { note = 'Nothing on the club calendar for that day — just type it below if you know what it was.'; }
+		} else {
+			list = [];
+		}
+
+		evBox.innerHTML = list.map(function(e){
+			return '<button type="button" data-id="' + e.id + '" data-title="' + esc(e.title) + '" aria-pressed="' +
+				(evIn.value === e.title ? 'true' : 'false') + '">' + esc(e.title) + ' <em>' + esc(e.when) + '</em></button>';
+		}).join('') + (note ? '<p class="gasf-door-evnone">' + esc(note) + '</p>' : '');
+	}
+
+	if (evBox) {
+		evBox.addEventListener('click', function(ev){
+			var b = ev.target.closest('button[data-id]');
+			if (!b) { return; }
+			evIn.value = b.dataset.title;
+			evId.value = b.dataset.id;
+			evPaint();
+		});
+	}
+	if (evIn) {
+		var evT = null;
+		evIn.oninput = function(){
+			// Typed text no longer means the event that was clicked.
+			evId.value = '';
+			clearTimeout(evT);
+			evT = setTimeout(evPaint, 150);
+		};
+	}
+	if (dateIn) { dateIn.onchange = function(){ evPaint(); }; }
+
 	send.onclick = function(){
 		busy = true; paint();
 
@@ -647,7 +776,7 @@ function gasf_crm_door_script( $party ) {
 			return i.value.trim();
 		}).filter(Boolean);
 		var extra = PARTY ? null : {
-			place: placeAnswer(), event: val('pevent'),
+			place: placeAnswer(), event: val('pevent'), event_id: val('peventid'),
 			taken: val('ptaken'), caption: val('pcaption'), from: val('pfrom')
 		};
 

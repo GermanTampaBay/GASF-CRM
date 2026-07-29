@@ -531,7 +531,11 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		}
 		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
 		update_post_meta( $id, '_gasf_photo_guest', array(
-			'event'   => $event,
+			'event'    => $event,
+			// Which calendar entry they picked, if they picked one. The volunteer
+			// approving it then links the photo to the event instead of matching
+			// a name by eye.
+			'event_id' => (int) ( $in['event_id'] ?? 0 ),
 			'caption' => $caption,
 			'from'    => (string) ( $anon['from'] ?? '' ),
 			'place'   => $place,
