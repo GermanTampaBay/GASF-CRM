@@ -677,3 +677,108 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 } );
+
+/* =====================================================================
+ * Approving what came through a door
+ * ================================================================== */
+
+/*
+ * Everything that approves a photo in this codebase takes an email THREAD:
+ * keep(), approve(), the whole review workflow assumes the photo arrived
+ * attached to a message from somebody the club can write back to. A photo that
+ * came through a public link has no thread and never will, so without this it
+ * would wait for an approval nobody could give — the year-round door would be a
+ * hole with a nice form on it.
+ *
+ * So: the same two decisions, against an attachment id.
+ */
+add_action( 'rest_api_init', function () {
+
+	$guard = function () {
+		return gasf_crm_user_can_stream( 'photos' )
+			? true
+			: new WP_Error( 'gasf_crm_403', 'You do not have access to photo submissions.', array( 'status' => 403 ) );
+	};
+
+	register_rest_route( 'gasf/v1', '/crm/photos/held', array(
+		'methods'             => 'GET',
+		'permission_callback' => $guard,
+		'callback'            => function () {
+			$ids = get_posts( array(
+				'post_type'      => 'attachment',
+				'post_status'    => array( 'inherit', 'private' ),
+				'posts_per_page' => 60,
+				'fields'         => 'ids',
+				'no_found_rows'  => true,
+				'orderby'        => 'ID',
+				'order'          => 'DESC',
+				'meta_query'     => array(
+					'relation' => 'AND',
+					array( 'key' => '_gasf_photo_source', 'compare' => 'EXISTS' ),
+					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'NOT EXISTS' ),
+					array( 'key' => '_gasf_photo_guest', 'compare' => 'EXISTS' ),
+				),
+			) );
+
+			$out = array();
+			foreach ( $ids as $id ) {
+				$g   = (array) get_post_meta( $id, '_gasf_photo_guest', true );
+				$src = (array) get_post_meta( $id, '_gasf_photo_source', true );
+				$out[] = array(
+					'id'      => (int) $id,
+					'url'     => gasf_crm_photo_img_url( $id, 'medium' ),
+					'from'    => (string) ( $g['from'] ?? '' ),
+					'door'    => (string) ( $src['subject'] ?? '' ),
+					'event'   => (string) ( $g['event'] ?? '' ),
+					'caption' => (string) ( $g['caption'] ?? '' ),
+					'people'  => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
+					'place'   => implode( ', ', gasf_crm_photo_term_names( $id, 'gasf_photo_place' ) ),
+					'at'      => (string) ( $g['at'] ?? '' ),
+				);
+			}
+			return array( 'held' => $out );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/held/decide', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$in = (array) $req->get_json_params();
+			$id = (int) ( $in['id'] ?? 0 );
+			$ok = ! empty( $in['approve'] );
+
+			if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
+			if ( ! gasf_crm_photo_awaits_review( $id ) ) {
+				return new WP_Error( 'gasf_crm_done', 'Somebody has already dealt with that one.', array( 'status' => 409 ) );
+			}
+
+			$who = gasf_crm_display_name( get_current_user_id() );
+
+			if ( ! $ok ) {
+				gasf_crm_log( sprintf( 'CRM held: media #%d rejected by %s — deleted', $id, $who ) );
+				wp_delete_attachment( $id, true );
+				return array( 'ok' => true, 'deleted' => true );
+			}
+
+			// Publish does the real work: scrub every size, verify, move out of
+			// the review folder. Confirmed goes on AFTERWARDS, so a photo that
+			// fails to scrub is never marked approved.
+			$pub = gasf_crm_photo_publish( $id );
+			if ( is_wp_error( $pub ) ) { return $pub; }
+
+			update_post_meta( $id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
+
+			$src = (array) get_post_meta( $id, '_gasf_photo_source', true );
+			$src['approved_by'] = get_current_user_id();
+			$src['approved_at'] = current_time( 'mysql', true );
+			update_post_meta( $id, '_gasf_photo_source', $src );
+
+			gasf_crm_log( sprintf( 'CRM held: media #%d approved by %s', $id, $who ) );
+
+			return array( 'ok' => true, 'id' => $id );
+		},
+	) );
+} );

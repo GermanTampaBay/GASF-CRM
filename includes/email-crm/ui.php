@@ -1215,6 +1215,19 @@ function gasf_crm_render_inbox() {
 	 * the year-round link waits for somebody to say yes, a party link does not.
 	 */
 	?>
+	<?php
+	/*
+	 * Photos sent through the year-round link, waiting on somebody. Kept above
+	 * the links panel because a queue nobody sees is the same as no queue, and
+	 * this is the half of the public doors that costs a volunteer anything.
+	 */
+	?>
+	<div class="card pad" id="lheld" hidden>
+		<h3 style="margin:0 0 4px">Sent in by guests</h3>
+		<p class="muted" style="margin:0 0 10px">Photos sent through the club's photo link. Nothing here is visible anywhere until you keep it.</p>
+		<div id="lheldlist"></div>
+	</div>
+
 	<div class="card pad" id="ldoors">
 		<h3 style="margin:0 0 4px">Photo links</h3>
 		<p class="muted" style="margin:0 0 10px">Links anybody can use to send the club photos — put one behind a QR code on a table or a poster.</p>
@@ -3453,6 +3466,61 @@ function gasf_crm_render_inbox() {
 			lrefilter();
 		};
 	}
+
+	/* ===================== guest photos awaiting a volunteer ===================== */
+	(function(){
+		var box = document.getElementById('lheld');
+		if (!box) { return; }
+		var list = document.getElementById('lheldlist');
+
+		function draw(held){
+			document.getElementById('lheld').hidden = !held.length;
+			list.innerHTML = held.map(function(h){
+				var said = [];
+				if (h.people.length) { said.push('<strong>' + h.people.map(esc).join(', ') + '</strong>'); }
+				if (h.place)   { said.push(esc(h.place)); }
+				if (h.event)   { said.push(esc(h.event)); }
+				return '<div class="card pad hrow" style="margin:8px 0;display:flex;gap:12px;align-items:flex-start">' +
+					'<img src="' + esc(h.url) + '" alt="" style="width:120px;height:120px;object-fit:cover;border:3px solid var(--print);flex:0 0 auto">' +
+					'<div style="flex:1 1 auto;min-width:0">' +
+					'<div>' + (said.length ? said.join(' &middot; ') : '<span class="muted">nothing said about it</span>') + '</div>' +
+					(h.caption ? '<p style="margin:4px 0">' + esc(h.caption) + '</p>' : '') +
+					'<p class="muted" style="margin:4px 0 8px">' +
+						(h.from ? 'From ' + esc(h.from) + ' &middot; ' : '') + esc(h.door) + '</p>' +
+					'<div class="actions">' +
+					'<button class="btn hkeep" data-id="' + h.id + '" type="button">Keep it</button>' +
+					'<button class="btn sec hdrop" data-id="' + h.id + '" type="button">Delete</button>' +
+					'<span class="muted hmsg"></span>' +
+					'</div></div></div>';
+			}).join('');
+		}
+
+		function load(){
+			api('/photos/held').then(function(r){ draw(r.held || []); }).catch(function(){});
+		}
+		window.loadHeld = load;
+
+		list.addEventListener('click', function(ev){
+			var b = ev.target.closest('.hkeep, .hdrop');
+			if (!b) { return; }
+			var keep = b.classList.contains('hkeep');
+			var row  = b.closest('.hrow');
+			if (!keep && !confirm('Delete this photo? It is not kept anywhere else.')) { return; }
+			row.querySelectorAll('button').forEach(function(x){ x.disabled = true; });
+			row.querySelector('.hmsg').textContent = keep ? 'Keeping\u2026' : 'Deleting\u2026';
+			api('/photos/held/decide', { method: 'POST', body: JSON.stringify({
+				id: parseInt(b.dataset.id, 10), approve: keep
+			}) }).then(function(){
+				load();
+				if (keep) { loadLib(); loadPeople(true); }
+			}).catch(function(e){
+				row.querySelectorAll('button').forEach(function(x){ x.disabled = false; });
+				row.querySelector('.hmsg').textContent = e.message;
+			});
+		});
+
+		load();
+	}());
 
 	/* ===================== public photo links ===================== */
 	(function(){
