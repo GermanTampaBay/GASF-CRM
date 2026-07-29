@@ -93,12 +93,28 @@ function gasf_crm_door_closed_because( array $d ) {
 	// The year-round door has no window; only a party is on the clock.
 	if ( ! gasf_crm_door_is_party( $d ) ) { return ''; }
 
+	/*
+	 * Everything here is the local wall clock, deliberately and consistently.
+	 *
+	 * A window is stored as a volunteer typed it ("2026-10-03T17:00" means five
+	 * in the afternoon at the club). WordPress pins PHP's default timezone to
+	 * UTC, so strtotime() on that string yields the wall clock reinterpreted as
+	 * UTC — and current_time('timestamp') is the same fiction, which is exactly
+	 * why the comparison below is right.
+	 *
+	 * The DISPLAY is where that fiction bites. wp_date() assumes a real
+	 * timestamp and converts it into the site's zone, which subtracted another
+	 * four hours and told a guest the door opened at 5:51am when it opened at
+	 * 9:51. Rendering against UTC takes the fake timestamp at face value, which
+	 * is what the volunteer typed and what the guest should read.
+	 */
 	$now = current_time( 'timestamp' ); // phpcs:ignore WordPress.DateTime.CurrentTimeTimestamp -- a party runs on the local wall clock.
 	$s   = empty( $d['starts'] ) ? 0 : strtotime( $d['starts'] );
 	$e   = empty( $d['ends'] ) ? 0 : strtotime( $d['ends'] );
 
 	if ( $s && $now < $s ) {
-		return sprintf( 'Photo sharing for %s opens %s.', $d['label'], wp_date( 'l j F, g:ia', $s ) );
+		return sprintf( 'Photo sharing for %s opens %s.', $d['label'],
+			wp_date( 'l j F, g:ia', $s, new DateTimeZone( 'UTC' ) ) );
 	}
 	if ( $e && $now > $e ) {
 		return sprintf( 'Photo sharing for %s has closed — thank you! Photos already sent are safe with the club.', $d['label'] );
