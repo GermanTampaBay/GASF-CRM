@@ -97,7 +97,7 @@ function gasf_crm_backup_graph( $method, $url, $body = null, $raw = false ) {
  *
  * GET-first, create on 404. The first version created with
  * conflictBehavior=fail and treated 409 as "exists", but its already-exists
- * path rebuilt the parent address with raw spaces in the URL \u2014 and the very
+ * path rebuilt the parent address with raw spaces in the URL — and the very
  * first real folder this walks is "Committee - Marketing and Advertising",
  * which is nothing but spaces. Asking before creating is one extra request
  * per segment, once per process, for a walk that cannot be embarrassed by a
@@ -477,8 +477,8 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			$d = gasf_crm_backup_graph( 'GET', 'https://graph.microsoft.com/v1.0/sites/' . rawurlencode( $site ) . '/drive' );
 			if ( is_wp_error( $d ) ) { WP_CLI::error( $d->get_error_message() ); }
 			// Optional third argument: the root path inside the library. For a
-			// standard Teams channel that is the channel's own folder \u2014 e.g.
-			// "Committee - Marketing and Advertising/Photo Archive" \u2014 because a
+			// standard Teams channel that is the channel's own folder — e.g.
+			// "Committee - Marketing and Advertising/Photo Archive" — because a
 			// standard channel is a folder on the team site, not a site.
 			$root = isset( $args[2] ) && '' !== trim( (string) $args[2] )
 				? trim( (string) $args[2], '/' )
