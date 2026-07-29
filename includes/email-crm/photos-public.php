@@ -420,7 +420,7 @@ function gasf_crm_door_page( $door, $notice ) {
 		echo '<p>Took a good one tonight? Send it to the club and it goes up on the screen inside &mdash; and into the club&rsquo;s archive.</p>';
 		echo '<p>No account, no app. Pick your photos and tap send. Add who is in them if you like; you do not have to.</p>';
 	} else {
-		echo '<p>Photos of the club, its events and its people are always welcome &mdash; from last weekend or from 1974.</p>';
+		echo '<p>Photos of the club, its events, and its people are always welcome &mdash; from last weekend or from 1974.</p>';
 		echo '<p>No account, no app. Tell us what you can about them and a volunteer will add them to the club&rsquo;s archive. Nothing appears anywhere until somebody from the club has looked.</p>';
 	}
 
@@ -430,11 +430,10 @@ function gasf_crm_door_page( $door, $notice ) {
 		esc_html( function_exists( 'gasf_crm_photo_consent_text' )
 			? gasf_crm_photo_consent_text()
 			: 'The club may use these photos.' ) );
-	echo '<p class="gasf-door-fine">Tick this and the club may use your photos on its website, social media and in its newsletter. Nothing goes up with your name on it unless you are asked first.</p>';
+	echo '<p class="gasf-door-fine">Tick this and the club may use your photos on its website, social media, and in its newsletter. Nothing goes up with your name on it unless you are asked first.</p>';
 	echo '</div>';
 
 	echo '<h2>Choose your photos</h2>';
-	echo '<p>As many as you like &mdash; they send one at a time.</p>';
 	echo '<p><button type="button" id="ppick" class="gasf-door-pick">Pick photos</button></p>';
 	echo '<input type="file" id="pfile" accept="image/*" multiple style="display:none">';
 	echo '<div class="gasf-door-grid" id="pgrid"></div>';
@@ -473,7 +472,8 @@ function gasf_crm_door_page( $door, $notice ) {
 
 	echo '</div>';
 
-	echo '<p class="gasf-door-send"><button type="button" id="psend" disabled>Send to the club</button> <span id="pmsg"></span></p>';
+	echo '<p class="gasf-door-send"><button type="button" id="psend" disabled>Submit</button></p>';
+	echo '<p class="gasf-door-msg" id="pmsg"></p>';
 
 	gasf_crm_door_script( $party );
 
@@ -529,7 +529,9 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
 	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
 	.gasf-door-entry .pwrap{margin:0 0 6px}
-	.gasf-door-entry .gasf-door-send #pmsg{margin-left:10px}
+	.gasf-door-entry .gasf-door-send{text-align:center;margin-top:20px}
+	.gasf-door-entry .gasf-door-send button{min-width:220px}
+	.gasf-door-entry .gasf-door-msg{text-align:center;min-height:1.4em}
 	@media (max-width:480px){
 		.gasf-door-entry .gasf-door-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}
 	}
@@ -559,7 +561,6 @@ function gasf_crm_door_script( $party ) {
 		document.getElementById('pform').hidden = !picked.length;
 		var waiting = picked.filter(function(p){ return p.state === 'new'; }).length;
 		send.disabled = busy || !waiting;
-		send.textContent = waiting ? 'Send ' + waiting + ' to the club' : 'Send to the club';
 	}
 
 	document.getElementById('ppick').onclick = function(){ document.getElementById('pfile').click(); };
@@ -1126,7 +1127,7 @@ function gasf_crm_admin_doors_section() {
 				(int) $ev['id'], esc_html( $ev['title'] ), esc_html( wp_date( 'D j M, g:ia', $ev['start'] ) ) );
 		}
 		echo '</select>';
-		echo '<p class="description">Pick one and the name, the tag and the window fill themselves in — open an hour early, close three hours after the end. Anything you type below wins over the calendar, so correcting one field does not throw the rest away.</p>';
+		echo '<p class="description">Pick one and the name, the tag, and the window fill themselves in — open an hour early, close three hours after the end. Anything you type below wins over the calendar, so correcting one field does not throw the rest away.</p>';
 	} else {
 		echo '<p class="description">Nothing upcoming on the calendar, so fill this in by hand.</p>';
 	}
