@@ -1166,141 +1166,16 @@ function gasf_crm_door_script( $party ) {
 	<?php
 }
 
-/* =====================================================================
- * Managing the doors
- * ================================================================== */
-
-add_action( 'rest_api_init', function () {
-
-	$guard = function () {
-		return gasf_crm_user_can_stream( 'photos' )
-			? true
-			: new WP_Error( 'gasf_crm_403', 'You do not have access to photo submissions.', array( 'status' => 403 ) );
-	};
-
-	register_rest_route( 'gasf/v1', '/crm/photos/doors', array(
-		'methods'             => 'GET',
-		'permission_callback' => $guard,
-		'callback'            => function () {
-			// Seeding on read rather than on activation: activation runs before
-			// the rewrite rules exist, and a link nobody can open is worse than
-			// no link at all.
-			gasf_crm_door_open_token();
-
-			$out = array();
-			foreach ( gasf_crm_doors() as $t => $d ) {
-				$out[] = array(
-					'token'     => $t,
-					'url'       => gasf_crm_door_url( $t ),
-					'label'     => (string) ( $d['label'] ?? '' ),
-					'mode'      => (string) ( $d['mode'] ?? 'open' ),
-					'permanent' => ! empty( $d['permanent'] ),
-					'active'    => ! empty( $d['active'] ),
-					'event'     => (string) ( $d['event'] ?? '' ),
-					'place'     => (string) ( $d['place'] ?? '' ),
-					'starts'    => (string) ( $d['starts'] ?? '' ),
-					'ends'      => (string) ( $d['ends'] ?? '' ),
-					'count'     => (int) ( $d['count'] ?? 0 ),
-					'closed'    => gasf_crm_door_closed_because( array( 'token' => $t ) + (array) $d ),
-				);
-			}
-			usort( $out, function ( $a, $b ) {
-				if ( $a['permanent'] !== $b['permanent'] ) { return $a['permanent'] ? -1 : 1; }
-				return strcmp( $b['starts'], $a['starts'] );
-			} );
-			return array( 'doors' => $out );
-		},
-	) );
-
-	register_rest_route( 'gasf/v1', '/crm/photos/doors', array(
-		'methods'             => 'POST',
-		'permission_callback' => $guard,
-		'callback'            => function ( WP_REST_Request $req ) {
-			$in    = (array) $req->get_json_params();
-			$label = trim( sanitize_text_field( (string) ( $in['label'] ?? '' ) ) );
-			if ( '' === $label ) {
-				return new WP_Error( 'gasf_crm_bad', 'Give the party a name so you can tell the links apart.', array( 'status' => 400 ) );
-			}
-
-			$starts = trim( sanitize_text_field( (string) ( $in['starts'] ?? '' ) ) );
-			$ends   = trim( sanitize_text_field( (string) ( $in['ends'] ?? '' ) ) );
-			if ( '' === $starts || '' === $ends ) {
-				return new WP_Error( 'gasf_crm_bad', 'A party link needs a start and an end. That window is the only thing standing between this link and the open internet.', array( 'status' => 400 ) );
-			}
-			if ( strtotime( $ends ) <= strtotime( $starts ) ) {
-				return new WP_Error( 'gasf_crm_bad', 'The party has to end after it starts.', array( 'status' => 400 ) );
-			}
-
-			$token = bin2hex( random_bytes( 32 ) );
-			$all   = gasf_crm_doors();
-			$all[ $token ] = array(
-				'label'     => $label,
-				'mode'      => 'party',
-				'permanent' => false,
-				'active'    => true,
-				'event'     => trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) ),
-				'event_id'  => (int) ( $in['event_id'] ?? 0 ),
-				'place'     => trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) ),
-				'starts'    => $starts,
-				'ends'      => $ends,
-				'count'     => 0,
-			);
-			gasf_crm_doors_save( $all );
-
-			gasf_crm_log( sprintf( 'CRM doors: party link "%s" created by %s, open %s to %s',
-				$label, gasf_crm_display_name( get_current_user_id() ), $starts, $ends ) );
-
-			return array( 'ok' => true, 'token' => $token, 'url' => gasf_crm_door_url( $token ) );
-		},
-	) );
-
-	register_rest_route( 'gasf/v1', '/crm/photos/doors/toggle', array(
-		'methods'             => 'POST',
-		'permission_callback' => $guard,
-		'callback'            => function ( WP_REST_Request $req ) {
-			$in    = (array) $req->get_json_params();
-			$token = preg_replace( '~[^a-f0-9]~', '', (string) ( $in['token'] ?? '' ) );
-			$all   = gasf_crm_doors();
-			if ( ! isset( $all[ $token ] ) ) {
-				return new WP_Error( 'gasf_crm_404', 'No such link.', array( 'status' => 404 ) );
-			}
-			$all[ $token ]['active'] = ! empty( $in['active'] );
-			gasf_crm_doors_save( $all );
-
-			gasf_crm_log( sprintf( 'CRM doors: "%s" switched %s by %s',
-				(string) $all[ $token ]['label'],
-				$all[ $token ]['active'] ? 'on' : 'off',
-				gasf_crm_display_name( get_current_user_id() ) ) );
-
-			return array( 'ok' => true, 'active' => (bool) $all[ $token ]['active'] );
-		},
-	) );
-
-	register_rest_route( 'gasf/v1', '/crm/photos/doors/cycle', array(
-		'methods'             => 'POST',
-		'permission_callback' => $guard,
-		'callback'            => function ( WP_REST_Request $req ) {
-			// A new token for the permanent link, when the old one has been on a
-			// poster for three years or has ended up somewhere it should not be.
-			// The door survives; only its address changes.
-			$in    = (array) $req->get_json_params();
-			$token = preg_replace( '~[^a-f0-9]~', '', (string) ( $in['token'] ?? '' ) );
-			$all   = gasf_crm_doors();
-			if ( ! isset( $all[ $token ] ) ) {
-				return new WP_Error( 'gasf_crm_404', 'No such link.', array( 'status' => 404 ) );
-			}
-			$fresh = bin2hex( random_bytes( 32 ) );
-			$all[ $fresh ] = $all[ $token ];
-			unset( $all[ $token ] );
-			gasf_crm_doors_save( $all );
-
-			gasf_crm_log( sprintf( 'CRM doors: "%s" given a new address by %s — every printed copy of the old one is now dead',
-				(string) $all[ $fresh ]['label'], gasf_crm_display_name( get_current_user_id() ) ) );
-
-			return array( 'ok' => true, 'token' => $fresh, 'url' => gasf_crm_door_url( $fresh ) );
-		},
-	) );
-} );
+/*
+ * The REST door-management routes that used to be here are gone, on purpose.
+ *
+ * v2.6.0 moved party links into wp-admin because opening an auto-accepting
+ * door is a decision about the club's exposure, reserved for administrators
+ * — but these routes stayed behind, guarded by the photos stream, so any
+ * photo volunteer could still create one by API while the interface said
+ * otherwise. An authorisation decision the UI makes and the API ignores is
+ * not a decision; it is a suggestion.
+ */
 
 /* =====================================================================
  * Approving what came through a door
@@ -1349,8 +1224,9 @@ add_action( 'rest_api_init', function () {
 				$g   = (array) get_post_meta( $id, '_gasf_photo_guest', true );
 				$src = (array) get_post_meta( $id, '_gasf_photo_source', true );
 				$out[] = array(
-					'id'      => (int) $id,
-					'url'     => gasf_crm_photo_img_url( $id, 'medium' ),
+					'id'       => (int) $id,
+					'revision' => gasf_crm_photo_revision( $id ),
+					'url'      => gasf_crm_photo_img_url( $id, 'medium' ),
 					'from'    => (string) ( $g['from'] ?? '' ),
 					'door'    => (string) ( $src['subject'] ?? '' ),
 					'event'   => (string) ( $g['event'] ?? '' ),
@@ -1382,6 +1258,20 @@ add_action( 'rest_api_init', function () {
 			}
 			if ( ! gasf_crm_photo_awaits_review( $id ) ) {
 				return new WP_Error( 'gasf_crm_done', 'Somebody has already dealt with that one.', array( 'status' => 409 ) );
+			}
+
+			/*
+			 * The same compare-and-swap every other decision uses, and this one
+			 * was missing it. A door photo is visible in two places — this
+			 * panel and the Photos screen — and Delete is the one action with
+			 * no way back: without this, the volunteer on the stale screen
+			 * destroys what the other has just described, and nothing says so.
+			 */
+			$want = $in['revision'] ?? null;
+			if ( null !== $want && '' !== $want && (int) $want !== gasf_crm_photo_revision( $id ) ) {
+				return new WP_Error( 'gasf_crm_stale',
+					'Somebody else has already dealt with this photo. Reload to see where it got to.',
+					array( 'status' => 409 ) );
 			}
 
 			$who = gasf_crm_display_name( get_current_user_id() );
@@ -1479,6 +1369,28 @@ function gasf_crm_door_window_for( array $ev ) {
 		'ends'   => wp_date( 'Y-m-d\\TH:i', $end ),
 	);
 }
+
+/*
+ * The door actions run at admin_init and REDIRECT, not during page render.
+ *
+ * Handled inline, a refresh resubmits the form — and for these forms a
+ * refresh is not harmless: it mints a second party link, or re-cycles the
+ * permanent address and kills every QR code printed against the one issued a
+ * moment ago. Post/redirect/get costs a transient and removes the whole class.
+ */
+add_action( 'admin_init', function () {
+	if ( ! isset( $_POST['gasf_crm_action'], $_GET['page'] ) || 'gasf-crm' !== $_GET['page'] ) { return; } // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+	$act = sanitize_text_field( wp_unslash( $_POST['gasf_crm_action'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
+	if ( 0 !== strpos( $act, 'door_' ) ) { return; }
+	check_admin_referer( 'gasf_crm' );
+
+	$notice = gasf_crm_admin_doors_handle( $act );
+	if ( '' !== $notice ) {
+		set_transient( 'gasf_crm_door_notice_' . get_current_user_id(), $notice, MINUTE_IN_SECONDS );
+	}
+	wp_safe_redirect( admin_url( 'admin.php?page=gasf-crm&tab=photos' ) );
+	exit;
+} );
 
 /** POST handling for the admin screen. Returns an admin notice, or ''. */
 function gasf_crm_admin_doors_handle( $act ) {

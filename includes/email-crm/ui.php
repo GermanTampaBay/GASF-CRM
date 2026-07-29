@@ -3438,7 +3438,7 @@ function gasf_crm_render_inbox() {
 				if (h.place) { said.push(esc(h.place)); }
 				else if (h.place_said) { said.push(esc(h.place_said) + ' <em>(not a place we have yet)</em>'); }
 				if (h.event)   { said.push(esc(h.event)); }
-				return '<div class="card pad hrow" style="margin:8px 0;display:flex;gap:12px;align-items:flex-start">' +
+				return '<div class="card pad hrow" data-rv="' + h.revision + '" style="margin:8px 0;display:flex;gap:12px;align-items:flex-start">' +
 					'<img src="' + esc(h.url) + '" alt="" style="width:120px;height:120px;object-fit:cover;border:3px solid var(--print);flex:0 0 auto">' +
 					'<div style="flex:1 1 auto;min-width:0">' +
 					'<div>' + (said.length ? said.join(' &middot; ') : '<span class="muted">nothing said about it</span>') + '</div>' +
@@ -3467,7 +3467,8 @@ function gasf_crm_render_inbox() {
 			row.querySelectorAll('button').forEach(function(x){ x.disabled = true; });
 			row.querySelector('.hmsg').textContent = keep ? 'Keeping\u2026' : 'Deleting\u2026';
 			api('/photos/held/decide', { method: 'POST', body: JSON.stringify({
-				id: parseInt(b.dataset.id, 10), approve: keep
+				id: parseInt(b.dataset.id, 10), approve: keep,
+				revision: parseInt(row.dataset.rv, 10) || 0
 			}) }).then(function(){
 				load();
 				if (keep) { loadLib(); loadPeople(true); }

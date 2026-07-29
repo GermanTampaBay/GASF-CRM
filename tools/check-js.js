@@ -25,6 +25,8 @@ const ROOT = path.join(__dirname, '..');
 const TARGETS = [
 	'includes/email-crm/ui.php',
 	'includes/email-crm/photos-page.php',
+	'includes/email-crm/photos-public.php',
+	'includes/email-crm/admin.php',
 	'includes/photo-catalog.php',
 ];
 

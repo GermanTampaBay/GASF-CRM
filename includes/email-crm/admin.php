@@ -55,13 +55,16 @@ function gasf_crm_admin_tab() {
 	$notice = '';
 	$diag   = null;
 
+	// A door action just redirected back here; its outcome rode a transient
+	// because the POST that produced it no longer exists.
+	$door_notice = get_transient( 'gasf_crm_door_notice_' . get_current_user_id() );
+	if ( $door_notice ) {
+		delete_transient( 'gasf_crm_door_notice_' . get_current_user_id() );
+		$notice .= $door_notice;
+	}
+
 	if ( isset( $_POST['gasf_crm_action'] ) && check_admin_referer( 'gasf_crm' ) ) {
 		$act = sanitize_text_field( wp_unslash( $_POST['gasf_crm_action'] ) );
-
-		// The photo links live on the Photos tab and handle their own actions.
-		if ( function_exists( 'gasf_crm_admin_doors_handle' ) ) {
-			$notice .= gasf_crm_admin_doors_handle( $act );
-		}
 
 		if ( 'save' === $act ) {
 			$cfg = gasf_crm_cfg();
