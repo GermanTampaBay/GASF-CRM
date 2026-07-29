@@ -731,6 +731,42 @@ function gasf_crm_video_scrub( $path ) {
  *
  * The point is to be able to VERIFY the strip worked rather than assume it did.
  */
+/* --------------------------------------------------------------------------
+ * Intake tracing
+ *
+ * Temporary by intention, honest by construction. The intake has now failed
+ * twice in ways the ordinary log could not explain — most recently a run that
+ * exited cleanly mid-import with no fatal anywhere — so until it has been
+ * boringly reliable for a while, every run narrates itself: one line per
+ * phase, tagged with a per-run id so interleaved runs read separately, with
+ * memory noted because a silent death by memory is the leading suspect.
+ *
+ * Off switch, no deploy needed:   wp option update gasf_crm_trace 0
+ * -------------------------------------------------------------------------- */
+
+/** The last checkpoint this process passed — what the sentinel reports. */
+function gasf_crm_photo_trace_last( $set = null ) {
+	static $last = '(no checkpoint reached)';
+	if ( null !== $set ) { $last = (string) $set; }
+	return $last;
+}
+
+function gasf_crm_photo_trace( $msg ) {
+	static $rid = '';
+	if ( '' === $rid ) { $rid = substr( bin2hex( random_bytes( 4 ) ), 0, 6 ); }
+
+	// Recorded even when quiet: the sentinel's "where was it standing" answer
+	// must not depend on the verbosity setting.
+	gasf_crm_photo_trace_last( $msg );
+
+	if ( '0' === (string) get_option( 'gasf_crm_trace', '1' ) ) { return; }
+	gasf_crm_log( sprintf( '[intake %s] %s (mem %dM peak %dM)',
+		$rid, $msg,
+		(int) round( memory_get_usage( true ) / 1048576 ),
+		(int) round( memory_get_peak_usage( true ) / 1048576 )
+	) );
+}
+
 function gasf_crm_photo_has_metadata( $path ) {
 	if ( ! is_file( $path ) ) { return false; }
 
@@ -1179,11 +1215,15 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 	$tmp = wp_tempnam( $name );
 	if ( ! $tmp ) { return new WP_Error( 'gasf_crm_tmp', 'The server could not make room to fetch that photo.' ); }
 
-	$ok = gasf_crm_graph_attachment_stream( $graph_message_id, $graph_attachment_id, $tmp, $stream );
+	gasf_crm_photo_trace( sprintf( 'downloading %s (%s expected)', $name, size_format( $size ) ) );
+	$dl0 = microtime( true );
+	$ok  = gasf_crm_graph_attachment_stream( $graph_message_id, $graph_attachment_id, $tmp, $stream );
 	if ( is_wp_error( $ok ) ) {
 		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		return $ok;
 	}
+	gasf_crm_photo_trace( sprintf( 'downloaded %s: %s in %.1fs',
+		$name, size_format( (int) filesize( $tmp ) ), microtime( true ) - $dl0 ) );
 
 	/*
 	 * What it costs to OPEN, which the file size does not tell you.
@@ -1327,7 +1367,11 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 	add_filter( 'upload_dir', $to_review, 99 );
 	add_filter( 'wp_insert_attachment_data', $hide, 99 );
 	add_action( 'add_attachment', $claim, 1 );
-	$id = media_handle_sideload( array( 'name' => $name, 'tmp_name' => $tmp ), 0 );
+	gasf_crm_photo_trace( sprintf( 'sideload begins for %s (%dx%d) — the sixteen sizes are next, this is where a death would land', $name, (int) $dim[0], (int) $dim[1] ) );
+	$sl0 = microtime( true );
+	$id  = media_handle_sideload( array( 'name' => $name, 'tmp_name' => $tmp ), 0 );
+	gasf_crm_photo_trace( sprintf( 'sideload done for %s in %.1fs%s', $name, microtime( true ) - $sl0,
+		is_wp_error( $id ) ? ' — FAILED: ' . $id->get_error_message() : ' — attachment #' . (int) $id ) );
 	remove_action( 'add_attachment', $claim, 1 );
 	remove_filter( 'wp_insert_attachment_data', $hide, 99 );
 	remove_filter( 'upload_dir', $to_review, 99 );
@@ -2477,8 +2521,34 @@ function gasf_crm_photo_autoprocess() {
 	 */
 	register_shutdown_function( 'gasf_crm_photo_unlock', $lock );
 
+	/*
+	 * The tripwire for the still-unidentified early exit. A flag is set only
+	 * when the run RETURNS; if shutdown arrives without it, the run ended some
+	 * other way — exit(), a fatal, or the host's hand — and this writes the
+	 * last checkpoint passed plus whatever error_get_last() knows. A fatal
+	 * that never reached any log still lands in error_get_last() at shutdown,
+	 * which makes this the one place the ghost cannot die unrecorded. If even
+	 * this line is absent after a stall, the process was SIGKILLed, and that
+	 * absence is itself the answer.
+	 */
+	$sentinel = new stdClass();
+	$sentinel->done = false;
+	register_shutdown_function( function () use ( $sentinel ) {
+		if ( $sentinel->done ) { return; }
+		$e = error_get_last();
+		gasf_crm_log( 'CRM photos: INTAKE RUN ENDED ABNORMALLY — last checkpoint: "'
+			. gasf_crm_photo_trace_last() . '"'
+			. ( $e
+				? sprintf( ' — PHP: %s in %s:%d', $e['message'], $e['file'], (int) $e['line'] )
+				: ' — no PHP error on record, so this was exit() or an external kill' ) );
+	} );
+
 	try {
-		return gasf_crm_photo_autoprocess_run();
+		gasf_crm_photo_trace( 'run begins (' . php_sapi_name() . ')' );
+		$n = gasf_crm_photo_autoprocess_run();
+		gasf_crm_photo_trace( 'run ends — ' . (int) $n . ' photo(s) taken in' );
+		$sentinel->done = true;
+		return $n;
 	} finally {
 		// finally, not a trailing call: a Graph exception must still release the
 		// lock, or the intake stops for twenty minutes over one bad fetch.
@@ -2835,6 +2905,10 @@ function gasf_crm_photo_autoprocess_run() {
 		$owner = gasf_crm_photo_submission_claim( $sub );
 		if ( ! $owner ) { continue; } // somebody else has it
 
+		gasf_crm_photo_trace( sprintf( 'message %d claimed (attempt %d of %d, sender %s)',
+			(int) $row['id'], (int) $sub['attempt_count'] + 1, GASF_CRM_PHOTO_MAX_ATTEMPTS,
+			(string) $sub['sender_email'] ) );
+
 		/*
 		 * A submission claimed while still marked 'processing' means its last
 		 * attempt never reported back — the process died or exited mid-run and
@@ -2916,6 +2990,9 @@ function gasf_crm_photo_autoprocess_run() {
 			continue;
 		}
 
+		gasf_crm_photo_trace( sprintf( 'message %d: %d attachment(s) listed, %d image(s), %s',
+			(int) $row['id'], count( (array) $all ), $images, size_format( $bytes ) ) );
+
 		$kept  = array();  // everything on this message, new or already here
 		$fresh = 0;        // how many this run actually fetched
 		$stuck = '';       // first hard failure, if any
@@ -2945,6 +3022,9 @@ function gasf_crm_photo_autoprocess_run() {
 
 			gasf_crm_photo_submission_touch( $sub['id'], $owner );
 
+			gasf_crm_photo_trace( sprintf( 'item %d: importing %s (%s)',
+				(int) $item['id'], (string) ( $a['name'] ?? '?' ), size_format( (int) ( $a['size'] ?? 0 ) ) ) );
+
 			$id = gasf_crm_photo_approve( $thread, (string) $row['graph_message_id'], $att, $item['id'] );
 			if ( is_wp_error( $id ) ) {
 				gasf_crm_photo_item_move( $item['id'], 'importing', 'failed', array(
@@ -2970,6 +3050,7 @@ function gasf_crm_photo_autoprocess_run() {
 				continue;
 			}
 
+			gasf_crm_photo_trace( sprintf( 'item %d: imported as attachment #%d', (int) $item['id'], (int) $id ) );
 			$kept[] = (int) $id;
 			$fresh++;
 		}
