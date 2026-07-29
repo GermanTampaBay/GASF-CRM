@@ -3919,16 +3919,27 @@ add_action( 'rest_api_init', function () {
 			$card = gasf_crm_photo_card( $aid );
 			if ( ! $card ) { return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) ); }
 
-			// Only ever a photo that came in through a submission. Without this
-			// the route would delete any attachment ID in the Media Library.
+			/*
+			 * Only ever a photo that came in through a submission. Without this
+			 * the route would delete any attachment ID in the Media Library.
+			 *
+			 * The test is provenance itself, not a sender email. It used to be
+			 * empty($src['email']) — written when email was the only way in —
+			 * and the public doors broke it: a door photo has provenance but no
+			 * sender address, so Reject & Delete answered "that is not a
+			 * submitted photo" to a photo sitting right there in the queue, and
+			 * the queue never let go of it.
+			 */
 			$src = get_post_meta( $aid, '_gasf_photo_source', true );
-			if ( ! is_array( $src ) || empty( $src['email'] ) ) {
+			if ( ! is_array( $src ) || ( empty( $src['email'] ) && empty( $src['upload'] ) ) ) {
 				return new WP_Error( 'gasf_crm_403', 'That is not a submitted photo.', array( 'status' => 403 ) );
 			}
 
 			gasf_crm_log( sprintf(
 				'CRM photos: media #%d (%s, from %s) rejected by user %d',
-				$aid, get_the_title( $aid ), $src['email'], get_current_user_id()
+				$aid, get_the_title( $aid ),
+				! empty( $src['email'] ) ? $src['email'] : ( $src['subject'] ?? 'direct upload' ),
+				get_current_user_id()
 			) );
 			if ( ! empty( $src['thread'] ) ) {
 				gasf_crm_log_event( (int) $src['thread'], 'photo_rejected', 'media #' . $aid . ' removed' );
