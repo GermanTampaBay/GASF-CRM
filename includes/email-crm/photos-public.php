@@ -1267,10 +1267,23 @@ add_action( 'rest_api_init', function () {
 			 * no way back: without this, the volunteer on the stale screen
 			 * destroys what the other has just described, and nothing says so.
 			 */
+			$have = gasf_crm_photo_revision( $id );
 			$want = $in['revision'] ?? null;
-			if ( null !== $want && '' !== $want && (int) $want !== gasf_crm_photo_revision( $id ) ) {
+			if ( null !== $want && '' !== $want && (int) $want !== $have ) {
 				return new WP_Error( 'gasf_crm_stale',
 					'Somebody else has already dealt with this photo. Reload to see where it got to.',
+					array( 'status' => 409 ) );
+			}
+			/*
+			 * Compare AND swap, not compare alone. Checking the revision without
+			 * bumping it leaves the whole race open: two volunteers holding the
+			 * same fresh screen both pass the comparison and both proceed.
+			 * update_post_meta with the previous value is the codebase's atomic
+			 * claim — exactly one caller wins it, the other is told.
+			 */
+			if ( ! update_post_meta( $id, '_gasf_photo_rev', $have + 1, $have ) ) {
+				return new WP_Error( 'gasf_crm_stale',
+					'Somebody else was deciding this at the same moment. Reload to see where it got to.',
 					array( 'status' => 409 ) );
 			}
 
