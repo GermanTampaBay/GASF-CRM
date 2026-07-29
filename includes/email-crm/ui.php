@@ -468,6 +468,9 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .lightbox img{max-width:100%;max-height:78vh;object-fit:contain}
 .lbinfo{color:#fff;font-size:13px;text-align:center;max-width:760px;line-height:1.5}
 .lbinfo a{color:#fff}
+/* Actions in a row, not a column. They wrap on a narrow phone, which is the one
+   place stacking is the right answer rather than the accidental one. */
+.lbacts{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:12px}
 .lbclose{position:absolute;top:14px;right:18px;background:none;border:0;color:#fff;font-size:34px;line-height:1;cursor:pointer}
 /* The editor sits on a light card inside the dark overlay — the form controls
    are styled for a pane, and white-on-black inputs would be unreadable. */
@@ -3723,7 +3726,12 @@ function gasf_crm_render_inbox() {
 			lbi.hidden = false; lbi.src = p.full || p.url;
 		}
 
+		// Two collections, because they want opposite layouts. Facts stack, one
+		// per line; buttons sit shoulder to shoulder. Joined separately at the
+		// end — the single <br>-joined list was why the actions marched down the
+		// panel and pushed "Edit image" off the bottom of a laptop screen.
 		var bits = [];
+		var acts = [];
 		if (p.people.length) { bits.push('<strong>' + esc(p.people.join(', ')) + '</strong>'); }
 		if (p.caption) { bits.push(esc(p.caption)); }
 		var when = [whenOf(p), (p.places[0] || ''), (p.events[0] || '')].filter(Boolean).join(' · ');
@@ -3731,26 +3739,29 @@ function gasf_crm_render_inbox() {
 		if (p.w) { bits.push(p.w + '×' + p.h + ' · ' + Math.round(p.bytes / 1024) + ' KB'); }
 		if (p.from) { bits.push('Given to the club by ' + esc(p.from)); }
 
-		// Said plainly, next to the download link, because the moment somebody
-		// is about to take a photo for a poster is the moment this matters.
+		/*
+		 * The verdict, and nothing else.
+		 *
+		 * Who recorded it, when, and what they were told all printed here — up
+		 * to four lines to say "yes", on every photo, every time. That answers a
+		 * question nobody is asking at that moment: somebody choosing a photo
+		 * for a poster needs to know whether they may use it, not the provenance
+		 * of the permission. All of it is still one click away behind Change
+		 * permission, which is where anyone wanting the detail is already headed.
+		 *
+		 * The two unsettled states keep a short clause. There the mark alone is
+		 * not actionable — "do not publish" and "nobody has asked yet" both need
+		 * to say what to DO, and a warning too terse to act on is a warning
+		 * missed.
+		 */
 		if (p.consent) {
-			var c = p.consent, when = c.at ? ' on ' + esc(c.at.substring(0,10)) : '';
-			if (c.state === 'granted') {
-				bits.push('<span class="okmark">✓ ' + esc(c.label) + '</span>' +
-					(c.by ? ' — ' + esc(c.by) + ' gave permission' : '') + when);
-			} else if (c.state === 'recorded') {
-				// Says who wrote it down and what they were told. The weaker
-				// evidence is labelled as weaker rather than dressed up.
-				bits.push('<span class="okmark">✓ ' + esc(c.label) + '</span>' +
-					(c.by ? ' — ' + esc(c.by) : '') + when +
-					(c.note ? '<br><em>' + esc(c.note) + '</em>' : ''));
+			var c = p.consent;
+			if (c.state === 'granted' || c.state === 'recorded') {
+				bits.push('<span class="okmark">✓ ' + esc(c.label) + '</span>');
 			} else if (c.state === 'refused') {
-				bits.push('<span class="nomark">✕ ' + esc(c.label) + '</span>' +
-					(c.by ? ' — recorded by ' + esc(c.by) : '') + when +
-					(c.note ? '<br><em>' + esc(c.note) + '</em>' : '') +
-					'<br>This photo is left out of bulk downloads.');
+				bits.push('<span class="nomark">✕ ' + esc(c.label) + '</span> — left out of bulk downloads');
 			} else if (c.state === 'unknown') {
-				bits.push('<span class="warnmark">⚠ ' + esc(c.label) + '</span> — sent in before we started asking. Fine to keep; check with the sender before publishing it.');
+				bits.push('<span class="warnmark">⚠ ' + esc(c.label) + '</span> — check with the sender before publishing');
 			}
 			// 'club' says nothing: a photo already on the club's own website
 			// needs no note explaining that the club may use it.
@@ -3758,31 +3769,28 @@ function gasf_crm_render_inbox() {
 			// Recording what somebody told you, for the times permission never
 			// went near the form — a yes at the Biergarten, or a no by phone.
 			if (p.lib) {
-				bits.push('<button class="btn sec" id="lbconsent" type="button" style="margin-top:6px">' +
+				acts.push('<button class="btn sec" id="lbconsent" type="button">' +
 					(c.state === 'unknown' ? 'Record permission…' : 'Change permission…') + '</button>');
 			}
 		}
-		if (p.dlname) {
-			bits.push('<a href="' + esc(p.url) + '" download="' + esc(p.dlname) + '">Download ' + esc(p.dlname) + '</a>');
-		}
+		// No download link here: every grid tile carries its own arrow and the
+		// review screen has its own button. A third route was costing a whole
+		// line of a panel that had run out of room.
 		// Anything the backfill guessed is worth saying so, because a machine's
 		// guess is exactly the thing a volunteer should feel free to overrule.
 		if (p.auto) { bits.push('<em class="muted">Tagged automatically from the camera data — please correct anything that looks wrong.</em>'); }
-		// Editing from here only makes sense for a library photo; a submission
-		// still in review is edited on its own form, with approve/reject beside
-		// it, and offering a second route to a different form would be two ways
-		// to do the same thing that behave differently.
 		// Library photos only. A submission still in review is edited on its own
 		// form, which has approve and reject beside it — and the edit route
 		// refuses anything not yet in the collection, so offering the button
 		// here would be a dead end.
-		if (p.lib) { bits.push('<button class="btn" id="lbeditbtn" type="button" style="margin-top:8px">Edit details</button>'); }
-		// Crop and light. Photos only — a clip has no still to crop — and the
-		// edited state is said out loud so nobody wonders why a photo looks
-		// different from the print they remember.
+		if (p.lib) { acts.push('<button class="btn" id="lbeditbtn" type="button">Edit details</button>'); }
+		// Crop and light. Photos only — a clip has no still to crop.
 		if (p.lib && p.kind !== 'video') {
-			bits.push('<button class="btn sec" id="lbimgbtn" type="button" style="margin-top:6px">Edit image&hellip;</button>' +
-				(p.edited ? ' <em class="muted">Edited &mdash; the original is kept and can be restored.</em>' : ''));
+			acts.push('<button class="btn sec" id="lbimgbtn" type="button">Edit image&hellip;</button>');
+			// Stated as a fact above the buttons rather than trailing one of
+			// them, so nobody wonders why a photo differs from the print they
+			// remember — and so it cannot stretch the row it used to sit in.
+			if (p.edited) { bits.push('<em class="muted">Edited &mdash; the original is kept and can be restored.</em>'); }
 		}
 
 		// The library passes the CARD (whose .lopen is the button); the review
@@ -3791,7 +3799,8 @@ function gasf_crm_render_inbox() {
 		// the top of the document.
 		if (fromCard) { lbReturn = fromCard.querySelector('.lopen') || fromCard; }
 
-		document.getElementById('lbinfo').innerHTML = bits.join('<br>');
+		document.getElementById('lbinfo').innerHTML = bits.join('<br>')
+			+ ( acts.length ? '<div class="lbacts">' + acts.join('') + '</div>' : '' );
 		document.getElementById('lbinfo').hidden = false;
 		document.getElementById('lbedit').hidden = true;
 		box.classList.remove('editing');
