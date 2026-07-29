@@ -36,11 +36,32 @@ add_action( 'admin_menu', function () {
 function gasf_crm_admin_tab() {
 	if ( ! current_user_can( 'manage_options' ) ) { return; }
 
+	/*
+	 * Tabs, because this screen had grown into one scroll that mixed Graph
+	 * credentials with the club's address book. Photos earn their own not for
+	 * tidiness but because they are the half of the CRM with a public face:
+	 * links strangers can post through, and a queue of their photos waiting.
+	 */
+	$tabs = array(
+		'settings' => 'Settings',
+		'photos'   => 'Photos',
+		'people'   => 'People',
+		'logs'     => 'Sign-in history',
+	);
+	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- choosing a tab reads, it does not write.
+	$tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'settings';
+	if ( ! isset( $tabs[ $tab ] ) ) { $tab = 'settings'; }
+
 	$notice = '';
 	$diag   = null;
 
 	if ( isset( $_POST['gasf_crm_action'] ) && check_admin_referer( 'gasf_crm' ) ) {
 		$act = sanitize_text_field( wp_unslash( $_POST['gasf_crm_action'] ) );
+
+		// The photo links live on the Photos tab and handle their own actions.
+		if ( function_exists( 'gasf_crm_admin_doors_handle' ) ) {
+			$notice .= gasf_crm_admin_doors_handle( $act );
+		}
 
 		if ( 'save' === $act ) {
 			$cfg = gasf_crm_cfg();
@@ -270,6 +291,15 @@ function gasf_crm_admin_tab() {
 		return '<span style="color:#2c7a3f">&#10003; set (' . strlen( $v ) . ' chars)</span>';
 	};
 	?>
+	<h2 class="nav-tab-wrapper" style="margin-bottom:18px">
+	<?php foreach ( $tabs as $tab_key => $tab_label ) : ?>
+		<a class="nav-tab <?php echo $tab_key === $tab ? 'nav-tab-active' : ''; ?>"
+		   href="<?php echo esc_url( admin_url( 'admin.php?page=gasf-crm&tab=' . $tab_key ) ); ?>"><?php
+			echo esc_html( $tab_label ); ?></a>
+	<?php endforeach; ?>
+	</h2>
+
+	<?php if ( 'settings' === $tab ) : ?>
 	<h2>Email CRM</h2>
 	<p class="description">
 		Shared inbox for <code><?php echo esc_html( $cfg['mailbox'] ); ?></code>, served at
@@ -482,6 +512,9 @@ function gasf_crm_admin_tab() {
 	}
 	?>
 
+	<?php endif; ?>
+
+	<?php if ( 'logs' === $tab ) : ?>
 	<h3>Sign-in history</h3>
 	<?php
 	if ( ! function_exists( 'gasf_crm_auth_log' ) ) {
@@ -549,6 +582,9 @@ function gasf_crm_admin_tab() {
 	}
 	?>
 
+	<?php endif; ?>
+
+	<?php if ( 'photos' === $tab ) : ?>
 	<h3>Photo submissions</h3>
 	<?php
 	if ( ! function_exists( 'gasf_crm_photo_pending_threads' ) ) {
@@ -613,6 +649,12 @@ function gasf_crm_admin_tab() {
 	}
 	?>
 
+	<?php
+	if ( function_exists( 'gasf_crm_admin_doors_section' ) ) { gasf_crm_admin_doors_section(); }
+	endif;
+	?>
+
+	<?php if ( 'people' === $tab ) : ?>
 	<h3>Address book</h3>
 	<?php
 	// null = every stream. This screen is administrators only, and the whole
@@ -783,6 +825,9 @@ function gasf_crm_admin_tab() {
 		echo '<p class="description">Accounts are identified by provider + subject claim, not email address — the same person signing in with Google and with Microsoft appears twice and needs approving twice.</p>';
 		echo '<p class="description">Profile photos come from Google, and only from a sign-in that happened after the photo was set. Microsoft does not put one in the sign-in token, so those accounts always show initials — initials are not a sign that anything is wrong.</p>';
 	}
+	?>
+	<?php endif; ?>
+	<?php
 }
 
 /**

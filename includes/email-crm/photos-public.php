@@ -782,3 +782,274 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 } );
+
+/* =====================================================================
+ * The admin screen
+ * ================================================================== */
+
+/**
+ * The next few events on the club calendar, for the party-link chooser.
+ *
+ * A party link almost always exists because an event does, so typing the name
+ * and both ends of the window by hand is three chances to get wrong what the
+ * calendar already holds. The calendar's own helpers are no use here — one is
+ * date-bound, the other needs a search term — so this asks the same table the
+ * same way, forwards from now.
+ */
+function gasf_crm_door_upcoming_events( $days = 180, $limit = 40 ) {
+	if ( ! function_exists( 'gasf_photo_has_calendar' ) || ! gasf_photo_has_calendar() ) { return array(); }
+	if ( ! defined( 'GASF_EVENTS_CPT' ) ) { return array(); }
+
+	global $wpdb;
+	$now  = current_time( 'timestamp' ); // phpcs:ignore WordPress.DateTime.CurrentTimeTimestamp
+	$rows = $wpdb->get_results( $wpdb->prepare(
+		"SELECT p.ID, p.post_title,
+		        CAST(s.meta_value AS UNSIGNED) AS start_ts,
+		        CAST(e.meta_value AS UNSIGNED) AS end_ts
+		   FROM {$wpdb->posts} p
+		   JOIN {$wpdb->postmeta} s ON s.post_id = p.ID AND s.meta_key = '_gasf_start_ts'
+		   LEFT JOIN {$wpdb->postmeta} e ON e.post_id = p.ID AND e.meta_key = '_gasf_end_ts'
+		  WHERE p.post_type = %s AND p.post_status = 'publish'
+		    AND CAST(s.meta_value AS UNSIGNED) >= %d
+		    AND CAST(s.meta_value AS UNSIGNED) <  %d
+		  ORDER BY start_ts ASC LIMIT %d",
+		GASF_EVENTS_CPT, $now - DAY_IN_SECONDS, $now + ( (int) $days * DAY_IN_SECONDS ), (int) $limit
+	), ARRAY_A );
+
+	// The same duplicate collapse the calendar's own picker does: the club has
+	// posts sharing several dates, and two identical options read as a bug.
+	$seen = array();
+	$out  = array();
+	foreach ( (array) $rows as $r ) {
+		$key = strtolower( trim( (string) $r['post_title'] ) ) . '|' . (int) $r['start_ts'];
+		if ( isset( $seen[ $key ] ) ) { continue; }
+		$seen[ $key ] = true;
+		$out[] = array(
+			'id'    => (int) $r['ID'],
+			'title' => (string) $r['post_title'],
+			'start' => (int) $r['start_ts'],
+			'end'   => (int) $r['end_ts'],
+		);
+	}
+	return $out;
+}
+
+/**
+ * The window a party link should have for an event.
+ *
+ * Opens an hour early, because guests arrive early and a link that is not live
+ * yet reads as broken. Closes three hours after the end — people photograph
+ * the walk to the car park, and the alternative is a volunteer being asked why
+ * the link stopped working while the party is visibly still going.
+ */
+function gasf_crm_door_window_for( array $ev ) {
+	$start = (int) $ev['start'] - HOUR_IN_SECONDS;
+	$end   = ( (int) $ev['end'] ? (int) $ev['end'] : (int) $ev['start'] + 6 * HOUR_IN_SECONDS ) + 3 * HOUR_IN_SECONDS;
+	return array(
+		'starts' => wp_date( 'Y-m-d\\TH:i', $start ),
+		'ends'   => wp_date( 'Y-m-d\\TH:i', $end ),
+	);
+}
+
+/** POST handling for the admin screen. Returns an admin notice, or ''. */
+function gasf_crm_admin_doors_handle( $act ) {
+	if ( ! current_user_can( 'manage_options' ) ) { return ''; }
+
+	$all = gasf_crm_doors();
+	$who = gasf_crm_display_name( get_current_user_id() );
+
+	if ( 'door_toggle' === $act || 'door_cycle' === $act || 'door_delete' === $act ) {
+		$token = preg_replace( '~[^a-f0-9]~', '', (string) wp_unslash( $_POST['token'] ?? '' ) );
+		if ( ! isset( $all[ $token ] ) ) { return ''; }
+
+		if ( 'door_toggle' === $act ) {
+			$all[ $token ]['active'] = empty( $all[ $token ]['active'] );
+			gasf_crm_doors_save( $all );
+			gasf_crm_log( sprintf( 'CRM doors: "%s" switched %s by %s',
+				$all[ $token ]['label'], $all[ $token ]['active'] ? 'on' : 'off', $who ) );
+			return '<div class="notice notice-success"><p>Link switched '
+				. ( $all[ $token ]['active'] ? 'on' : 'off' ) . '.</p></div>';
+		}
+
+		if ( 'door_delete' === $act ) {
+			if ( ! empty( $all[ $token ]['permanent'] ) ) {
+				return '<div class="notice notice-error"><p>The year-round link cannot be deleted — switch it off instead, so the address survives if you want it back.</p></div>';
+			}
+			$label = (string) $all[ $token ]['label'];
+			unset( $all[ $token ] );
+			gasf_crm_doors_save( $all );
+			gasf_crm_log( sprintf( 'CRM doors: party link "%s" deleted by %s', $label, $who ) );
+			return '<div class="notice notice-success"><p>Party link deleted. Photos already sent through it are kept.</p></div>';
+		}
+
+		$fresh = bin2hex( random_bytes( 32 ) );
+		$all[ $fresh ] = $all[ $token ];
+		unset( $all[ $token ] );
+		gasf_crm_doors_save( $all );
+		gasf_crm_log( sprintf( 'CRM doors: "%s" given a new address by %s, killing every printed copy of the old one',
+			$all[ $fresh ]['label'], $who ) );
+		return '<div class="notice notice-success"><p>New address issued. Anything printed with the old one has stopped working.</p></div>';
+	}
+
+	if ( 'door_add' !== $act ) { return ''; }
+
+	$label  = trim( sanitize_text_field( wp_unslash( $_POST['door_label'] ?? '' ) ) );
+	$event  = trim( sanitize_text_field( wp_unslash( $_POST['door_event'] ?? '' ) ) );
+	$place  = trim( sanitize_text_field( wp_unslash( $_POST['door_place'] ?? '' ) ) );
+	$starts = trim( sanitize_text_field( wp_unslash( $_POST['door_starts'] ?? '' ) ) );
+	$ends   = trim( sanitize_text_field( wp_unslash( $_POST['door_ends'] ?? '' ) ) );
+	$eid    = (int) ( $_POST['door_event_id'] ?? 0 );
+
+	/*
+	 * The calendar fills in whatever was left blank rather than overriding what
+	 * was typed. Picking Oktoberfest and then correcting the closing time by
+	 * hand is a normal thing to want, and a chooser that silently discarded the
+	 * correction would be worse than no chooser at all.
+	 */
+	if ( $eid ) {
+		foreach ( gasf_crm_door_upcoming_events() as $ev ) {
+			if ( $ev['id'] !== $eid ) { continue; }
+			$win    = gasf_crm_door_window_for( $ev );
+			$label  = '' !== $label ? $label : $ev['title'];
+			$event  = '' !== $event ? $event : $ev['title'];
+			$starts = '' !== $starts ? $starts : $win['starts'];
+			$ends   = '' !== $ends ? $ends : $win['ends'];
+			break;
+		}
+	}
+
+	if ( '' === $label ) {
+		return '<div class="notice notice-error"><p>Give the party a name, or pick an event.</p></div>';
+	}
+	if ( '' === $starts || '' === $ends ) {
+		return '<div class="notice notice-error"><p>A party link needs a start and an end. That window is the only thing standing between an auto-accepting link and the open internet.</p></div>';
+	}
+	if ( strtotime( $ends ) <= strtotime( $starts ) ) {
+		return '<div class="notice notice-error"><p>The party has to end after it starts.</p></div>';
+	}
+
+	$token = bin2hex( random_bytes( 32 ) );
+	$all[ $token ] = array(
+		'label'     => $label,
+		'mode'      => 'party',
+		'permanent' => false,
+		'active'    => true,
+		'event'     => $event,
+		'event_id'  => $eid,
+		'place'     => $place,
+		'starts'    => $starts,
+		'ends'      => $ends,
+		'count'     => 0,
+	);
+	gasf_crm_doors_save( $all );
+
+	gasf_crm_log( sprintf( 'CRM doors: party link "%s" created by %s, open %s to %s', $label, $who, $starts, $ends ) );
+
+	return '<div class="notice notice-success"><p>Party link created for <strong>' . esc_html( $label )
+		. '</strong>. It takes photos without approval between those times, and is dead outside them.</p></div>';
+}
+
+/** The Photo links panel on the admin screen. */
+function gasf_crm_admin_doors_section() {
+	gasf_crm_door_open_token();
+	$doors = gasf_crm_doors();
+
+	uasort( $doors, function ( $a, $b ) {
+		if ( ! empty( $a['permanent'] ) !== ! empty( $b['permanent'] ) ) { return ! empty( $a['permanent'] ) ? -1 : 1; }
+		return strcmp( (string) ( $b['starts'] ?? '' ), (string) ( $a['starts'] ?? '' ) );
+	} );
+
+	echo '<h3>Photo links</h3>';
+	echo '<p class="description" style="max-width:820px">Links anybody can use to send the club photos without an account — put one behind a QR code on a table or a poster. There are two kinds, and the difference is who says yes.</p>';
+
+	echo '<table class="widefat striped" style="max-width:1000px;margin:12px 0"><tbody>';
+	foreach ( $doors as $token => $d ) {
+		$perm   = ! empty( $d['permanent'] );
+		$closed = gasf_crm_door_closed_because( array( 'token' => $token ) + (array) $d );
+
+		echo '<tr><td style="width:62%">';
+		printf( '<strong>%s</strong><br>', esc_html( (string) $d['label'] ) );
+		if ( $perm ) {
+			echo '<em>Year-round — every photo waits for a volunteer to keep it.</em>';
+		} else {
+			printf( '<em>Party — photos go straight in, no approval. %s to %s.</em>',
+				esc_html( (string) $d['starts'] ), esc_html( (string) $d['ends'] ) );
+		}
+		echo $closed
+			? '<p style="margin:4px 0;color:#996800">&#9888; ' . esc_html( $closed ) . '</p>'
+			: '<p style="margin:4px 0;color:#2c7a3f">&#10003; open now</p>';
+		printf( '<code style="display:block;word-break:break-all;padding:4px 0">%s</code>', esc_html( gasf_crm_door_url( $token ) ) );
+		printf( '<span class="description">%d photo(s) received</span>', (int) ( $d['count'] ?? 0 ) );
+		echo '</td><td style="vertical-align:middle">';
+
+		echo '<form method="post" style="display:inline-block;margin:0 4px 4px 0">';
+		wp_nonce_field( 'gasf_crm' );
+		echo '<input type="hidden" name="gasf_crm_action" value="door_toggle">';
+		printf( '<input type="hidden" name="token" value="%s">', esc_attr( $token ) );
+		printf( '<button class="button button-small">%s</button></form>', empty( $d['active'] ) ? 'Switch on' : 'Switch off' );
+
+		echo '<form method="post" style="display:inline-block;margin:0 4px 4px 0" onsubmit="return confirm(\'Issue a new address? Every printed QR code and poster with the old one stops working.\')">';
+		wp_nonce_field( 'gasf_crm' );
+		echo '<input type="hidden" name="gasf_crm_action" value="door_cycle">';
+		printf( '<input type="hidden" name="token" value="%s">', esc_attr( $token ) );
+		echo '<button class="button button-small">New address</button></form>';
+
+		if ( ! $perm ) {
+			echo '<form method="post" style="display:inline-block" onsubmit="return confirm(\'Delete this party link? Photos already sent through it are kept.\')">';
+			wp_nonce_field( 'gasf_crm' );
+			echo '<input type="hidden" name="gasf_crm_action" value="door_delete">';
+			printf( '<input type="hidden" name="token" value="%s">', esc_attr( $token ) );
+			echo '<button class="button button-small">Delete</button></form>';
+		}
+		echo '</td></tr>';
+	}
+	echo '</tbody></table>';
+
+	$events = gasf_crm_door_upcoming_events();
+	$places = get_terms( array( 'taxonomy' => 'gasf_photo_place', 'hide_empty' => false, 'orderby' => 'name' ) );
+
+	echo '<h4 style="margin-top:22px">Make a party link</h4>';
+	echo '<p class="description" style="max-width:820px">A party link <strong>skips approval</strong>: photos are in the library and on the screen within seconds, and volunteers remove anything unwanted afterwards. It works only between the times below, which is the whole reason it is safe to hand out.</p>';
+
+	echo '<form method="post" style="margin:12px 0">';
+	wp_nonce_field( 'gasf_crm' );
+	echo '<input type="hidden" name="gasf_crm_action" value="door_add">';
+	echo '<table class="form-table" role="presentation" style="max-width:820px">';
+
+	echo '<tr><th scope="row"><label for="door_event_id">Event</label></th><td>';
+	if ( $events ) {
+		echo '<select name="door_event_id" id="door_event_id" style="min-width:400px"><option value="0">&mdash; not on the calendar, I will type it &mdash;</option>';
+		foreach ( $events as $ev ) {
+			printf( '<option value="%d">%s &nbsp;&mdash;&nbsp; %s</option>',
+				(int) $ev['id'], esc_html( $ev['title'] ), esc_html( wp_date( 'D j M, g:ia', $ev['start'] ) ) );
+		}
+		echo '</select>';
+		echo '<p class="description">Pick one and the name, the tag and the window fill themselves in — open an hour early, close three hours after the end. Anything you type below wins over the calendar, so correcting one field does not throw the rest away.</p>';
+	} else {
+		echo '<p class="description">Nothing upcoming on the calendar, so fill this in by hand.</p>';
+	}
+	echo '</td></tr>';
+
+	echo '<tr><th scope="row"><label for="door_label">Name</label></th><td>'
+		. '<input type="text" name="door_label" id="door_label" class="regular-text" maxlength="80" placeholder="Oktoberfest 2026">'
+		. '<p class="description">What this list shows. Blank uses the event name.</p></td></tr>';
+
+	echo '<tr><th scope="row"><label for="door_event">Event tag</label></th><td>'
+		. '<input type="text" name="door_event" id="door_event" class="regular-text" maxlength="120">'
+		. '<p class="description">Stamped on every photo that comes in, so removing a whole night is one filter away. Blank uses the event name.</p></td></tr>';
+
+	echo '<tr><th scope="row"><label for="door_place">Place</label></th><td><select name="door_place" id="door_place"><option value="">&mdash; none &mdash;</option>';
+	if ( ! is_wp_error( $places ) ) {
+		foreach ( $places as $t ) { printf( '<option value="%s">%s</option>', esc_attr( $t->name ), esc_html( $t->name ) ); }
+	}
+	echo '</select></td></tr>';
+
+	echo '<tr><th scope="row"><label for="door_starts">Opens</label></th><td>'
+		. '<input type="datetime-local" name="door_starts" id="door_starts"> <span class="description">Blank uses the event.</span></td></tr>';
+	echo '<tr><th scope="row"><label for="door_ends">Closes</label></th><td>'
+		. '<input type="datetime-local" name="door_ends" id="door_ends"> <span class="description">Blank uses the event.</span></td></tr>';
+
+	echo '</table>';
+	submit_button( 'Create the link', 'primary', 'submit', false );
+	echo '</form>';
+}
