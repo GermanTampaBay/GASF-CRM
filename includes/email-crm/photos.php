@@ -2208,11 +2208,26 @@ function gasf_crm_photo_submission_finish( $id, $owner, $state, $reason = '', $r
 		$data['next_attempt_at'] = gmdate( 'Y-m-d H:i:s', time() + (int) $retry_in );
 	}
 
-	return (bool) $wpdb->update(
+	$ok = (bool) $wpdb->update(
 		gasf_crm_table( 'photo_submissions' ),
 		$data,
 		array( 'id' => (int) $id, 'lease_owner' => (string) $owner )
 	);
+
+	/*
+	 * Every outcome that is not success writes one log line, HERE, so a failed
+	 * attempt cannot go unrecorded by a caller that forgot. A few callers also
+	 * log with more context; a duplicate line costs nothing and a missing one
+	 * cost an evening.
+	 */
+	if ( $ok && 'complete' !== $state ) {
+		gasf_crm_log( sprintf( 'CRM photos: submission #%d -> %s%s%s',
+			(int) $id, $state,
+			'' !== (string) $reason ? ' — ' . $reason : '',
+			$retry_in > 0 ? ' (next attempt in ' . (int) $retry_in . 's)' : ''
+		) );
+	}
+	return $ok;
 }
 
 /**
@@ -2450,6 +2465,17 @@ function gasf_crm_photo_autoprocess() {
 		) );
 		return 0;
 	}
+
+	/*
+	 * The finally below survives a return and an exception. It does NOT survive
+	 * exit(): PHP skips finally blocks on exit, and something reachable from an
+	 * import can exit — proven on 2026-07-29, when a CLI run finished cleanly
+	 * at sixteen seconds with the lock still held, stalling intake for the
+	 * twenty-minute stale window. A shutdown function runs on ALL of return,
+	 * exception, exit and fatal error, and unlock is token-matched, so the
+	 * duplicate release from the normal path is a harmless no-op.
+	 */
+	register_shutdown_function( 'gasf_crm_photo_unlock', $lock );
 
 	try {
 		return gasf_crm_photo_autoprocess_run();
@@ -2809,10 +2835,34 @@ function gasf_crm_photo_autoprocess_run() {
 		$owner = gasf_crm_photo_submission_claim( $sub );
 		if ( ! $owner ) { continue; } // somebody else has it
 
+		/*
+		 * A submission claimed while still marked 'processing' means its last
+		 * attempt never reported back — the process died or exited mid-run and
+		 * the lease simply expired. Said out loud at the moment it is known,
+		 * because this was tonight's archaeology gap: five attempts vanished
+		 * this way and the record's entire account was "gave up".
+		 */
+		if ( 'processing' === (string) $sub['state'] ) {
+			gasf_crm_log( sprintf(
+				'CRM photos: reclaiming message %d — attempt %d vanished mid-run without reporting (lease expired)',
+				(int) $row['id'], (int) $sub['attempt_count']
+			) );
+		}
+
 		// Beyond the attempt ceiling this stops being a transient problem and
 		// starts being a thing a person needs to look at.
 		if ( (int) $sub['attempt_count'] + 1 > GASF_CRM_PHOTO_MAX_ATTEMPTS ) {
-			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'failed', 'gave up after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts' );
+			// The terminal record carries the last known reason. When there is
+			// none, the absence is itself the finding, and it is stated rather
+			// than left as a blank a person has to interpret.
+			$last = trim( (string) ( $sub['fail_reason'] ?? '' ) );
+			if ( '' === $last ) {
+				$last = ( 'processing' === (string) $sub['state'] )
+					? 'attempts vanished mid-run without reporting (process killed or exited)'
+					: 'no reason was recorded';
+			}
+			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'failed',
+				'gave up after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts — last: ' . $last );
 			gasf_crm_log( 'CRM photos: giving up on message ' . (int) $row['id'] . ' after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts' );
 			gasf_crm_log_event( (int) $thread['id'], 'photo_failed', 'import failed repeatedly — needs a volunteer' );
 			continue;
