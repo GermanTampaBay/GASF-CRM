@@ -338,117 +338,162 @@ function gasf_crm_door_receive( array $door ) {
  * ================================================================== */
 
 function gasf_crm_door_page( $door, $notice ) {
-	$org   = function_exists( 'gasf_crm_cfg' ) ? gasf_crm_cfg()['signature_org'] : get_bloginfo( 'name' );
 	$party = $door ? gasf_crm_door_is_party( $door ) : false;
+	$title = $door ? (string) $door['label'] : 'Share your photos';
 
-	echo '<!DOCTYPE html><html ' . get_language_attributes() . '><head><meta charset="' . esc_attr( get_bloginfo( 'charset' ) ) . '">';
-	echo '<meta name="viewport" content="width=device-width, initial-scale=1">';
-	echo '<meta name="robots" content="noindex, nofollow">';
-	echo '<title>' . esc_html( $door ? 'Share your photos — ' . $door['label'] : 'Share your photos' ) . '</title>';
-	// The tagging page's stylesheet, unchanged: a guest and a member filling in
-	// the tagging form should be looking at the same club, not two products.
-	if ( function_exists( 'gasf_crm_photo_styles' ) ) { gasf_crm_photo_styles(); }
-	echo '<style>
-		.pbig{display:flex;flex-direction:column;align-items:center;gap:6px;padding:22px 18px;text-align:center}
-		.pbig strong{font:600 clamp(1.4rem,5vw,1.9rem)/1.15 var(--display)}
-		.pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:12px 0}
-		.pgrid figure{margin:0;position:relative}
-		.pgrid img{width:100%;aspect-ratio:1;object-fit:cover;border:3px solid var(--print);border-radius:2px;display:block}
-		.pgrid .st{position:absolute;left:4px;right:4px;bottom:4px;text-align:center;font:700 .58rem/1.6 var(--slug);
-			text-transform:uppercase;letter-spacing:.1em;background:rgba(36,29,21,.72);color:#fff;border-radius:2px}
-		.pgrid .st.done{background:rgba(63,107,52,.92)}
-		.pgrid .st.err{background:rgba(143,49,35,.92)}
-		.bigbtn{display:block;width:100%;padding:20px;font:700 .82rem/1 var(--slug);text-transform:uppercase;
-			letter-spacing:.18em;color:var(--card);background:var(--ink);border:0;border-radius:2px;cursor:pointer}
-		.bigbtn:disabled{opacity:.45;cursor:default}
-	</style>';
-	echo '</head><body>';
+	/*
+	 * Rendered inside the club's own theme, not as a standalone document.
+	 *
+	 * This page is handed to guests as a link, and a link that opens something
+	 * that does not look like the club reads as a phishing page — which is
+	 * exactly the wrong instinct to trigger in somebody about to hand over
+	 * their photos. So: the theme's header, the theme's footer, the theme's
+	 * fonts and colours, and the same content wrapper an ordinary page uses.
+	 *
+	 * Everything below is deliberately plain HTML — h2, p, label, button,
+	 * select — because the theme already styles those. The only CSS this page
+	 * carries is for the thumbnail grid, which no theme provides. Anything more
+	 * would be this page fighting the site it is trying to look like.
+	 */
+	global $wp_query;
+	$wp_query->is_404 = false;
+	status_header( 200 );
 
-	echo '<header class="bar"><div class="wrap"><h1>' . esc_html( get_bloginfo( 'name' ) ) . '</h1></div></header>';
-	echo '<div class="wrap main">';
+	add_filter( 'pre_get_document_title', function () use ( $title ) {
+		return $title . ' – ' . get_bloginfo( 'name' );
+	} );
+	// Not indexed: these URLs carry a token, and a search engine holding one
+	// defeats the point of being able to revoke it.
+	add_filter( 'wp_robots', 'wp_robots_no_robots' );
+	add_filter( 'body_class', function ( $c ) {
+		$c[] = 'gasf-photo-door';
+		return $c;
+	} );
+
+	get_header();
+	?>
+
+	<div class="hgrid main-content-grid">
+		<main id="content" class="content hgrid-span-12">
+			<div id="content-wrap" class="content-wrap">
+				<article class="entry gasf-door-entry">
+					<h1 class="entry-title"><?php echo esc_html( $party ? 'Photos from ' . $title : $title ); ?></h1>
+					<div class="entry-content">
+	<?php
 
 	if ( '' !== (string) $notice ) {
-		echo '<div class="card pad intro"><h2>' . esc_html( $door ? $door['label'] : 'Photo sharing' ) . '</h2>';
 		echo '<p>' . esc_html( $notice ) . '</p>';
-		echo '<p class="muted">' . esc_html( $org ) . '</p></div></div></body></html>';
+		echo '<p><a href="' . esc_url( home_url( '/' ) ) . '">Back to the club&rsquo;s website</a></p>';
+		echo '</div></article></div></main></div>';
+		get_footer();
 		return;
 	}
 
-	echo '<div class="card pad intro">';
-	echo '<h2>' . esc_html( $party ? 'Photos from ' . $door['label'] : (string) $door['label'] ) . '</h2>';
-	if ( $party ) {
-		echo '<p>Took a good one tonight? Send it to the club and it goes up on the screen inside — and into the club\'s archive.</p>';
-		echo '<p class="muted">No account, no app. Pick your photos and tap send. Add who is in them if you like; you do not have to.</p>';
-	} else {
-		echo '<p>Photos of the club, its events and its people are always welcome — from last weekend or from 1974.</p>';
-		echo '<p class="muted">No account, no app. Tell us what you can about them and a volunteer will add them to the club\'s archive. Nothing appears anywhere until somebody from the club has looked.</p>';
-	}
-	echo '</div>';
+	gasf_crm_door_styles();
 
-	echo '<div class="card pad">';
-	echo '<h3>May we use them?</h3>';
-	printf( '<label class="cbox"><input type="checkbox" id="pconsent"> <span>%s</span></label>',
+	if ( $party ) {
+		echo '<p>Took a good one tonight? Send it to the club and it goes up on the screen inside &mdash; and into the club&rsquo;s archive.</p>';
+		echo '<p>No account, no app. Pick your photos and tap send. Add who is in them if you like; you do not have to.</p>';
+	} else {
+		echo '<p>Photos of the club, its events and its people are always welcome &mdash; from last weekend or from 1974.</p>';
+		echo '<p>No account, no app. Tell us what you can about them and a volunteer will add them to the club&rsquo;s archive. Nothing appears anywhere until somebody from the club has looked.</p>';
+	}
+
+	echo '<div class="gasf-door-box">';
+	echo '<h2>May we use them?</h2>';
+	printf( '<p><label><input type="checkbox" id="pconsent"> %s</label></p>',
 		esc_html( function_exists( 'gasf_crm_photo_consent_text' )
 			? gasf_crm_photo_consent_text()
 			: 'The club may use these photos.' ) );
-	echo '<p class="muted" style="margin:8px 0 0">Tick this and the club may use your photos on its website, social media and in its newsletter. Nothing goes up with your name on it unless you are asked first.</p>';
+	echo '<p class="gasf-door-fine">Tick this and the club may use your photos on its website, social media and in its newsletter. Nothing goes up with your name on it unless you are asked first.</p>';
 	echo '</div>';
 
-	echo '<div class="card pad">';
-	echo '<div class="pbig"><strong>Choose your photos</strong>';
-	echo '<span class="muted">as many as you like — they send one at a time</span></div>';
-	echo '<button type="button" class="bigbtn" id="ppick">Pick photos</button>';
-	echo '<input type="file" id="pfile" accept="image/*" multiple hidden>';
-	echo '<div class="pgrid" id="pgrid"></div>';
+	echo '<h2>Choose your photos</h2>';
+	echo '<p>As many as you like &mdash; they send one at a time.</p>';
+	echo '<p><button type="button" id="ppick" class="gasf-door-pick">Pick photos</button></p>';
+	echo '<input type="file" id="pfile" accept="image/*" multiple style="display:none">';
+	echo '<div class="gasf-door-grid" id="pgrid"></div>';
 
 	echo '<div id="pform" hidden>';
 
-	echo '<div class="f"><span>Who is in them?' . ( $party ? ' (optional)' : '' ) . '</span>';
-	echo '<div id="pnames"><span class="pwrap"><input type="text" class="pname" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"></span></div>';
-	echo '<button type="button" class="addp" id="paddp">+ Add another person</button>';
-	echo '<em>One name per box. Leave blank if you would rather not say.</em></div>';
+	echo '<p><label for="pname0"><strong>Who is in them?' . ( $party ? ' (optional)' : '' ) . '</strong></label></p>';
+	echo '<div id="pnames"><p class="pwrap"><input type="text" id="pname0" class="pname" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"></p></div>';
+	echo '<p><button type="button" id="paddp">+ Add another person</button></p>';
+	echo '<p class="gasf-door-fine">One name per box. Leave blank if you would rather not say.</p>';
 
 	if ( ! $party ) {
-		// The year-round door asks everything, because nothing about the
-		// context is known: these might be photos of a picnic in 1974.
-		$places = get_terms( array(
-			'taxonomy'   => 'gasf_photo_place',
-			'hide_empty' => false,
-			'orderby'    => 'name',
-		) );
-		echo '<div class="f"><span>Where was it taken?</span><select id="pplace"><option value="">— not sure —</option>';
+		$places = get_terms( array( 'taxonomy' => 'gasf_photo_place', 'hide_empty' => false, 'orderby' => 'name' ) );
+
+		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace"><option value="">&mdash; not sure &mdash;</option>';
 		if ( ! is_wp_error( $places ) ) {
 			foreach ( $places as $t ) {
 				printf( '<option value="%s">%s</option>', esc_attr( $t->name ), esc_html( $t->name ) );
 			}
 		}
-		echo '</select></div>';
+		echo '</select></p>';
 
-		echo '<div class="f"><span>What was the occasion?</span>';
-		echo '<span class="pwrap"><input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding…" autocomplete="off"></span>';
-		echo '<em>A name is plenty — a volunteer will match it to the club calendar.</em></div>';
+		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
+		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
+		echo '<p class="gasf-door-fine">A name is plenty &mdash; a volunteer will match it to the club calendar.</p>';
 
-		echo '<div class="f"><span>When was it taken?</span><input type="date" id="ptaken">';
-		echo '<em>Leave this alone if the photo knows its own date — most phone photos do.</em></div>';
+		echo '<p><label for="ptaken"><strong>When was it taken?</strong></label><br><input type="date" id="ptaken"></p>';
+		echo '<p class="gasf-door-fine">Leave this alone if the photo knows its own date &mdash; most phone photos do.</p>';
 
-		echo '<div class="f"><span>Anything you want to tell us?</span>';
-		echo '<textarea id="pcaption" rows="3" maxlength="600" placeholder="Who, what, why it matters — anything at all."></textarea></div>';
+		echo '<p><label for="pcaption"><strong>Anything you want to tell us?</strong></label><br>';
+		echo '<textarea id="pcaption" rows="3" maxlength="600" placeholder="Who, what, why it matters &mdash; anything at all."></textarea></p>';
 
-		echo '<div class="f"><span>Your name (optional)</span>';
-		echo '<span class="pwrap"><input type="text" id="pfrom" maxlength="80" placeholder="So we know who to thank" autocomplete="name"></span></div>';
+		echo '<p><label for="pfrom"><strong>Your name (optional)</strong></label><br>';
+		echo '<input type="text" id="pfrom" maxlength="80" placeholder="So we know who to thank" autocomplete="name"></p>';
 	}
 
-	echo '</div>'; // #pform
-
-	echo '<div class="actions" style="margin-top:14px"><button type="button" class="btn" id="psend" disabled>Send to the club</button>';
-	echo '<span class="muted" id="pmsg"></span></div>';
 	echo '</div>';
 
-	echo '<p class="foot">' . esc_html( $org ) . '</p>';
-	echo '</div>';
+	echo '<p class="gasf-door-send"><button type="button" id="psend" disabled>Send to the club</button> <span id="pmsg"></span></p>';
 
 	gasf_crm_door_script( $party );
-	echo '</body></html>';
+
+	?>
+					</div><!-- .entry-content -->
+				</article>
+			</div><!-- #content-wrap -->
+		</main><!-- #content -->
+	</div><!-- .main-content-grid -->
+	<?php
+	get_footer();
+}
+
+/**
+ * The only styling this page owns.
+ *
+ * A thumbnail grid and a couple of spacing rules. Everything else — type,
+ * colour, buttons, inputs — is the theme's, which is the entire point: the
+ * grid is the one thing no theme has an opinion about. Colours are drawn from
+ * currentColor so this stays right if the club ever restyles the site.
+ */
+function gasf_crm_door_styles() {
+	?>
+<style>
+	.gasf-door-entry .gasf-door-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:8px;margin:14px 0}
+	.gasf-door-entry .gasf-door-grid figure{margin:0;position:relative}
+	.gasf-door-entry .gasf-door-grid img{width:100%;aspect-ratio:1;object-fit:cover;display:block;border-radius:3px}
+	.gasf-door-entry .gasf-door-grid .st{position:absolute;left:4px;right:4px;bottom:4px;text-align:center;
+		font-size:11px;line-height:1.7;letter-spacing:.06em;text-transform:uppercase;
+		background:rgba(0,0,0,.66);color:#fff;border-radius:2px}
+	.gasf-door-entry .gasf-door-grid .st.done{background:rgba(38,110,45,.9)}
+	.gasf-door-entry .gasf-door-grid .st.err{background:rgba(150,40,30,.92)}
+	.gasf-door-entry .gasf-door-box{border:1px solid rgba(128,128,128,.35);border-radius:4px;padding:14px 16px;margin:18px 0}
+	.gasf-door-entry .gasf-door-box h2{margin-top:0}
+	.gasf-door-entry .gasf-door-fine{font-size:.88em;opacity:.75;margin-top:-.4em}
+	.gasf-door-entry .gasf-door-pick{width:100%;padding:18px;font-size:1.05em}
+	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
+	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
+	.gasf-door-entry .pwrap{margin:0 0 6px}
+	.gasf-door-entry .gasf-door-send #pmsg{margin-left:10px}
+	@media (max-width:480px){
+		.gasf-door-entry .gasf-door-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}
+	}
+</style>
+	<?php
 }
 
 function gasf_crm_door_script( $party ) {
