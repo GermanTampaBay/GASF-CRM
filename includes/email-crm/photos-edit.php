@@ -161,7 +161,19 @@ function gasf_crm_photo_edit_resizes( $id, $path ) {
 	}
 
 	require_once ABSPATH . 'wp-admin/includes/image.php';
-	// Sixteen sizes, ~2s on this host — measured, not guessed.
+
+	/*
+	 * The third path to need this allowance, added BEFORE it burned anyone,
+	 * which is a first. Regenerating sixteen sizes is the same work that
+	 * silently killed uploads at sixty seconds and then killed the intake the
+	 * same way; an edit of a large photo would have died here identically,
+	 * mid-regeneration, leaving the attached file cropped but half its sizes
+	 * still showing the old frame.
+	 */
+	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
+
+	// Sixteen sizes, ~2s on this host for a typical photo — measured, not guessed.
 	wp_update_attachment_metadata( $id, wp_generate_attachment_metadata( $id, $path ) );
 }
 
