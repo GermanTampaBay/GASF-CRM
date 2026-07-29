@@ -153,6 +153,44 @@ function gasf_crm_photo_consent_text() {
 }
 
 /**
+ * Where a public submission came from, for the day somebody sends something
+ * vile.
+ *
+ * Everything here is what the browser volunteered on the request. None of it
+ * identifies a person and none of it is meant to: it is the thread a club
+ * official or the police can pull on when a photo has to be answered for, and
+ * it is worth exactly as much as the ISP is willing to say. A user agent can be
+ * forged and an IP can be a coffee shop @@D@@ this is a starting point for an
+ * investigation, not evidence of who did it, and treating it as the latter
+ * would be the real mistake.
+ *
+ * Kept apart from the consent record on purpose. Consent is what somebody
+ * agreed to and belongs to them; this is how the request arrived and belongs to
+ * the incident. Merging them would mean printing an IP address on any screen
+ * that shows what a person agreed to.
+ */
+function gasf_crm_photo_origin() {
+	$get = function ( $key, $limit = 200 ) {
+		return isset( $_SERVER[ $key ] )
+			? substr( sanitize_text_field( wp_unslash( $_SERVER[ $key ] ) ), 0, $limit )
+			: '';
+	};
+	return array(
+		'ip'       => gasf_crm_client_ip(),
+		'ua'       => $get( 'HTTP_USER_AGENT', 300 ),
+		'lang'     => $get( 'HTTP_ACCEPT_LANGUAGE', 120 ),
+		'referer'  => $get( 'HTTP_REFERER', 300 ),
+		'at'       => current_time( 'mysql', true ),
+		'at_local' => current_time( 'mysql' ),
+	);
+}
+
+/** One line of it, for the log. */
+function gasf_crm_photo_origin_line( array $o ) {
+	return sprintf( 'from %s [%s]', $o['ip'] ?: 'unknown IP', $o['ua'] ?: 'no user agent' );
+}
+
+/**
  * What NOT ticking the box means.
  *
  * The tick is pre-set, and somebody clearing it has not refused @@D@@ they have
@@ -2071,6 +2109,14 @@ function gasf_crm_photo_save_pending( array $invite ) {
 		if ( ! get_post_meta( $aid, '_gasf_photo_consent', true ) ) {
 			update_post_meta( $aid, '_gasf_photo_consent', $consent );
 		}
+
+		// How this answer reached us. The photo itself arrived by email and its
+		// provenance already says so; this records the browser that described
+		// it, which is the half a stranger controls.
+		update_post_meta( $aid, '_gasf_photo_origin', gasf_crm_photo_origin() + array(
+			'route' => 'tagging link',
+			'by'    => (string) $invite['email'],
+		) );
 
 		// The sender has answered, so this is a volunteer's to look at now rather
 		// than something still being waited on.

@@ -570,6 +570,17 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 	if ( ! empty( $src_md5 ) ) { update_post_meta( $id, '_gasf_photo_src_md5', $src_md5 ); }
 
+	// Anonymous uploads carry where the request came from. A volunteer's upload
+	// does not need it: their user id is already on the provenance, and logging
+	// a colleague's IP address every time they add a photo is surveillance
+	// rather than forensics.
+	if ( $anon && function_exists( 'gasf_crm_photo_origin' ) ) {
+		update_post_meta( $id, '_gasf_photo_origin', gasf_crm_photo_origin() + array(
+			'route' => (string) ( $anon['label'] ?? 'public link' ),
+			'by'    => (string) ( $anon['from'] ?? '' ),
+		) );
+	}
+
 	gasf_crm_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
 		$id, $name, gasf_crm_display_name( get_current_user_id() ) ) );
 

@@ -352,10 +352,11 @@ function gasf_crm_door_receive( array $door ) {
 	gasf_crm_door_device_bump( $door['token'] );
 	gasf_crm_door_total_bump( $door['token'] );
 
-	gasf_crm_log( sprintf( 'Door "%s": guest photo #%d %s%s',
+	gasf_crm_log( sprintf( 'Door "%s": guest photo #%d %s%s %s',
 		$door['label'], (int) $card['id'],
 		$party ? 'accepted straight into the library' : 'held for a volunteer',
-		$people ? ' (named: ' . implode( ', ', $people ) . ')' : '' ) );
+		$people ? ' (named: ' . implode( ', ', $people ) . ')' : '',
+		gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
 
 	echo wp_json_encode( array(
 		'ok'   => true,
@@ -446,6 +447,10 @@ function gasf_crm_door_page( $door, $notice ) {
 	}
 
 	gasf_crm_door_styles();
+
+	// Above everything, because once the button is pressed this is the only
+	// question the submitter still has.
+	echo '<div id="pdone" class="gasf-door-done" role="status" aria-live="polite" hidden></div>';
 
 	if ( $party ) {
 		echo '<p>Took a good one tonight? Send it to the club and it goes up on the screen inside &mdash; and into the club&rsquo;s archive.</p>';
@@ -626,6 +631,8 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
 	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
 	.gasf-door-entry .pwrap{margin:0 0 6px}
+	.gasf-door-entry .gasf-door-done{border:1px solid #0f6e56;border-left:5px solid #0f6e56;
+		border-radius:3px;padding:14px 16px;margin:0 0 18px;font-size:1.05em}
 	.gasf-door-entry .gasf-door-evlist{display:flex;flex-direction:column;gap:6px;margin:8px 0;max-width:420px}
 	.gasf-door-entry .gasf-door-evlist button{text-align:left;padding:9px 12px}
 	.gasf-door-entry .gasf-door-evlist button em{opacity:.8;font-style:normal}
@@ -767,8 +774,62 @@ function gasf_crm_door_script( $party ) {
 	}
 	if (dateIn) { dateIn.onchange = function(){ evPaint(); }; }
 
+	/*
+	 * Clear the form and put the answer at the top.
+	 *
+	 * A filled-in form with a note at the bottom makes the submitter undo our
+	 * work before they can send anything else: unpick eight thumbnails, empty
+	 * four boxes, scroll back up. Sent photos are dropped and the boxes cleared
+	 * so the next batch starts from nothing.
+	 *
+	 * Two deliberate exceptions. Photos that FAILED stay in the grid, because
+	 * clearing them would throw away the only copy this page holds and send
+	 * somebody back into their camera roll to find them again. And the
+	 * permission tick is left exactly as they set it — re-ticking a box
+	 * somebody deliberately cleared would quietly widen the permission on
+	 * everything they send next.
+	 */
+	function finish(ok, bad, held){
+		var banner = document.getElementById('pdone');
+
+		if (ok) {
+			picked = picked.filter(function(p){ return p.state !== 'done'; });
+			if (!picked.length) {
+				['pevent', 'ptaken', 'pcaption', 'peventid', 'pplaceother'].forEach(function(id){
+					var e = document.getElementById(id); if (e) { e.value = ''; }
+				});
+				var pl = document.getElementById('pplace'); if (pl) { pl.value = ''; }
+				var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
+				var names = document.getElementById('pnames');
+				if (names) {
+					var keep = names.querySelector('.pwrap');
+					keep.querySelector('input').value = '';
+					names.innerHTML = '';
+					names.appendChild(keep);
+				}
+				if (typeof evBox !== 'undefined' && evBox) { evBox.innerHTML = ''; }
+			}
+		}
+
+		paint();
+		msg.textContent = '';
+
+		if (banner) {
+			banner.textContent = ok
+				? ok + ' photo' + (ok === 1 ? '' : 's') + ' sent — thank you!' +
+					(held ? ' Somebody from the club will take a look shortly.' : '') +
+					(bad ? ' ' + bad + ' could not be sent — those are still below.' : '')
+				: 'Nothing was sent.' + (bad ? ' Please try again in a moment.' : '');
+			banner.hidden = false;
+			banner.scrollIntoView({ block: 'center' });
+		}
+	}
+
 	send.onclick = function(){
-		busy = true; paint();
+		busy = true;
+		var top = document.getElementById('pdone');
+		if (top) { top.hidden = true; }
+		paint();
 
 		// Read the answers ONCE, before the first upload: they describe the
 		// batch, and a guest editing a box mid-send should not split it.
@@ -786,12 +847,8 @@ function gasf_crm_door_script( $party ) {
 		var next = function(){
 			var p = queue.shift();
 			if (!p) {
-				busy = false; paint();
-				msg.textContent = ok
-					? ok + ' photo' + (ok === 1 ? '' : 's') + ' sent — thank you!' +
-						(held ? ' Somebody from the club will take a look shortly.' : '') +
-						(bad ? ' ' + bad + ' could not be sent.' : '')
-					: 'Nothing was sent.' + (bad ? ' Please try again in a moment.' : '');
+				busy = false;
+				finish(ok, bad, held);
 				return;
 			}
 			p.state = 'going'; paint();
