@@ -94,6 +94,14 @@ function gasf_crm_backup_graph( $method, $url, $body = null, $raw = false ) {
  * Year folders, because one flat folder holding every photo the club ever
  * takes is the SharePoint equivalent of the unlabelled shoebox this whole
  * system exists to prevent.
+ *
+ * GET-first, create on 404. The first version created with
+ * conflictBehavior=fail and treated 409 as "exists", but its already-exists
+ * path rebuilt the parent address with raw spaces in the URL \u2014 and the very
+ * first real folder this walks is "Committee - Marketing and Advertising",
+ * which is nothing but spaces. Asking before creating is one extra request
+ * per segment, once per process, for a walk that cannot be embarrassed by a
+ * folder name.
  */
 function gasf_crm_backup_folder( $year ) {
 	$cfg  = gasf_crm_backup_cfg();
@@ -102,25 +110,26 @@ function gasf_crm_backup_folder( $year ) {
 	static $made = array();
 	if ( isset( $made[ $path ] ) ) { return $path; }
 
-	// Walk the path, creating each segment. PATCH-if-exists semantics via the
-	// children endpoint with conflictBehavior fail -> treat "already exists"
-	// as success, which for a folder it is.
+	$drive  = 'https://graph.microsoft.com/v1.0/drives/' . rawurlencode( $cfg['drive_id'] );
+	$sofar  = '';
 	$parent = 'root';
+
 	foreach ( explode( '/', $path ) as $seg ) {
-		$r = gasf_crm_backup_graph( 'POST',
-			'https://graph.microsoft.com/v1.0/drives/' . rawurlencode( $cfg['drive_id'] ) . '/items/' . $parent . '/children',
-			array( 'name' => $seg, 'folder' => new stdClass(), '@microsoft.graph.conflictBehavior' => 'fail' )
-		);
-		if ( is_wp_error( $r ) ) {
-			$data = $r->get_error_data();
-			if ( is_array( $data ) && 409 === (int) ( $data['status'] ?? 0 ) ) {
-				// Already there — address it by path instead of id and walk on.
-				$parent = 'root:/' . implode( '/', array_slice( explode( '/', $path ), 0, array_search( $seg, explode( '/', $path ), true ) + 1 ) ) . ':';
-				continue;
-			}
-			return $r;
+		$sofar .= ( '' === $sofar ? '' : '/' ) . $seg;
+		$enc    = implode( '/', array_map( 'rawurlencode', explode( '/', $sofar ) ) );
+
+		$r = gasf_crm_backup_graph( 'GET', $drive . '/root:/' . $enc );
+		if ( ! is_wp_error( $r ) ) {
+			$parent = (string) $r['id'];
+			continue;
 		}
-		$parent = (string) $r['id'];
+		$data = $r->get_error_data();
+		if ( ! is_array( $data ) || 404 !== (int) ( $data['status'] ?? 0 ) ) { return $r; }
+
+		$made_r = gasf_crm_backup_graph( 'POST', $drive . '/items/' . rawurlencode( $parent ) . '/children',
+			array( 'name' => $seg, 'folder' => new stdClass(), '@microsoft.graph.conflictBehavior' => 'fail' ) );
+		if ( is_wp_error( $made_r ) ) { return $made_r; }
+		$parent = (string) $made_r['id'];
 	}
 
 	$made[ $path ] = true;
@@ -467,10 +476,17 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			if ( '' === $site ) { WP_CLI::error( 'Usage: wp gasf-backup connect <site-id>' ); }
 			$d = gasf_crm_backup_graph( 'GET', 'https://graph.microsoft.com/v1.0/sites/' . rawurlencode( $site ) . '/drive' );
 			if ( is_wp_error( $d ) ) { WP_CLI::error( $d->get_error_message() ); }
+			// Optional third argument: the root path inside the library. For a
+			// standard Teams channel that is the channel's own folder \u2014 e.g.
+			// "Committee - Marketing and Advertising/Photo Archive" \u2014 because a
+			// standard channel is a folder on the team site, not a site.
+			$root = isset( $args[2] ) && '' !== trim( (string) $args[2] )
+				? trim( (string) $args[2], '/' )
+				: gasf_crm_backup_cfg()['root'];
 			update_option( 'gasf_crm_backup', array(
 				'enabled' => 1, 'site_id' => $site,
 				'drive_id' => (string) $d['id'],
-				'root' => gasf_crm_backup_cfg()['root'],
+				'root' => $root,
 			), false );
 			WP_CLI::success( 'Connected to drive "' . ( $d['name'] ?? '?' ) . '" (' . $d['id'] . '). Backup enabled.' );
 			return;
