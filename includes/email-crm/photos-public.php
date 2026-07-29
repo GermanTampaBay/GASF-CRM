@@ -789,7 +789,7 @@ function gasf_crm_door_script( $party ) {
 	 * somebody deliberately cleared would quietly widen the permission on
 	 * everything they send next.
 	 */
-	function finish(ok, bad, held){
+	function finish(ok, bad, held, why){
 		var banner = document.getElementById('pdone');
 
 		if (ok) {
@@ -815,11 +815,17 @@ function gasf_crm_door_script( $party ) {
 		msg.textContent = '';
 
 		if (banner) {
+			/*
+			 * Say WHY, using the server's own words. The generic "please try
+			 * again in a moment" was worse than unhelpful for the commonest
+			 * failure there is: a photo already sent, where trying again is
+			 * guaranteed to fail the same way forever.
+			 */
 			banner.textContent = ok
 				? ok + ' photo' + (ok === 1 ? '' : 's') + ' sent — thank you!' +
 					(held ? ' Somebody from the club will take a look shortly.' : '') +
-					(bad ? ' ' + bad + ' could not be sent — those are still below.' : '')
-				: 'Nothing was sent.' + (bad ? ' Please try again in a moment.' : '');
+					(bad ? ' ' + bad + ' could not be sent: ' + why : '')
+				: (why || 'Nothing was sent. Please try again in a moment.');
 			banner.hidden = false;
 			banner.scrollIntoView({ block: 'center' });
 		}
@@ -842,13 +848,13 @@ function gasf_crm_door_script( $party ) {
 		};
 
 		var queue = picked.filter(function(p){ return p.state === 'new'; });
-		var ok = 0, bad = 0, held = false;
+		var ok = 0, bad = 0, held = false, why = '';
 
 		var next = function(){
 			var p = queue.shift();
 			if (!p) {
 				busy = false;
-				finish(ok, bad, held);
+				finish(ok, bad, held, why);
 				return;
 			}
 			p.state = 'going'; paint();
@@ -870,7 +876,7 @@ function gasf_crm_door_script( $party ) {
 					if (b.held) { held = true; }
 					p.state = 'done'; ok++;
 				})
-				.catch(function(e){ p.state = 'err'; bad++; msg.textContent = e.message; })
+				.catch(function(e){ p.state = 'err'; bad++; if (!why) { why = e.message; } })
 				.then(function(){ paint(); next(); });
 		};
 		next();
