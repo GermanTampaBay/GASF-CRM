@@ -3435,7 +3435,8 @@ function gasf_crm_render_inbox() {
 			list.innerHTML = held.map(function(h){
 				var said = [];
 				if (h.people.length) { said.push('<strong>' + h.people.map(esc).join(', ') + '</strong>'); }
-				if (h.place)   { said.push(esc(h.place)); }
+				if (h.place) { said.push(esc(h.place)); }
+				else if (h.place_said) { said.push(esc(h.place_said) + ' <em>(not a place we have yet)</em>'); }
 				if (h.event)   { said.push(esc(h.event)); }
 				return '<div class="card pad hrow" style="margin:8px 0;display:flex;gap:12px;align-items:flex-start">' +
 					'<img src="' + esc(h.url) + '" alt="" style="width:120px;height:120px;object-fit:cover;border:3px solid var(--print);flex:0 0 auto">' +

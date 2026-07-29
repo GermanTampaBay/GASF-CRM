@@ -280,6 +280,9 @@ function gasf_crm_door_receive( array $door ) {
 	// A party knows its own event, place and night. The year-round door has to
 	// ask, and takes whatever the guest was willing to say.
 	$place    = $party ? (string) ( $door['place'] ?? '' ) : sanitize_text_field( wp_unslash( (string) ( $_POST['place'] ?? '' ) ) );
+	// '__other' is the picker's own sentinel and is never a place name; if it
+	// arrives here the guest chose "somewhere else" and typed nothing.
+	if ( '__other' === $place ) { $place = ''; }
 	$event    = $party ? (string) ( $door['event'] ?? '' ) : sanitize_text_field( wp_unslash( (string) ( $_POST['event'] ?? '' ) ) );
 	$event_id = $party ? (int) ( $door['event_id'] ?? 0 ) : 0;
 	$taken    = $party ? '' : sanitize_text_field( wp_unslash( (string) ( $_POST['taken'] ?? '' ) ) );
@@ -459,15 +462,36 @@ function gasf_crm_door_page( $door, $notice ) {
 	echo '<p class="gasf-door-fine">One name per box. Leave blank if you would rather not say.</p>';
 
 	if ( ! $party ) {
+		/*
+		 * The club itself goes first, alphabetical order after it. Most photos
+		 * sent through this link were taken at the club, and making the common
+		 * answer the first one you see is worth more than a tidy A-to-Z that
+		 * puts the Biergarten above the building containing it.
+		 */
 		$places = get_terms( array( 'taxonomy' => 'gasf_photo_place', 'hide_empty' => false, 'orderby' => 'name' ) );
-
-		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace"><option value="">&mdash; not sure &mdash;</option>';
-		if ( ! is_wp_error( $places ) ) {
-			foreach ( $places as $t ) {
-				printf( '<option value="%s">%s</option>', esc_attr( $t->name ), esc_html( $t->name ) );
+		$club   = array();
+		$rest   = array();
+		foreach ( is_wp_error( $places ) ? array() : $places as $t ) {
+			if ( 0 === strcasecmp( $t->name, 'German-American Society' ) ) {
+				$club[] = $t;
+			} else {
+				$rest[] = $t;
 			}
 		}
+
+		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace"><option value="">&mdash; not sure &mdash;</option>';
+		foreach ( array_merge( $club, $rest ) as $t ) {
+			printf( '<option value="%s">%s</option>', esc_attr( $t->name ), esc_html( $t->name ) );
+		}
+		// Somewhere the club has no term for yet. Typed answers are NOT turned
+		// into places on the spot @@D@@ a guest guessing at a room name would
+		// quietly grow the taxonomy a typo at a time. It travels as a note for
+		// whoever reviews the photo, who can make it a real place or correct it.
+		echo '<option value="__other">&mdash; somewhere else &mdash;</option>';
 		echo '</select></p>';
+
+		echo '<p id="pplaceotherwrap" hidden><label for="pplaceother">Where?</label><br>';
+		echo '<input type="text" id="pplaceother" maxlength="80" placeholder="A park, a hall, somebody&rsquo;s garden&hellip;" autocomplete="off"></p>';
 
 		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
 		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
@@ -598,6 +622,22 @@ function gasf_crm_door_script( $party ) {
 
 	function val(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 
+	// "Somewhere else" reveals a box; anything else hides it, so a stale typed
+	// answer cannot be sent alongside a chosen one.
+	var placeSel = document.getElementById('pplace');
+	if (placeSel) {
+		placeSel.onchange = function(){
+			var other = placeSel.value === '__other';
+			document.getElementById('pplaceotherwrap').hidden = !other;
+			if (other) { document.getElementById('pplaceother').focus(); }
+			else { document.getElementById('pplaceother').value = ''; }
+		};
+	}
+
+	function placeAnswer(){
+		return val('pplace') === '__other' ? val('pplaceother').trim() : val('pplace');
+	}
+
 	send.onclick = function(){
 		busy = true; paint();
 
@@ -607,7 +647,7 @@ function gasf_crm_door_script( $party ) {
 			return i.value.trim();
 		}).filter(Boolean);
 		var extra = PARTY ? null : {
-			place: val('pplace'), event: val('pevent'),
+			place: placeAnswer(), event: val('pevent'),
 			taken: val('ptaken'), caption: val('pcaption'), from: val('pfrom')
 		};
 
@@ -845,6 +885,11 @@ add_action( 'rest_api_init', function () {
 					'caption' => (string) ( $g['caption'] ?? '' ),
 					'people'  => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
 					'place'   => implode( ', ', gasf_crm_photo_term_names( $id, 'gasf_photo_place' ) ),
+					// What the guest typed, when it matched no place the club
+					// has. Without this their answer would be swallowed: the
+					// upload deliberately refuses to invent terms, so nothing
+					// downstream would ever show it.
+					'place_said' => (string) ( $g['place'] ?? '' ),
 					'at'      => (string) ( $g['at'] ?? '' ),
 				);
 			}

@@ -163,7 +163,7 @@ function gasf_crm_photo_consent_text() {
  * survives any later edit of this sentence.
  */
 function gasf_crm_photo_consent_text_limited() {
-	return 'Not ticking the box lets us use these images solely for display on our property and for general archival usage.';
+	return 'Untick the box to let us use these images solely for display on our property and for general archival usage.';
 }
 
 /**
