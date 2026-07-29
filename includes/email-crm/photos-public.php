@@ -186,26 +186,40 @@ function gasf_crm_door_open_token() {
 }
 
 /**
- * The on-property places: the club's own branch of the place tree.
+ * The on-property places: what a party link's picker offers and what its
+ * uploads may claim.
  *
- * What a party link's picker offers, and what its uploads may claim. A party
- * happens on the grounds, so the grounds are the whole vocabulary — Welton
- * included, because it is on the property and somebody at Oktoberfest is
- * allowed to be eating a lobster roll. A rule over the tree rather than a list
- * of names, so the next on-property venue is one taxonomy edit, not a deploy.
+ * Two ways in, because the property and the hierarchy are different facts.
+ * The club's own branch of the tree is on-property by definition. Welton is
+ * on the property too — somebody at Oktoberfest is allowed to be eating a
+ * lobster roll — but it is a separate company, and the tree models
+ * ownership, not geography: making it a child of the club just to reach this
+ * list would be a lie in the taxonomy to save a flag. So the flag exists:
+ * gasf_photo_onproperty on the term, and the next odd tenant is one term-meta
+ * edit, not a deploy.
  */
 function gasf_crm_door_onproperty() {
 	$home = function_exists( 'gasf_photo_home_place' ) ? gasf_photo_home_place() : 0;
 	if ( ! $home || ! function_exists( 'gasf_photo_place_tree' ) ) { return array(); }
 
-	$branch = array( (int) $home => true );
+	$in = array( (int) $home => true );
 	foreach ( (array) get_term_children( $home, 'gasf_photo_place' ) as $c ) {
-		$branch[ (int) $c ] = true;
+		$in[ (int) $c ] = true;
+	}
+	$flagged = get_terms( array(
+		'taxonomy'   => 'gasf_photo_place',
+		'hide_empty' => false,
+		'fields'     => 'ids',
+		'meta_key'   => 'gasf_photo_onproperty', // phpcs:ignore WordPress.DB.SlowDBQuery
+		'meta_value' => '1',                     // phpcs:ignore WordPress.DB.SlowDBQuery
+	) );
+	foreach ( ( is_wp_error( $flagged ) ? array() : (array) $flagged ) as $t ) {
+		$in[ (int) $t ] = true;
 	}
 
 	$out = array();
 	foreach ( gasf_photo_place_tree( $home ) as $row ) {
-		if ( isset( $branch[ (int) $row['term']->term_id ] ) ) { $out[] = $row; }
+		if ( isset( $in[ (int) $row['term']->term_id ] ) ) { $out[] = $row; }
 	}
 	return $out;
 }
