@@ -3757,7 +3757,13 @@ function gasf_crm_render_inbox() {
 		if (p.consent) {
 			var c = p.consent;
 			if (c.state === 'granted' || c.state === 'recorded') {
-				bits.push('<span class="okmark">✓ ' + esc(c.label) + '</span>');
+				// One word, not the label. The label distinguishes "the sender
+				// ticked the form" from "a volunteer wrote it down" — a real
+				// difference, and exactly what Change permission exists to show
+				// — but at a glance both mean the same thing to somebody
+				// deciding whether they may use the photo. The other two states
+				// keep their labels, which are already this short.
+				bits.push('<span class="okmark">✓ Cleared</span>');
 			} else if (c.state === 'refused') {
 				bits.push('<span class="nomark">✕ ' + esc(c.label) + '</span> — left out of bulk downloads');
 			} else if (c.state === 'unknown') {
