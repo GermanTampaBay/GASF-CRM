@@ -153,6 +153,44 @@ function gasf_crm_photo_consent_text() {
 }
 
 /**
+ * May this photo be used for THIS? The one place that answers.
+ *
+ * Permission used to be a label each screen interpreted for itself, which is
+ * how "limited" got recorded faithfully and enforced nowhere: the zip filtered
+ * refused, the library showed a badge, and nothing else asked. Every check
+ * scattered is a check that drifts. So: one matrix, one function, and every
+ * downstream path — export, the future kiosk, the backup — asks it instead
+ * of reasoning about consent records themselves.
+ *
+ *              web    export   kiosk   backup
+ *   full       yes    yes      yes     yes
+ *   limited    NO     NO       yes     yes     "display on our property and
+ *                                              general archival usage"
+ *   refused    NO     NO       NO      yes     the club may keep it; it may
+ *                                              not show it anywhere
+ *   unknown    yes    yes      yes     yes     the backfilled archive —
+ *                                              today's status quo, and the
+ *                                              single line to tighten when the
+ *                                              club decides unknown means no
+ *
+ * 'web' is aspiration as much as enforcement today: a published file is
+ * physically web-served regardless of what this returns. True enforcement
+ * means limited photos staying in gated storage behind the handler — design
+ * work that belongs wherever this function's answer is finally trusted.
+ */
+function gasf_crm_photo_may( $attachment_id, $use ) {
+	$st    = gasf_crm_photo_consent_state( (int) $attachment_id );
+	$state = (string) ( $st['state'] ?? '' );
+
+	if ( 'backup' === $use ) { return true; }
+	if ( 'refused' === $state ) { return false; }
+	if ( 'limited' === (string) ( $st['scope'] ?? 'full' ) ) {
+		return 'kiosk' === $use;
+	}
+	return true;
+}
+
+/**
  * Where a public submission came from, for the day somebody sends something
  * vile.
  *

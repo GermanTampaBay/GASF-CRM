@@ -605,10 +605,11 @@ function gasf_crm_photo_zip_build( array $ids ) {
 		if ( 'attachment' !== get_post_type( $id ) ) { continue; }
 		if ( gasf_crm_photo_is_private( $id ) ) { continue; } // not cleared for use
 
-		// Somebody said no. Recording that has to DO something, or it is a label
-		// rather than a decision — and a bulk download for the newsletter is
-		// exactly where an objected-to photo would otherwise slip through.
-		if ( 'refused' === gasf_crm_photo_consent_state( $id )['state'] ) {
+		// Recording a permission has to DO something, or it is a label rather
+		// than a decision — and a bulk download for the newsletter is exactly
+		// where an objected-to or premises-only photo would otherwise slip
+		// through. The policy function owns the matrix; this asks.
+		if ( ! gasf_crm_photo_may( $id, 'export' ) ) {
 			$refused[] = $id;
 			continue;
 		}
@@ -674,7 +675,7 @@ function gasf_crm_photo_zip_build( array $ids ) {
 
 	gasf_crm_log( sprintf( 'CRM library: built a %s zip of %d photo(s) for user %d%s',
 		size_format( filesize( $path ) ), count( $files ), get_current_user_id(),
-		$refused ? sprintf( ' — %d left out, marked do-not-publish', count( $refused ) ) : '' ) );
+		$refused ? sprintf( ' — %d left out by their permission records', count( $refused ) ) : '' ) );
 
 	return array(
 		'token'   => $token,

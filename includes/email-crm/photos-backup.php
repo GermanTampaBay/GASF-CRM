@@ -316,7 +316,8 @@ function gasf_crm_backup_one( $id ) {
 	 * and more atomic than PATCHing three item names and hoping.
 	 */
 	if ( ! empty( $state['name'] ) && $state['name'] !== $name ) {
-		gasf_crm_backup_delete_remote( $state );
+		gasf_crm_backup_orphan_add( $id, (string) ( $state['name'] ?? '' ),
+			gasf_crm_backup_delete_remote( $state ) );
 		gasf_crm_log( sprintf( 'Backup: #%d renamed %s -> %s; old copies removed', $id, $state['name'], $name ) );
 	}
 
@@ -367,14 +368,76 @@ function gasf_crm_backup_one( $id ) {
 	return $new_state;
 }
 
-/** Remove a photo's remote copies, from a state/index entry. Best-effort. */
+/**
+ * Remove a photo's remote copies. Returns the item ids it could NOT remove.
+ *
+ * This used to be fire-and-forget, and a failed DELETE was therefore a
+ * permanent orphan: the index entry went away, the log said removed, and an
+ * image plus a sidecar full of names sat in SharePoint forever with nothing
+ * left that knew about it. A deletion the mirror cannot confirm is not a
+ * deletion — it is a leak with a delay, which is the exact phrase the
+ * deletion mirror uses about itself.
+ *
+ * A 404 counts as success: the thing being gone is the outcome deletion asks
+ * for, however it got there.
+ */
 function gasf_crm_backup_delete_remote( array $entry ) {
-	$cfg = gasf_crm_backup_cfg();
+	$cfg    = gasf_crm_backup_cfg();
+	$failed = array();
 	foreach ( (array) ( $entry['items'] ?? array() ) as $item_id ) {
 		if ( '' === (string) $item_id ) { continue; }
-		gasf_crm_backup_graph( 'DELETE',
+		$r = gasf_crm_backup_graph( 'DELETE',
 			'https://graph.microsoft.com/v1.0/drives/' . rawurlencode( $cfg['drive_id'] ) . '/items/' . rawurlencode( $item_id ) );
+		if ( is_wp_error( $r ) ) {
+			$data = $r->get_error_data();
+			if ( 404 === (int) ( is_array( $data ) ? ( $data['status'] ?? 0 ) : 0 ) ) { continue; }
+			$failed[] = (string) $item_id;
+		}
 	}
+	return $failed;
+}
+
+/** The queue of remote items whose deletion has not been confirmed yet. */
+function gasf_crm_backup_orphans() {
+	return (array) get_option( 'gasf_crm_backup_orphans', array() );
+}
+
+function gasf_crm_backup_orphan_add( $pid, $name, array $items ) {
+	if ( ! $items ) { return; }
+	$q   = gasf_crm_backup_orphans();
+	$q[] = array(
+		'pid'   => (int) $pid,
+		'name'  => (string) $name,
+		'items' => array_values( $items ),
+		'since' => time(),
+		'tries' => 1,
+	);
+	update_option( 'gasf_crm_backup_orphans', $q, false );
+	gasf_crm_log( sprintf( 'Backup: #%d — %d remote cop(ies) could not be deleted; queued for retry (%s)',
+		(int) $pid, count( $items ), (string) $name ) );
+}
+
+/**
+ * Retry every queued deletion. Runs at the top of each pass, so an orphan
+ * lives exactly as long as SharePoint keeps refusing and not a pass longer.
+ */
+function gasf_crm_backup_orphans_drain() {
+	$q = gasf_crm_backup_orphans();
+	if ( ! $q ) { return; }
+
+	$keep = array();
+	foreach ( $q as $o ) {
+		$failed = gasf_crm_backup_delete_remote( array( 'items' => (array) ( $o['items'] ?? array() ) ) );
+		if ( $failed ) {
+			$o['items'] = $failed;
+			$o['tries'] = (int) ( $o['tries'] ?? 0 ) + 1;
+			$keep[]     = $o;
+			continue;
+		}
+		gasf_crm_log( sprintf( 'Backup: orphaned remote cop(ies) for #%d finally deleted after %d tries',
+			(int) ( $o['pid'] ?? 0 ), (int) ( $o['tries'] ?? 0 ) ) );
+	}
+	update_option( 'gasf_crm_backup_orphans', $keep, false );
 }
 
 /**
@@ -437,11 +500,19 @@ function gasf_crm_backup_run( $dry = false ) {
 	 */
 	$removed = 0;
 	if ( ! $dry ) {
+		// Yesterday's failures first: an orphan lives exactly as long as
+		// SharePoint keeps refusing, not a pass longer.
+		gasf_crm_backup_orphans_drain();
+
 		$index = (array) get_option( 'gasf_crm_backup_index', array() );
 		$live  = array_flip( array_map( 'intval', $ids ) );
 		foreach ( $index as $pid => $entry ) {
 			if ( isset( $live[ (int) $pid ] ) ) { continue; }
-			gasf_crm_backup_delete_remote( (array) $entry );
+			// The index entry goes either way — the photo has left the
+			// library and must not be re-uploaded — but what could not be
+			// deleted is queued rather than forgotten.
+			gasf_crm_backup_orphan_add( $pid, (string) ( $entry['name'] ?? '' ),
+				gasf_crm_backup_delete_remote( (array) $entry ) );
 			unset( $index[ $pid ] );
 			$removed++;
 			gasf_crm_log( sprintf( 'Backup: #%d left the library — remote copies removed (%s)', $pid, (string) ( $entry['name'] ?? '?' ) ) );
@@ -595,6 +666,20 @@ add_action( 'admin_notices', function () {
 
 	$failing = $h['last_error_at'] > $h['last_ok'];
 	$stale   = ( time() - (int) $h['last_ok'] ) > DAY_IN_SECONDS;
+
+	// Deletions the mirror has been unable to confirm for a day: PII the club
+	// believes gone and SharePoint still holds. A different failure from a
+	// stale sync — the passes are clean — so it gets its own banner.
+	$stuck = 0;
+	foreach ( gasf_crm_backup_orphans() as $o ) {
+		if ( ( time() - (int) ( $o['since'] ?? time() ) ) > DAY_IN_SECONDS ) { $stuck++; }
+	}
+	if ( $stuck && ! $failing && ! $stale ) {
+		echo '<div class="notice notice-warning"><p><strong>Photo backup:</strong> '
+			. (int) $stuck . ' deleted photo(s) still have copies in the Teams archive that could not be removed. '
+			. 'Retrying every pass; if this persists, check the SharePoint recycle bin and permissions.</p></div>';
+		return;
+	}
 	if ( ! $failing && ! $stale ) { return; }
 
 	$cls   = $stale ? 'notice-error' : 'notice-warning';

@@ -3887,7 +3887,7 @@ function gasf_crm_render_inbox() {
 					// download handles a large file far better than holding it in
 					// memory as a blob, and it names the file from the header.
 					msg.textContent = 'Ready — ' + r.files + ' photo(s), ' + Math.round(r.bytes / 1048576) + ' MB.' +
-						(r.refused ? '  ' + r.refused + ' left out — marked do not publish.' : '');
+						(r.refused ? '  ' + r.refused + ' left out by their permission records (do-not-publish, or cleared for the club and archive only).' : '');
 					window.location.href = r.url;
 					lzip.disabled = false;
 					lzip.textContent = 'Download as a zip';
