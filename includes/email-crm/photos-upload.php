@@ -577,20 +577,61 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		return array( 'id' => $id, 'held' => true, 'name' => $name );
 	}
 
-	$saved = gasf_crm_photo_library_save( $id, array(
-		'people'   => $people,
-		'place'    => $place,
-		'event'    => $event,
-		'event_id' => (int) ( $in['event_id'] ?? 0 ),
-		'taken'    => $taken,
-		'caption'  => $caption,
-	) );
-	// A tagging failure here is recoverable by editing the photo, and the photo
-	// itself is already safe — scrubbed, consented, in the library. Losing it
-	// over a bad place name would be the worse outcome.
-	if ( is_wp_error( $saved ) ) {
-		gasf_crm_log( sprintf( 'CRM upload: media #%d uploaded but its batch tags did not apply — %s',
-			$id, $saved->get_error_message() ) );
+	if ( $anon ) {
+		/*
+		 * A guest's tags are written directly, exactly as the hold path writes
+		 * them, because library_save asks whether the CURRENT USER may edit the
+		 * library — the right question for every screen that calls it, and
+		 * unanswerable for a guest who is not a user. It answered 403, the
+		 * "recoverable" logging below shrugged, and every anonymous party
+		 * upload landed in the library with no place, no event and no people
+		 * while reporting success. Which also quietly broke the promise that
+		 * removing a whole night is one event-filter away: the photos carried
+		 * no event to filter on.
+		 *
+		 * Found only because a drill finally ran WITHOUT a logged-in browser:
+		 * every earlier browser drill carried a volunteer session, so the gate
+		 * passed and the bug stayed invisible. The test environment was the
+		 * camouflage.
+		 *
+		 * People may create terms — guests name new people, that is the
+		 * point. The place must already exist (the resolver guarantees it, and
+		 * a guest must not grow that taxonomy). The event may create, because a
+		 * party's event tag is club-authored configuration, not guest input.
+		 */
+		if ( $people ) { wp_set_object_terms( $id, $people, 'gasf_photo_person', false ); }
+		if ( '' !== $place ) {
+			$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
+			if ( $pt && ! is_wp_error( $pt ) ) {
+				wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
+			}
+		}
+		if ( '' !== $event ) {
+			wp_set_object_terms( $id, array( $event ), 'gasf_photo_event', false );
+			if ( (int) ( $in['event_id'] ?? 0 ) ) {
+				update_post_meta( $id, '_gasf_photo_event_id', (int) $in['event_id'] );
+			}
+		}
+		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
+		if ( '' !== $caption ) {
+			wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
+		}
+	} else {
+		$saved = gasf_crm_photo_library_save( $id, array(
+			'people'   => $people,
+			'place'    => $place,
+			'event'    => $event,
+			'event_id' => (int) ( $in['event_id'] ?? 0 ),
+			'taken'    => $taken,
+			'caption'  => $caption,
+		) );
+		// A tagging failure here is recoverable by editing the photo, and the
+		// photo itself is already safe — scrubbed, consented, in the library.
+		// Losing it over a bad place name would be the worse outcome.
+		if ( is_wp_error( $saved ) ) {
+			gasf_crm_log( sprintf( 'CRM upload: media #%d uploaded but its batch tags did not apply — %s',
+				$id, $saved->get_error_message() ) );
+		}
 	}
 
 
