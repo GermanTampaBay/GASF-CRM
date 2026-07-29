@@ -1198,6 +1198,38 @@ function gasf_crm_render_inbox() {
 	 * same place.
 	 */
 	?>
+	<?php
+	/*
+	 * Bulk tagging. The one thing per-photo editing cannot give a volunteer is
+	 * their evening back: twelve photos of the same table used to mean twelve
+	 * lightboxes. Names are ADDED here, never replaced — a bulk operation that
+	 * could silently strip tags from a dozen photos is a footgun, and removing
+	 * a person has two good homes already (the photo's editor, the names
+	 * panel). Place, event and date apply only when filled in.
+	 */
+	?>
+	<div class="card pad" id="lbulkpanel" hidden>
+		<h3 style="margin:0 0 4px">Tag the selected photos</h3>
+		<p class="muted" style="margin:0 0 10px">Applies to every ticked photo. Names are <strong>added</strong> to whoever is already tagged; place, event and date are only changed if you fill them in.</p>
+		<div class="f"><span>Add people</span>
+			<div class="p-people" id="btpeople"><span class="pwrap"><input type="text" class="p-person" placeholder="Name" autocomplete="off" spellcheck="false"></span></div>
+			<button type="button" class="addp" id="btaddp">+ Add another person</button>
+		</div>
+		<div class="lfrow" style="margin-top:10px">
+			<label class="lf"><span>Set place</span><select id="btplace"><option value="">&mdash; leave as is &mdash;</option></select></label>
+			<label class="lf lf-ev"><span>Set event</span>
+				<span class="pwrap"><input type="text" id="btevent" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep"></span>
+			</label>
+			<label class="lf"><span>Set date</span><input type="date" id="bttaken"></label>
+		</div>
+		<input type="hidden" id="bteventid" value="">
+		<div class="actions" style="margin-top:12px">
+			<button class="btn" id="btgo" type="button">Apply to selected</button>
+			<button class="btn sec" id="btcancel" type="button">Close</button>
+			<span class="muted" id="btmsg"></span>
+		</div>
+	</div>
+
 	<div class="card pad lnamespanel" id="lnamespanel" hidden>
 		<h3 style="margin:0 0 4px">Names in the collection</h3>
 		<p class="muted" style="margin:0 0 10px">Correct a spelling and it changes on every photo at once. If the same person is in here twice, merge them &mdash; both sets of photos are kept.</p>
@@ -1247,6 +1279,7 @@ function gasf_crm_render_inbox() {
 		<strong><span id="lnsel">0</span> selected</strong>
 		<button class="btn" id="lzip" type="button">Download as a zip</button>
 		<button class="btn sec" id="lnone" type="button">Clear selection</button>
+		<button class="btn sec" id="lbulk" type="button">Tag selected&hellip;</button>
 		<span class="muted" id="lzipmsg"></span>
 	</div>
 
@@ -3390,6 +3423,111 @@ function gasf_crm_render_inbox() {
 			lrefilter();
 		};
 	}
+
+	/* ===================== bulk tagging ===================== */
+	(function(){
+		var btn = document.getElementById('lbulk');
+		if (!btn) { return; }
+		var panel = document.getElementById('lbulkpanel');
+
+		btn.onclick = function(){
+			if (!lselCount()) {
+				document.getElementById('lzipmsg').textContent = 'Tick some photos first.';
+				return;
+			}
+			// Places, from the list the page already holds.
+			var sel = document.getElementById('btplace');
+			if (sel.options.length < 2) {
+				PLACES.forEach(function(pl){
+					var pad = '';
+					for (var i = 0; i < Math.min(2, pl.depth); i++) { pad += '    '; }
+					var o = document.createElement('option');
+					o.value = pl.name; o.textContent = pad + (pl.label || pl.name);
+					sel.appendChild(o);
+				});
+			}
+			panel.hidden = false;
+			panel.scrollIntoView({ block: 'nearest' });
+		};
+		document.getElementById('btcancel').onclick = function(){ panel.hidden = true; };
+
+		// "+ Add another person" — the global .p-person delegation supplies the
+		// typo-tolerant picker to every box this clones.
+		document.getElementById('btaddp').onclick = function(){
+			var box = document.getElementById('btpeople');
+			var w = box.querySelector('.pwrap').cloneNode(true);
+			var i = w.querySelector('input'); i.value = '';
+			var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
+			box.appendChild(w); i.focus();
+		};
+
+		// The event box searches the calendar exactly like the uploader's, and
+		// a lone match may fill the date box — but only when it is empty, since
+		// in bulk a typed date is a decision about many photos.
+		var seq = 0;
+		var ev = document.getElementById('btevent');
+		ev.oninput = function(){
+			document.getElementById('bteventid').value = '';
+			var q = ev.value.trim();
+			var open = ev.parentNode.querySelector('.psug'); if (open) { open.remove(); }
+			if (q.length < 2) { return; }
+			var mine = ++seq;
+			api('/photos/events?_=1&q=' + encodeURIComponent(q)).then(function(r){
+				if (mine !== seq || !r.calendar) { return; }
+				var list = r.events || [];
+				var old = ev.parentNode.querySelector('.psug'); if (old) { old.remove(); }
+				if (!list.length) { return; }
+				var d = document.createElement('div');
+				d.className = 'psug';
+				d.innerHTML = list.map(function(e, i){
+					return '<button type="button" class="psugi" data-i="' + i + '">' + esc(e.title) +
+						'<span class="psugn">' + esc(e.when || e.date || '') + '</span></button>';
+				}).join('');
+				d.addEventListener('mousedown', function(evd){
+					var b = evd.target.closest('.psugi'); if (!b) { return; }
+					evd.preventDefault();
+					var e = list[parseInt(b.dataset.i, 10)];
+					ev.value = e.title;
+					document.getElementById('bteventid').value = e.id;
+					var t = document.getElementById('bttaken');
+					if (e.date && !t.value) { t.value = e.date; }
+					d.remove();
+				});
+				ev.parentNode.appendChild(d);
+			}).catch(function(){});
+		};
+		ev.onblur = function(){ setTimeout(function(){
+			var open = ev.parentNode.querySelector('.psug'); if (open) { open.remove(); }
+		}, 150); };
+
+		document.getElementById('btgo').onclick = function(){
+			var ids = Object.keys(lsel).map(Number);
+			var people = [];
+			Array.prototype.forEach.call(document.querySelectorAll('#btpeople input'), function(i){
+				if (i.value.trim()) { people.push(i.value.trim()); }
+			});
+			var msg = document.getElementById('btmsg');
+			this.disabled = true;
+			msg.textContent = 'Tagging ' + ids.length + ' photo(s)…';
+			api('/photos/bulk-tag', { method: 'POST', body: JSON.stringify({
+				ids: ids,
+				people: people,
+				place: document.getElementById('btplace').value,
+				event: ev.value.trim(),
+				event_id: parseInt(document.getElementById('bteventid').value, 10) || 0,
+				taken: document.getElementById('bttaken').value
+			}) }).then(function(r){
+				document.getElementById('btgo').disabled = false;
+				msg.textContent = r.updated + ' photo(s) tagged' +
+					(r.skipped.length ? ', ' + r.skipped.length + ' skipped — ' + esc(r.skipped[0].why) : '') + '.';
+				loadPeople(true);   // a new name must reach the pickers
+				loadLib();          // and the tiles are stale
+			}).catch(function(e){
+				document.getElementById('btgo').disabled = false;
+				msg.textContent = e.message;
+			});
+		};
+	}());
 
 	/* The names panel. Rename changes a person everywhere; merge folds one into
 	   another. Both act on the PERSON, which is why they are not in the photo
