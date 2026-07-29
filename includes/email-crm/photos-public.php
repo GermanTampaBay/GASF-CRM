@@ -250,9 +250,13 @@ function gasf_crm_door_receive( array $door ) {
 	 * threat here: the "attack" is causing a stranger's browser to give the
 	 * club a photo, through a door the club opened, which is the feature.
 	 */
-	if ( '1' !== (string) ( $_POST['consent'] ?? '' ) ) {
-		return $fail( 'Please tick the box to say the club may use your photos.' );
-	}
+	/*
+	 * The box is pre-ticked and clearing it is no longer a refusal, so there is
+	 * nothing here to block on. Somebody in a queue for a pretzel should not be
+	 * stopped by a form; the two grants are both usable, and which one applies
+	 * is recorded per photo.
+	 */
+	$full_consent = '1' === (string) ( $_POST['consent'] ?? '' );
 
 	if ( gasf_crm_door_device_count( $door['token'] ) >= GASF_CRM_DOOR_MAX_PER_DEVICE ) {
 		return $fail( sprintf( 'That is %d photos from this phone — plenty! Find a volunteer if you have more.',
@@ -298,10 +302,17 @@ function gasf_crm_door_receive( array $door ) {
 		'event_id' => $event_id,
 		'caption'  => $caption,
 		'people'   => array_slice( $people, 0, 10 ),
-		'note'     => $party
-			? sprintf( 'Shared by a guest at %s through the QR code, who agreed to the permission wording on the page.', (string) $door['label'] )
-			: sprintf( 'Sent through the club\'s photo link%s, agreeing to the permission wording on the page.',
-				'' !== $from ? ' by ' . $from : '' ),
+		'note'          => $party
+			? sprintf( 'Shared by a guest at %s through the QR code, %s', (string) $door['label'],
+				$full_consent
+					? 'who left the permission box ticked.'
+					: 'who cleared the permission box: club premises and archive only.' )
+			: sprintf( 'Sent through the club\'s photo link%s, %s',
+				'' !== $from ? ' by ' . $from : '',
+				$full_consent
+					? 'permission box left ticked.'
+					: 'permission box cleared: club premises and archive only.' ),
+		'consent_scope' => $full_consent ? 'full' : 'limited',
 		// A volunteer says yes first everywhere except inside a party window.
 		'hold'     => ! $party,
 		'anon'     => array(
@@ -418,19 +429,21 @@ function gasf_crm_door_page( $door, $notice ) {
 
 	if ( $party ) {
 		echo '<p>Took a good one tonight? Send it to the club and it goes up on the screen inside &mdash; and into the club&rsquo;s archive.</p>';
-		echo '<p>No account, no app. Pick your photos and tap send. Add who is in them if you like; you do not have to.</p>';
 	} else {
 		echo '<p>Photos of the club, its events, and its people are always welcome &mdash; from last weekend or from 1974.</p>';
-		echo '<p>No account, no app. Tell us what you can about them and a volunteer will add them to the club&rsquo;s archive. Nothing appears anywhere until somebody from the club has looked.</p>';
 	}
 
+	/*
+	 * Pre-ticked, and clearing it is a real choice rather than a dead end: the
+	 * line underneath says what the club may still do with an unticked photo,
+	 * so nobody has to guess whether clearing it means their photo is refused.
+	 */
 	echo '<div class="gasf-door-box">';
-	echo '<h2>May we use them?</h2>';
-	printf( '<p><label><input type="checkbox" id="pconsent"> %s</label></p>',
+	printf( '<p><label><input type="checkbox" id="pconsent" checked> %s</label></p>',
 		esc_html( function_exists( 'gasf_crm_photo_consent_text' )
 			? gasf_crm_photo_consent_text()
 			: 'The club may use these photos.' ) );
-	echo '<p class="gasf-door-fine">Tick this and the club may use your photos on its website, social media, and in its newsletter. Nothing goes up with your name on it unless you are asked first.</p>';
+	echo '<p class="gasf-door-fine">' . esc_html( gasf_crm_photo_consent_text_limited() ) . '</p>';
 	echo '</div>';
 
 	echo '<h2>Choose your photos</h2>';
@@ -586,10 +599,6 @@ function gasf_crm_door_script( $party ) {
 	function val(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 
 	send.onclick = function(){
-		if (!document.getElementById('pconsent').checked) {
-			msg.textContent = 'Please tick the permission box first.';
-			return;
-		}
 		busy = true; paint();
 
 		// Read the answers ONCE, before the first upload: they describe the
@@ -620,7 +629,7 @@ function gasf_crm_door_script( $party ) {
 
 			var fd = new FormData();
 			fd.append('file', p.file);
-			fd.append('consent', '1');
+			fd.append('consent', document.getElementById('pconsent').checked ? '1' : '0');
 			people.forEach(function(n){ fd.append('people[]', n); });
 			if (extra) { Object.keys(extra).forEach(function(k){ fd.append(k, extra[k]); }); }
 

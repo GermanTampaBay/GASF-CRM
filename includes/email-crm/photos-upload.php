@@ -399,8 +399,17 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		 * the door they came through and their IP, because "somebody said yes"
 		 * with nothing to check is not a record.
 		 */
+		/*
+		 * A cleared tick is a narrower grant, not a refusal, so granted stays
+		 * true and the scope carries the difference. The text stored is the
+		 * wording that actually applied to THIS submission, because "they
+		 * agreed" is worth nothing without what they agreed to.
+		 */
+		$scope = 'limited' === (string) ( $in['consent_scope'] ?? 'full' ) ? 'limited' : 'full';
+
 		update_post_meta( $id, '_gasf_photo_consent', array(
 			'granted'          => true,
+			'scope'            => $scope,
 			'at'               => current_time( 'mysql', true ),
 			'note'             => (string) ( $in['note'] ?? '' ),
 			'recorded_by'      => 0,
@@ -410,9 +419,11 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			'guest_ip'         => (string) ( $anon['ip'] ?? '' ),
 			'door'             => (string) ( $anon['label'] ?? '' ),
 			'version'          => GASF_CRM_PHOTO_CONSENT_VERSION,
-			// The wording they actually saw and agreed to, kept verbatim, so the
-			// scope of the permission survives any later edit of that text.
-			'text'             => gasf_crm_photo_consent_text(),
+			// The wording they actually saw, kept verbatim, so the scope of the
+			// permission survives any later edit of that text.
+			'text'             => 'limited' === $scope
+				? gasf_crm_photo_consent_text_limited()
+				: gasf_crm_photo_consent_text(),
 		) );
 	} else {
 		$rec = gasf_crm_photo_consent_record( $id, 'grant', (string) ( $in['note'] ?? '' ) );

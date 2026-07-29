@@ -153,6 +153,20 @@ function gasf_crm_photo_consent_text() {
 }
 
 /**
+ * What NOT ticking the box means.
+ *
+ * The tick is pre-set, and somebody clearing it has not refused @@D@@ they have
+ * chosen the narrower of two grants. The club may still show the photo on its
+ * own walls and screens and keep it in the archive; it may not put it on the
+ * website, on social media, or in the newsletter. Stored verbatim against the
+ * photo, exactly like the full wording, so the scope of what was agreed
+ * survives any later edit of this sentence.
+ */
+function gasf_crm_photo_consent_text_limited() {
+	return 'Not ticking the box lets us use these images solely for display on our property and for general archival usage.';
+}
+
+/**
  * Where a photo stands on permission to publish it.
  *
  * @return array{state:string,label:string,at:string,by:string,text:string}
@@ -191,10 +205,25 @@ function gasf_crm_photo_consent_state( $attachment_id ) {
 			);
 		}
 
-		$manual = ! empty( $rec['recorded_by'] );
+		/*
+		 * A fourth thing, and it is not a shade of the first three: permission
+		 * that is real but NARROWER. Somebody who cleared the pre-ticked box on
+		 * the public form kept the club's right to show the photo on its own
+		 * walls and in its archive, and withheld the website, social media and
+		 * the newsletter.
+		 *
+		 * It stays state 'granted' so nothing downstream mistakes it for a
+		 * refusal, and says so in the label instead, because the volunteer
+		 * about to put a photo in the newsletter is the person who has to know.
+		 */
+		$manual  = ! empty( $rec['recorded_by'] );
+		$limited = 'limited' === (string) ( $rec['scope'] ?? 'full' );
 		return array(
 			'state' => $manual ? 'recorded' : 'granted',
-			'label' => $manual ? 'Cleared — permission recorded by a volunteer' : 'Cleared for use',
+			'scope' => $limited ? 'limited' : 'full',
+			'label' => $limited
+				? 'Cleared — at the club and in the archive only, NOT for web or social'
+				: ( $manual ? 'Cleared — permission recorded by a volunteer' : 'Cleared for use' ),
 			'at'    => (string) ( $rec['at'] ?? '' ),
 			'by'    => $manual
 				? (string) ( $rec['recorded_by_name'] ?? '' )
