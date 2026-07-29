@@ -143,7 +143,40 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * date box the batch fields already cover — not a lost photo.
 	 */
 	if ( $isConvert ) {
+		/*
+		 * Limits BEFORE the decode, because the decode is the expensive part.
+		 *
+		 * The byte cap and the megapixel guard both used to sit downstream of
+		 * this block — measured against the converted JPEG, which meant a
+		 * hostile HEIC got a full Imagick decode before anything had asked how
+		 * big it claimed to be. Public CPU on request is exactly what the
+		 * commodity abuse of an open form spends. So, in cost order: the source
+		 * file's bytes (free), a ping for dimensions — which reads the header
+		 * without decoding pixels — and hard resource ceilings on Imagick
+		 * itself for the case where the header lies. The downstream guards
+		 * still run against the JPEG; these are the same fences, moved to the
+		 * gate.
+		 */
+		$src_bytes = (int) filesize( $f['tmp_name'] );
+		if ( defined( 'GASF_CRM_PHOTO_MAX_BYTES' ) && $src_bytes > GASF_CRM_PHOTO_MAX_BYTES ) {
+			return new WP_Error( 'gasf_crm_big', sprintf( '%s is %s, over the %s limit for one photo.',
+				$name, size_format( $src_bytes ), size_format( GASF_CRM_PHOTO_MAX_BYTES ) ), array( 'status' => 413 ) );
+		}
 		try {
+			Imagick::setResourceLimit( Imagick::RESOURCETYPE_MEMORY, 256 * MB_IN_BYTES );
+			Imagick::setResourceLimit( Imagick::RESOURCETYPE_MAP, 256 * MB_IN_BYTES );
+
+			$probe = new Imagick();
+			$probe->pingImage( $f['tmp_name'] );
+			$px = $probe->getImageWidth() * $probe->getImageHeight();
+			$probe->clear();
+			$probe->destroy();
+			if ( defined( 'GASF_CRM_PHOTO_MAX_PIXELS' ) && $px > GASF_CRM_PHOTO_MAX_PIXELS ) {
+				return new WP_Error( 'gasf_crm_big', sprintf(
+					'%s is %s megapixels — over the limit for one photo.',
+					$name, number_format_i18n( $px / 1000000, 1 ) ), array( 'status' => 413 ) );
+			}
+
 			$im = new Imagick( $f['tmp_name'] );
 			$im->setImageFormat( 'jpeg' );
 			$im->setImageCompressionQuality( 90 );

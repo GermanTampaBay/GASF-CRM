@@ -229,6 +229,47 @@ function gasf_crm_photo_origin_line( array $o ) {
 }
 
 /**
+ * Origin records expire; photographs do not.
+ *
+ * The IP and user agent exist for the day something vile arrives, and that
+ * day is near the submission or never — nobody investigates a photo with a
+ * two-year-old request trail. Left alone, abuse telemetry would inherit the
+ * photograph's archival lifetime, which is the club quietly keeping a log of
+ * strangers' addresses forever. Same retention as the sign-in history, for
+ * the same reason, on the same reasoning: long enough to investigate
+ * something noticed late, short enough not to be a dossier.
+ *
+ * Piggybacked on the ten-minute photo cron with a daily latch, in the auth
+ * prune's own words: a retention promise nobody keeps is just a longer
+ * retention period.
+ */
+function gasf_crm_photo_origin_prune() {
+	if ( get_transient( 'gasf_crm_origin_pruned' ) ) { return; }
+	set_transient( 'gasf_crm_origin_pruned', 1, DAY_IN_SECONDS );
+
+	global $wpdb;
+	$rows = $wpdb->get_results(
+		"SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_photo_origin'",
+		ARRAY_A
+	);
+	$cut = time() - GASF_CRM_AUTH_LOG_DAYS * DAY_IN_SECONDS;
+	$n   = 0;
+	foreach ( (array) $rows as $r ) {
+		$o  = maybe_unserialize( $r['meta_value'] );
+		$at = is_array( $o ) ? strtotime( (string) ( $o['at'] ?? '' ) . ' UTC' ) : 0;
+		// An unreadable record is treated as expired: a trail nobody can date
+		// is not evidence, and keeping it anyway is retention without purpose.
+		if ( $at && $at > $cut ) { continue; }
+		delete_post_meta( (int) $r['post_id'], '_gasf_photo_origin' );
+		$n++;
+	}
+	if ( $n ) {
+		gasf_crm_log( sprintf( 'CRM photos: pruned %d origin record(s) past %d days', $n, GASF_CRM_AUTH_LOG_DAYS ) );
+	}
+}
+add_action( 'gasf_crm_photo_event', 'gasf_crm_photo_origin_prune' );
+
+/**
  * What NOT ticking the box means.
  *
  * The tick is pre-set, and somebody clearing it has not refused — they have
