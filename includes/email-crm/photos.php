@@ -1306,6 +1306,24 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 		return $data;
 	};
 
+	/*
+	 * The import is allowed to take a while — the same allowance the bulk
+	 * uploader got, for the same work: sixteen registered sizes per photo, and
+	 * a flyer-sized PNG can hold Imagick for minutes. Without it, every intake
+	 * of the GCESV flyers died mid-resize, silently — no PHP fatal in the log,
+	 * which points at the host killing the process rather than PHP timing out.
+	 * Each death left the lock held for the twenty-minute stale window, the
+	 * sweep cleaned up, the retry died the same way, and after five rounds the
+	 * item went to terminal failure: "import failed repeatedly — needs a
+	 * volunteer". The volunteer it needed was this call.
+	 *
+	 * Best effort, as in the uploader: some hosts refuse, and the raise cannot
+	 * stop a true CPU-kill — but the identical fix took uploads on this host
+	 * from dying at sixty seconds to finishing at eighty-six.
+	 */
+	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
+
 	add_filter( 'upload_dir', $to_review, 99 );
 	add_filter( 'wp_insert_attachment_data', $hide, 99 );
 	add_action( 'add_attachment', $claim, 1 );
