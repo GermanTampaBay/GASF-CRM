@@ -82,6 +82,8 @@ if ( true ) {
 	// After photos-library.php: editing gates on in_library, bumps the same
 	// revision, and answers with the same card.
 	require_once GASF_CRM_DIR . '/photos-edit.php';
+	// After photos-library.php: the backup walks the library and reads cards.
+	require_once GASF_CRM_DIR . '/photos-backup.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
 
