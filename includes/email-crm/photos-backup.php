@@ -394,11 +394,12 @@ function gasf_crm_backup_run( $dry = false ) {
 	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
 
-	$ids   = gasf_crm_photo_library_ids();
-	$done  = 0;
-	$bytes = 0;
-	$fail  = 0;
-	$t0    = microtime( true );
+	$ids        = gasf_crm_photo_library_ids();
+	$done       = 0;
+	$bytes      = 0;
+	$fail       = 0;
+	$last_error = '';
+	$t0         = microtime( true );
 
 	foreach ( $ids as $id ) {
 		if ( $done >= GASF_CRM_BACKUP_MAX_ITEMS || $bytes >= GASF_CRM_BACKUP_MAX_BYTES ) { break; }
@@ -416,7 +417,8 @@ function gasf_crm_backup_run( $dry = false ) {
 		$r = gasf_crm_backup_one( $id );
 		if ( is_wp_error( $r ) ) {
 			$fail++;
-			gasf_crm_log( sprintf( 'Backup: #%d FAILED — %s', $id, $r->get_error_message() ) );
+			$last_error = $r->get_error_message();
+			gasf_crm_log( sprintf( 'Backup: #%d FAILED — %s', $id, $last_error ) );
 			continue;
 		}
 		$done++;
@@ -452,8 +454,158 @@ function gasf_crm_backup_run( $dry = false ) {
 		gasf_crm_log( sprintf( 'Backup: pass complete — %d up (%s), %d failed, %d removed, %.1fs',
 			$done, size_format( $bytes ), $fail, $removed, microtime( true ) - $t0 ) );
 	}
+
+	/*
+	 * The health record, and the promise attached to it. A clean pass — zero
+	 * failures, even with zero work — refreshes last_ok, which is what keeps
+	 * the alarms quiet; a pass with failures records the newest error. The
+	 * all-clear goes out exactly once, and only to people who were told it
+	 * was broken.
+	 */
+	if ( ! $dry ) {
+		$h = gasf_crm_backup_health();
+		if ( ! $h['last_ok'] ) { $h['last_ok'] = time(); } // first enabled pass seeds the clock
+		if ( $fail > 0 ) {
+			$h['last_error']    = $last_error;
+			$h['last_error_at'] = time();
+		} else {
+			$was_alerted = (int) $h['alerted_at'];
+			$h['last_ok']    = time();
+			$h['alerted_at'] = 0;
+			if ( $was_alerted ) {
+				$to = gasf_crm_backup_alert_recipients();
+				if ( $to ) {
+					wp_mail( $to, '[GASF] Photo backup recovered',
+						"The offsite photo backup has completed a clean pass and is healthy again. Nothing further to do. — GASF CRM" );
+					gasf_crm_log( 'Backup: recovery email sent to ' . implode( ', ', $to ) );
+				}
+			}
+		}
+		gasf_crm_backup_health_save( $h );
+		gasf_crm_backup_alert_check();
+	}
+
 	return $out;
 }
+
+
+/* --------------------------------------------------------------------------
+ * Health, and saying so
+ *
+ * A backup that fails silently for a month is worse than no backup: the club
+ * believes it is covered. So the sync keeps a tiny health record, and when it
+ * has not managed a clean pass for 24 hours, every WordPress administrator
+ * gets an email — re-sent daily while it stays broken, with an all-clear when
+ * it recovers — and wp-admin wears a banner from the FIRST failure, not the
+ * twenty-fourth hour. A person in the admin sees trouble immediately; the
+ * email is the escalation for trouble that lasts.
+ *
+ * The alert email rides wp_mail, which the CRM routes through Graph — and if
+ * Graph is the thing that broke, wpmail.php falls back to the host mailer, so
+ * the message about the outage does not die of the outage.
+ *
+ * Honest limitation: everything here runs off WordPress cron and admin page
+ * loads. If cron is dead entirely, no pass runs and no email fires — but the
+ * banner still appears, because it is computed at admin request time from the
+ * stored record, and last_ok going stale IS the signal.
+ * -------------------------------------------------------------------------- */
+
+function gasf_crm_backup_health() {
+	return wp_parse_args( (array) get_option( 'gasf_crm_backup_health', array() ), array(
+		'last_ok'       => 0,   // last pass that completed with zero failures
+		'last_error'    => '',
+		'last_error_at' => 0,
+		'alerted_at'    => 0,   // last "it is broken" email
+	) );
+}
+
+function gasf_crm_backup_health_save( array $h ) {
+	update_option( 'gasf_crm_backup_health', $h, false );
+}
+
+/** Everyone with the administrator role and a real address — today, Michael and Brandon. */
+function gasf_crm_backup_alert_recipients() {
+	$to = array();
+	foreach ( get_users( array( 'role' => 'administrator' ) ) as $u ) {
+		if ( is_email( $u->user_email ) && false === strpos( $u->user_email, '@invalid.local' ) ) {
+			$to[] = $u->user_email;
+		}
+	}
+	// Filterable so a test can aim the alert at one inbox instead of paging
+	// somebody about a drill.
+	return (array) apply_filters( 'gasf_crm_backup_alert_recipients', array_unique( $to ) );
+}
+
+/** Called at the end of every pass. Decides whether anybody needs an email. */
+function gasf_crm_backup_alert_check() {
+	$cfg = gasf_crm_backup_cfg();
+	if ( empty( $cfg['enabled'] ) ) { return; }
+
+	$h = gasf_crm_backup_health();
+	if ( ! $h['last_ok'] ) { return; } // never succeeded yet: still being set up
+
+	$broken_for = time() - (int) $h['last_ok'];
+	if ( $broken_for < DAY_IN_SECONDS ) { return; }
+
+	// One email a day while it stays broken. The banner nags; the email taps
+	// a shoulder.
+	if ( time() - (int) $h['alerted_at'] < DAY_IN_SECONDS ) { return; }
+
+	$to = gasf_crm_backup_alert_recipients();
+	if ( ! $to ) { return; }
+
+	$hours = (int) floor( $broken_for / HOUR_IN_SECONDS );
+	$body  = sprintf(
+		"The offsite photo backup (Teams / SharePoint \"Photo Archive\") has not completed a clean pass in %d hours.\n\n"
+		. "Last clean pass:  %s UTC\n"
+		. "Last error:       %s\n"
+		. "Error seen at:    %s UTC\n\n"
+		. "New photos and edits are NOT reaching the offsite copy while this persists. The photos themselves are safe on the web server; only the mirror is behind.\n\n"
+		. "To investigate on the server:\n"
+		. "  wp gasf-backup status\n"
+		. "  wp gasf-backup run\n"
+		. "  tail -50 /home4/germanta/gasf-crm.log | grep Backup\n\n"
+		. "You will get one email a day while this stays broken, and an all-clear when it recovers. — GASF CRM",
+		$hours,
+		gmdate( 'Y-m-d H:i', (int) $h['last_ok'] ),
+		'' !== $h['last_error'] ? $h['last_error'] : '(no error captured — passes may not be running at all)',
+		$h['last_error_at'] ? gmdate( 'Y-m-d H:i', (int) $h['last_error_at'] ) : '—'
+	);
+
+	$sent = wp_mail( $to, sprintf( '[GASF] Photo backup failing for %d+ hours', $hours ), $body );
+	gasf_crm_log( sprintf( 'Backup: ALERT emailed to %s (%s) — failing %dh',
+		implode( ', ', $to ), $sent ? 'accepted' : 'wp_mail refused', $hours ) );
+
+	$h['alerted_at'] = time();
+	gasf_crm_backup_health_save( $h );
+}
+
+/**
+ * The banner. From the first failed pass, not the twenty-fourth hour — a
+ * person already in wp-admin should not have to wait a day to be told.
+ * Warning-yellow while young, error-red once the email threshold is crossed.
+ */
+add_action( 'admin_notices', function () {
+	if ( ! current_user_can( 'manage_options' ) ) { return; }
+	$cfg = gasf_crm_backup_cfg();
+	if ( empty( $cfg['enabled'] ) ) { return; }
+
+	$h = gasf_crm_backup_health();
+	if ( ! $h['last_ok'] ) { return; }
+
+	$failing = $h['last_error_at'] > $h['last_ok'];
+	$stale   = ( time() - (int) $h['last_ok'] ) > DAY_IN_SECONDS;
+	if ( ! $failing && ! $stale ) { return; }
+
+	$cls   = $stale ? 'notice-error' : 'notice-warning';
+	$since = human_time_diff( (int) $h['last_ok'] );
+	echo '<div class="notice ' . esc_attr( $cls ) . '"><p><strong>Offsite photo backup is failing.</strong> '
+		. 'Last clean sync to the Teams "Photo Archive" was ' . esc_html( $since ) . ' ago.'
+		. ( '' !== $h['last_error'] ? ' Last error: <code>' . esc_html( $h['last_error'] ) . '</code>.' : '' )
+		. ' Photos are safe on this server; the offsite copy is behind.'
+		. ( $stale ? ' Administrators are being emailed daily until this recovers.' : '' )
+		. '</p></div>';
+} );
 
 /* --------------------------------------------------------------------------
  * Wiring: cron + CLI
