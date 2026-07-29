@@ -266,7 +266,7 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 
 	if ( 'clear' === $decision ) {
 		delete_post_meta( $id, '_gasf_photo_consent' );
-		gasf_mec_log( sprintf( 'CRM photos: permission record cleared on media #%d by %s', $id, gasf_crm_display_name( $user->ID ) ) );
+		gasf_crm_log( sprintf( 'CRM photos: permission record cleared on media #%d by %s', $id, gasf_crm_display_name( $user->ID ) ) );
 		gasf_crm_log_event( 0, 'photo_consent', 'media #' . $id . ' permission record cleared' );
 		return gasf_crm_photo_consent_state( $id );
 	}
@@ -298,7 +298,7 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 		'text'             => gasf_crm_photo_consent_text(),
 	) );
 
-	gasf_mec_log( sprintf( 'CRM photos: permission %s on media #%d by %s — %s',
+	gasf_crm_log( sprintf( 'CRM photos: permission %s on media #%d by %s — %s',
 		'grant' === $decision ? 'RECORDED' : 'REFUSAL recorded', $id, gasf_crm_display_name( $user->ID ), $note ) );
 	gasf_crm_log_event( 0, 'photo_consent', sprintf( 'media #%d marked %s', $id, 'grant' === $decision ? 'cleared for use' : 'do not publish' ) );
 
@@ -512,7 +512,7 @@ function gasf_crm_photo_review_dir() {
 	// rather than letting unreviewed photos accumulate somewhere reachable.
 	$safe = gasf_crm_photo_root_is_safe( $path );
 	if ( is_wp_error( $safe ) ) {
-		gasf_mec_log( 'CRM photos: REFUSING to store photos — ' . $safe->get_error_message() );
+		gasf_crm_log( 'CRM photos: REFUSING to store photos — ' . $safe->get_error_message() );
 		return $safe;
 	}
 
@@ -889,7 +889,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
 		if ( ! file_exists( $src ) ) { continue; }
 		$clean = gasf_crm_photo_scrub( $src );
 		if ( is_wp_error( $clean ) ) {
-			gasf_mec_log( 'CRM photos: NOT publishing media #' . $id . ' — ' . $clean->get_error_message() );
+			gasf_crm_log( 'CRM photos: NOT publishing media #' . $id . ' — ' . $clean->get_error_message() );
 			return new WP_Error( 'gasf_crm_pub', 'This photo still carries hidden camera data, so it has not been published: ' . $clean->get_error_message() );
 		}
 	}
@@ -997,7 +997,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	// before the move would advertise a file still sitting behind the boundary.
 	wp_update_post( array( 'ID' => $id, 'post_status' => 'inherit' ) );
 
-	gasf_mec_log( 'CRM photos: media #' . $id . ' published to ' . $new_rel );
+	gasf_crm_log( 'CRM photos: media #' . $id . ' published to ' . $new_rel );
 	return true;
 }
 
@@ -1062,7 +1062,7 @@ function gasf_crm_photo_unpublish( $attachment_id ) {
 		wp_update_attachment_metadata( $id, $meta );
 	}
 
-	gasf_mec_log( 'CRM photos: media #' . $id . ' withdrawn from public uploads pending review' );
+	gasf_crm_log( 'CRM photos: media #' . $id . ' withdrawn from public uploads pending review' );
 	return true;
 }
 
@@ -1409,7 +1409,7 @@ function gasf_crm_photo_keep( array $thread, $graph_message_id, $graph_attachmen
 		'lease_owner'      => null,
 		'lease_until'      => null,
 	), $item['owner'] ) ) {
-		gasf_mec_log( 'CRM photos: discarding a fetch of ' . $graph_attachment_id . ' — the claim was taken over while it was downloading' );
+		gasf_crm_log( 'CRM photos: discarding a fetch of ' . $graph_attachment_id . ' — the claim was taken over while it was downloading' );
 		wp_delete_attachment( (int) $id, true );
 		$have = gasf_crm_photo_already_kept( $graph_message_id, $graph_attachment_id );
 		if ( $have ) { return $have; }
@@ -1639,7 +1639,7 @@ function gasf_crm_photo_invite_send( array $invite, $token, $stream = 'photos' )
 	);
 
 	if ( is_wp_error( $sent ) ) {
-		gasf_mec_log( 'CRM photos: invite send FAILED to ' . $invite['email'] . ' — ' . $sent->get_error_message() );
+		gasf_crm_log( 'CRM photos: invite send FAILED to ' . $invite['email'] . ' — ' . $sent->get_error_message() );
 	} else {
 		gasf_crm_log_event( (int) $invite['thread_id'], 'photo_invite', 'tagging link sent to ' . $invite['email'] );
 	}
@@ -1768,7 +1768,7 @@ add_action( 'template_redirect', function () {
 	// link the club sent them, with no way to tell whether their photos had been
 	// lost. Say plainly that it is us, and that their photos are safe.
 	if ( ! gasf_crm_photos_available() ) {
-		gasf_mec_log( 'CRM photos: a tagging link was opened while the Photo Catalogue module is not loaded.' );
+		gasf_crm_log( 'CRM photos: a tagging link was opened while the Photo Catalogue module is not loaded.' );
 		gasf_crm_photo_page( 'unavailable' );
 		exit;
 	}
@@ -1908,7 +1908,7 @@ function gasf_crm_photo_save_pending( array $invite ) {
 			$late['by']   = (string) $invite['email'];
 			$late['said'] = isset( $per[ $aid ] ) && is_array( $per[ $aid ] ) ? $per[ $aid ] : array();
 			update_post_meta( $aid, '_gasf_photo_late_answer', $late );
-			gasf_mec_log( 'CRM photos: ' . $invite['email'] . ' answered about media #' . (int) $aid
+			gasf_crm_log( 'CRM photos: ' . $invite['email'] . ' answered about media #' . (int) $aid
 				. ' after it was already approved — kept as a note, not reopened.' );
 			continue;
 		}
@@ -2006,7 +2006,7 @@ function gasf_crm_photo_notify_review( array $invite, $count ) {
 	if ( ! $to ) {
 		// Loudly, because from here it looks like success: the submitter has
 		// been thanked and the data is stored, but nobody can see it.
-		gasf_mec_log( 'CRM photos: ' . $invite['email'] . ' described ' . (int) $count
+		gasf_crm_log( 'CRM photos: ' . $invite['email'] . ' described ' . (int) $count
 			. ' photo(s) but NOBODY holds the photos stream — the answers are waiting with no one to review them.' );
 		return;
 	}
@@ -2315,7 +2315,7 @@ function gasf_crm_photo_item_move( $item_id, $from, $to, array $set = array(), $
 	// must never pass as one: a rejection that failed to write its state looks
 	// exactly like a crashed import, and the sweep would fetch the photo again.
 	if ( '' !== $wpdb->last_error ) {
-		gasf_mec_log( sprintf(
+		gasf_crm_log( sprintf(
 			'CRM photos: item %d could not move to %s — %s',
 			(int) $item_id, $to, $wpdb->last_error
 		) );
@@ -2391,7 +2391,7 @@ function gasf_crm_photo_lock() {
 	$held = (array) get_option( 'gasf_crm_photo_lock' );
 	if ( ! empty( $held['at'] ) && ( time() - (int) $held['at'] ) < 20 * MINUTE_IN_SECONDS ) { return ''; }
 
-	gasf_mec_log( 'CRM photos: breaking a stale intake lock' );
+	gasf_crm_log( 'CRM photos: breaking a stale intake lock' );
 	delete_option( 'gasf_crm_photo_lock' );
 	return add_option( 'gasf_crm_photo_lock', $row, '', false ) ? $token : '';
 }
@@ -2414,7 +2414,7 @@ function gasf_crm_photo_autoprocess() {
 	// leaves the mail in the mailbox, which is recoverable; importing photos that
 	// cannot be catalogued and asking senders about them is not.
 	if ( ! gasf_crm_photos_available() ) {
-		gasf_mec_log( 'CRM photos: intake skipped — the Photo Catalogue module is not loaded, so there is nothing to catalogue into.' );
+		gasf_crm_log( 'CRM photos: intake skipped — the Photo Catalogue module is not loaded, so there is nothing to catalogue into.' );
 		return 0;
 	}
 
@@ -2426,7 +2426,7 @@ function gasf_crm_photo_autoprocess() {
 		// a contended lock that never clears is a stuck intake, and the whole
 		// point of this exercise is that a stall must not look like idleness.
 		$held = (array) get_option( 'gasf_crm_photo_lock' );
-		gasf_mec_log( sprintf(
+		gasf_crm_log( sprintf(
 			'CRM photos: intake skipped, another run has held the lock for %d min (breaks at 20)',
 			empty( $held['at'] ) ? 0 : intdiv( time() - (int) $held['at'], 60 )
 		) );
@@ -2488,7 +2488,7 @@ function gasf_crm_photo_sweep_orphans() {
 	) );
 
 	foreach ( $rows as $id ) {
-		gasf_mec_log( 'CRM photos: removing unclaimed private image #' . (int) $id . ' (interrupted import)' );
+		gasf_crm_log( 'CRM photos: removing unclaimed private image #' . (int) $id . ' (interrupted import)' );
 		wp_delete_attachment( (int) $id, true );
 	}
 
@@ -2506,7 +2506,7 @@ function gasf_crm_photo_sweep_orphans() {
 	);
 	if ( $reopened ) {
 		$wpdb->query( "UPDATE {$items} SET state = 'pending_import' WHERE state = 'imported' AND wp_attachment_id = 0" );
-		gasf_mec_log( 'CRM photos: ' . $reopened . ' item(s) lost their attachment — reopened for another attempt' );
+		gasf_crm_log( 'CRM photos: ' . $reopened . ' item(s) lost their attachment — reopened for another attempt' );
 	}
 
 	// Half three: claims abandoned mid-download.
@@ -2539,8 +2539,8 @@ function gasf_crm_photo_sweep_orphans() {
 		'abandoned after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts', $now, $now, GASF_CRM_PHOTO_MAX_ATTEMPTS
 	) );
 
-	if ( $stuck ) { gasf_mec_log( 'CRM photos: ' . $stuck . ' item(s) abandoned mid-import — released for another attempt' ); }
-	if ( $dead )  { gasf_mec_log( 'CRM photos: ' . $dead . ' item(s) gave up after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' import attempts — need a volunteer' ); }
+	if ( $stuck ) { gasf_crm_log( 'CRM photos: ' . $stuck . ' item(s) abandoned mid-import — released for another attempt' ); }
+	if ( $dead )  { gasf_crm_log( 'CRM photos: ' . $dead . ' item(s) gave up after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' import attempts — need a volunteer' ); }
 
 	return count( $rows );
 }
@@ -2661,7 +2661,7 @@ function gasf_crm_photo_backfill() {
 		if ( ! gasf_crm_photo_is_private( $aid ) ) {
 			$moved = gasf_crm_photo_unpublish( $aid );
 			if ( is_wp_error( $moved ) ) {
-				gasf_mec_log( 'CRM photos: could not withdraw #' . $aid . ' from public uploads — ' . $moved->get_error_message() );
+				gasf_crm_log( 'CRM photos: could not withdraw #' . $aid . ' from public uploads — ' . $moved->get_error_message() );
 				continue;
 			}
 			$done['withdrawn']++;
@@ -2705,7 +2705,7 @@ function gasf_crm_photo_backfill() {
 		}
 	}
 
-	gasf_mec_log( sprintf(
+	gasf_crm_log( sprintf(
 		'CRM photos: backfilled %d submission(s), %d item(s), %d invitation link(s); withdrew %d from public uploads, hid %d from public queries',
 		$done['submissions'], $done['items'], $done['invites'], $done['withdrawn'], $done['hidden']
 	) );
@@ -2761,7 +2761,7 @@ function gasf_crm_photo_autoprocess_run() {
 		// point of a budget is to end the run tidily rather than have the web
 		// server end it somewhere arbitrary.
 		if ( time() >= $deadline ) {
-			gasf_mec_log( 'CRM photos: intake stopped at its ' . GASF_CRM_PHOTO_TIME_BUDGET . 's budget with messages still queued — they wait for the next run' );
+			gasf_crm_log( 'CRM photos: intake stopped at its ' . GASF_CRM_PHOTO_TIME_BUDGET . 's budget with messages still queued — they wait for the next run' );
 			break;
 		}
 
@@ -2783,7 +2783,7 @@ function gasf_crm_photo_autoprocess_run() {
 			 * of the queue and puts it somewhere a person can see it.
 			 */
 			gasf_crm_photo_submission_fail( $row, $thread, $sub->get_error_message() );
-			gasf_mec_log( 'CRM photos: message ' . (int) $row['id'] . ' — ' . $sub->get_error_message() );
+			gasf_crm_log( 'CRM photos: message ' . (int) $row['id'] . ' — ' . $sub->get_error_message() );
 			gasf_crm_log_event( (int) $thread['id'], 'photo_failed', $sub->get_error_message() );
 			continue;
 		}
@@ -2795,7 +2795,7 @@ function gasf_crm_photo_autoprocess_run() {
 		// starts being a thing a person needs to look at.
 		if ( (int) $sub['attempt_count'] + 1 > GASF_CRM_PHOTO_MAX_ATTEMPTS ) {
 			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'failed', 'gave up after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts' );
-			gasf_mec_log( 'CRM photos: giving up on message ' . (int) $row['id'] . ' after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts' );
+			gasf_crm_log( 'CRM photos: giving up on message ' . (int) $row['id'] . ' after ' . GASF_CRM_PHOTO_MAX_ATTEMPTS . ' attempts' );
 			gasf_crm_log_event( (int) $thread['id'], 'photo_failed', 'import failed repeatedly — needs a volunteer' );
 			continue;
 		}
@@ -2811,7 +2811,7 @@ function gasf_crm_photo_autoprocess_run() {
 				$sub['id'], $owner, $fatal ? 'held' : 'retry',
 				$all->get_error_message(), $fatal ? 0 : gasf_crm_photo_backoff( $sub )
 			);
-			gasf_mec_log( 'CRM photos: could not list attachments on message ' . (int) $row['id'] . ' — ' . $all->get_error_message() );
+			gasf_crm_log( 'CRM photos: could not list attachments on message ' . (int) $row['id'] . ' — ' . $all->get_error_message() );
 			if ( $fatal ) { gasf_crm_log_event( (int) $thread['id'], 'photo_held', $all->get_error_message() ); }
 			continue;
 		}
@@ -2840,7 +2840,7 @@ function gasf_crm_photo_autoprocess_run() {
 		}
 		if ( '' !== $over ) {
 			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'held', $over );
-			gasf_mec_log( sprintf(
+			gasf_crm_log( sprintf(
 				'CRM photos: message %d from %s carries %s — NOT taken in automatically, needs a volunteer.',
 				(int) $row['id'], $thread['last_from_addr'], $over
 			) );
@@ -2884,7 +2884,7 @@ function gasf_crm_photo_autoprocess_run() {
 					'lease_owner' => null,
 					'lease_until' => null,
 				), $item['owner'] );
-				gasf_mec_log( 'CRM photos: auto-keep failed for ' . ( $a['name'] ?? '?' ) . ' — ' . $id->get_error_message() );
+				gasf_crm_log( 'CRM photos: auto-keep failed for ' . ( $a['name'] ?? '?' ) . ' — ' . $id->get_error_message() );
 				$stuck = $id->get_error_message();
 				continue;
 			}
@@ -2897,7 +2897,7 @@ function gasf_crm_photo_autoprocess_run() {
 				'lease_owner'      => null,
 				'lease_until'      => null,
 			), $item['owner'] ) ) {
-				gasf_mec_log( 'CRM photos: discarding a fetch of ' . ( $a['name'] ?? '?' ) . ' — the claim was taken over mid-download' );
+				gasf_crm_log( 'CRM photos: discarding a fetch of ' . ( $a['name'] ?? '?' ) . ' — the claim was taken over mid-download' );
 				wp_delete_attachment( (int) $id, true );
 				continue;
 			}
@@ -2947,7 +2947,7 @@ function gasf_crm_photo_autoprocess_run() {
 			// The photos are in; only the ask failed. Retryable, and the photos
 			// already kept are skipped next time round by their claims.
 			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'retry', $inv->get_error_message(), gasf_crm_photo_backoff( $sub ) );
-			gasf_mec_log( 'CRM photos: took in ' . count( $kept ) . ' photo(s) from thread ' . (int) $thread['id']
+			gasf_crm_log( 'CRM photos: took in ' . count( $kept ) . ' photo(s) from thread ' . (int) $thread['id']
 				. ' but could not mint a tagging link — ' . $inv->get_error_message() );
 			continue;
 		}
@@ -2985,7 +2985,7 @@ function gasf_crm_photo_autoprocess_run() {
 			$wpdb->delete( gasf_crm_table( 'photo_invites' ), array( 'id' => (int) $inv['id'] ), array( '%d' ) );
 
 			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'retry', 'invitation not delivered: ' . $sent->get_error_message(), gasf_crm_photo_backoff( $sub ) );
-			gasf_mec_log( 'CRM photos: took in ' . count( $kept ) . ' photo(s) from thread ' . (int) $thread['id']
+			gasf_crm_log( 'CRM photos: took in ' . count( $kept ) . ' photo(s) from thread ' . (int) $thread['id']
 				. ' but the tagging link did NOT go out — ' . $sent->get_error_message() );
 			gasf_crm_log_event( (int) $thread['id'], 'photo_invite_failed', 'link not delivered to ' . $sub['sender_email'] );
 			continue;
@@ -3079,11 +3079,11 @@ function gasf_crm_photo_chase() {
 		$release = function ( $why ) use ( $wpdb, $t, $row ) {
 			$tries = (int) $row['remind_attempts'] + 1;
 			if ( $tries >= GASF_CRM_PHOTO_REMIND_TRIES ) {
-				gasf_mec_log( 'CRM photos: giving up on the reminder for invite ' . (int) $row['id'] . ' after ' . $tries . ' attempts — ' . $why );
+				gasf_crm_log( 'CRM photos: giving up on the reminder for invite ' . (int) $row['id'] . ' after ' . $tries . ' attempts — ' . $why );
 				return;
 			}
 			$wpdb->update( $t, array( 'reminded_at' => null ), array( 'id' => (int) $row['id'] ), array( '%s' ), array( '%d' ) );
-			gasf_mec_log( 'CRM photos: reminder for invite ' . (int) $row['id'] . ' not sent (' . $why . ') — released for another attempt' );
+			gasf_crm_log( 'CRM photos: reminder for invite ' . (int) $row['id'] . ' not sent (' . $why . ') — released for another attempt' );
 		};
 
 		$ids = array_map( 'intval', (array) json_decode( (string) $row['attachment_ids'], true ) );
@@ -3136,7 +3136,7 @@ function gasf_crm_photo_chase() {
 			$wpdb->delete( gasf_crm_table( 'photo_invite_items' ), array( 'invite_id' => (int) $fresh['id'] ), array( '%d' ) );
 			$wpdb->delete( $t, array( 'id' => (int) $fresh['id'] ), array( '%d' ) );
 
-			gasf_mec_log( 'CRM photos: reminder to ' . $row['email'] . ' FAILED — ' . $ok->get_error_message() );
+			gasf_crm_log( 'CRM photos: reminder to ' . $row['email'] . ' FAILED — ' . $ok->get_error_message() );
 			$release( $ok->get_error_message() );
 			continue;
 		}
@@ -3187,7 +3187,7 @@ function gasf_crm_photo_prune_invites() {
 	$n = (int) $wpdb->query( "DELETE FROM {$t} WHERE id IN ({$in})" ); // phpcs:ignore WordPress.DB
 
 	if ( $n ) {
-		gasf_mec_log( 'CRM photos: pruned ' . $n . ' invitation(s) finished more than ' . GASF_CRM_PHOTO_INVITE_KEEP_DAYS . ' days ago' );
+		gasf_crm_log( 'CRM photos: pruned ' . $n . ' invitation(s) finished more than ' . GASF_CRM_PHOTO_INVITE_KEEP_DAYS . ' days ago' );
 	}
 	return $n;
 }
@@ -3222,7 +3222,7 @@ function gasf_crm_photo_release_due() {
 		'released', current_time( 'mysql', true ), 'invited', $cut
 	) );
 
-	if ( $n ) { gasf_mec_log( 'CRM photos: released ' . $n . ' photo(s) from the grace period' ); }
+	if ( $n ) { gasf_crm_log( 'CRM photos: released ' . $n . ' photo(s) from the grace period' ); }
 	return $n;
 }
 
@@ -3469,7 +3469,7 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 	$moved = gasf_crm_photo_publish( $id );
 	if ( is_wp_error( $moved ) ) {
 		update_post_meta( $id, '_gasf_photo_rev', $have ); // give the revision back
-		gasf_mec_log( 'CRM photos: could not publish media #' . $id . ' — ' . $moved->get_error_message() );
+		gasf_crm_log( 'CRM photos: could not publish media #' . $id . ' — ' . $moved->get_error_message() );
 		return $moved;
 	}
 
@@ -3694,7 +3694,7 @@ add_action( 'rest_api_init', function () {
 				return new WP_Error( 'gasf_crm_403', 'That is not a submitted photo.', array( 'status' => 403 ) );
 			}
 
-			gasf_mec_log( sprintf(
+			gasf_crm_log( sprintf(
 				'CRM photos: media #%d (%s, from %s) rejected by user %d',
 				$aid, get_the_title( $aid ), $src['email'], get_current_user_id()
 			) );
@@ -3742,7 +3742,7 @@ add_action( 'rest_api_init', function () {
 				) );
 				if ( ! $moved ) {
 					update_post_meta( $aid, '_gasf_photo_rev', $have ); // hand the revision back
-					gasf_mec_log( 'CRM photos: NOT deleting media #' . $aid . ' — its record would not move to rejected' );
+					gasf_crm_log( 'CRM photos: NOT deleting media #' . $aid . ' — its record would not move to rejected' );
 					return new WP_Error(
 						'gasf_crm_reject',
 						'The photo has not been deleted: its record could not be updated, and deleting it now would have it fetched again.',

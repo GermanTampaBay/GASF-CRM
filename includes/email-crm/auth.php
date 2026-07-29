@@ -215,7 +215,7 @@ function gasf_crm_auth_callback( $provider ) {
 
 	$tok = json_decode( wp_remote_retrieve_body( $r ), true );
 	if ( empty( $tok['id_token'] ) ) {
-		gasf_mec_log( 'CRM auth: token exchange failed for ' . $provider . ' — ' . substr( wp_remote_retrieve_body( $r ), 0, 200 ) );
+		gasf_crm_log( 'CRM auth: token exchange failed for ' . $provider . ' — ' . substr( wp_remote_retrieve_body( $r ), 0, 200 ) );
 		gasf_crm_auth_fail( 'Sign-in failed at the provider.' );
 	}
 
@@ -354,7 +354,7 @@ function gasf_crm_find_or_create_user( $provider, array $claims ) {
 	update_user_meta( $user_id, 'gasf_crm_streams', array() );
 	update_user_meta( $user_id, 'gasf_crm_streams_set', 1 );
 
-	gasf_mec_log( 'CRM auth: new pending account ' . $login . ' (' . $email . ') via ' . $provider );
+	gasf_crm_log( 'CRM auth: new pending account ' . $login . ' (' . $email . ') via ' . $provider );
 	gasf_crm_auth_log( 'account', 'ok', array(
 		'user_id'  => (int) $user_id,
 		'email'    => $email,
@@ -433,7 +433,7 @@ function gasf_crm_auth_log_prune() {
 		'DELETE FROM ' . gasf_crm_table( 'auth_log' ) . ' WHERE created_at < %s',
 		gmdate( 'Y-m-d H:i:s', time() - ( GASF_CRM_AUTH_LOG_DAYS * DAY_IN_SECONDS ) )
 	) );
-	if ( $n ) { gasf_mec_log( 'CRM auth log: pruned ' . $n . ' entries past ' . GASF_CRM_AUTH_LOG_DAYS . ' days' ); }
+	if ( $n ) { gasf_crm_log( 'CRM auth log: pruned ' . $n . ' entries past ' . GASF_CRM_AUTH_LOG_DAYS . ' days' ); }
 	return $n;
 }
 
@@ -456,7 +456,7 @@ function gasf_crm_auth_fail( $msg, $detail = '' ) {
 		'reason'   => $detail ? $detail : $msg,
 	) );
 
-	gasf_mec_log( sprintf(
+	gasf_crm_log( sprintf(
 		'CRM auth FAILED: %s%s | cookie=%s | method=%s | ua=%s',
 		$msg,
 		$detail ? ' (' . $detail . ')' : '',
@@ -668,7 +668,7 @@ function gasf_crm_set_user_streams( $user_id, array $streams ) {
 	$valid = array_values( array_intersect( array_keys( gasf_crm_streams() ), array_map( 'strval', $streams ) ) );
 	update_user_meta( (int) $user_id, 'gasf_crm_streams', $valid );
 	update_user_meta( (int) $user_id, 'gasf_crm_streams_set', 1 );
-	gasf_mec_log( 'CRM: user ' . (int) $user_id . ' stream grants set to [' . implode( ',', $valid ) . '] by ' . get_current_user_id() );
+	gasf_crm_log( 'CRM: user ' . (int) $user_id . ' stream grants set to [' . implode( ',', $valid ) . '] by ' . get_current_user_id() );
 
 	// Who was given access to what, and by whom, belongs in the same history as
 	// who signed in. After an incident, "which accounts changed, and who changed
@@ -698,7 +698,7 @@ function gasf_crm_set_user_status( $user_id, $status ) {
 	update_user_meta( (int) $user_id, 'gasf_crm_status', $status );
 	update_user_meta( (int) $user_id, 'gasf_crm_status_by', get_current_user_id() );
 	update_user_meta( (int) $user_id, 'gasf_crm_status_at', current_time( 'mysql' ) );
-	gasf_mec_log( 'CRM: user ' . (int) $user_id . ' set to ' . $status . ' by ' . get_current_user_id() );
+	gasf_crm_log( 'CRM: user ' . (int) $user_id . ' set to ' . $status . ' by ' . get_current_user_id() );
 
 	$u = get_userdata( (int) $user_id );
 	gasf_crm_auth_log( 'approval', 'ok', array(

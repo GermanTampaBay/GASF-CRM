@@ -359,7 +359,7 @@ function gasf_crm_graph_messages( $folder, $since, $max_pages = 10, $mailbox = '
 		$pages++;
 	}
 	if ( $url ) {
-		gasf_mec_log( 'CRM: page cap hit in ' . $folder . ' — ' . count( $out ) . ' fetched, more remain; cursor will hold at the last fetched message.' );
+		gasf_crm_log( 'CRM: page cap hit in ' . $folder . ' — ' . count( $out ) . ' fetched, more remain; cursor will hold at the last fetched message.' );
 	}
 	return array( 'items' => $out, 'complete' => ( null === $url ) );
 }
@@ -518,7 +518,7 @@ function gasf_crm_graph_attachments( $graph_message_id, $mailbox = '', $max_page
 	}
 
 	if ( $url ) {
-		gasf_mec_log( 'CRM: attachment list for a message exceeded ' . $max_pages . ' pages — refusing a partial list' );
+		gasf_crm_log( 'CRM: attachment list for a message exceeded ' . $max_pages . ' pages — refusing a partial list' );
 		return new WP_Error(
 			'gasf_crm_toomany',
 			'That message carries more attachments than can be listed in one go, so it needs a volunteer rather than the automatic intake.'

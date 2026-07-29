@@ -64,7 +64,7 @@ function gasf_crm_health_ok() {
 	) );
 
 	if ( $was_alerting ) {
-		gasf_mec_log( 'CRM health: mailbox reachable again.' );
+		gasf_crm_log( 'CRM health: mailbox reachable again.' );
 		gasf_crm_health_notify(
 			'Email CRM: the club mailbox is reachable again',
 			"Mail collection is working again.\n\n"
@@ -132,7 +132,7 @@ function gasf_crm_health_maybe_alert() {
 		|| false !== stripos( $s['last_error'], 'token' ) || false !== stripos( $s['last_error'], '403' ) ) {
 		$body .= "This looks like a credentials problem. The usual cause is the Microsoft client\n"
 			. "secret expiring. Renewal steps are on the Email CRM settings page:\n"
-			. admin_url( 'admin.php?page=gasf-utilities&tab=emailcrm' ) . "\n\n";
+			. admin_url( 'admin.php?page=gasf-crm' ) . "\n\n";
 	}
 
 	$body .= "Check Graph status on that page — it reports credentials, admin consent and\n"
@@ -144,7 +144,7 @@ function gasf_crm_health_maybe_alert() {
 	$h['alerted_at'] = time();
 	gasf_crm_health_save( $h );
 
-	gasf_mec_log( 'CRM health: ALERT sent — mailbox unreachable for ' . $hours . 'h.' );
+	gasf_crm_log( 'CRM health: ALERT sent — mailbox unreachable for ' . $hours . 'h.' );
 	return true;
 }
 
@@ -211,6 +211,6 @@ add_action( 'admin_notices', function () {
 	echo '<div class="notice ' . esc_attr( $class ) . '"><p><strong>Email CRM:</strong> mail has not been collected from '
 		. esc_html( gasf_crm_cfg()['mailbox'] ) . ' for ' . (int) $hours . ' hour(s). '
 		. 'New enquiries are not reaching the club inbox. '
-		. '<a href="' . esc_url( admin_url( 'admin.php?page=gasf-utilities&tab=emailcrm' ) ) . '">Check Graph status</a>.'
+		. '<a href="' . esc_url( admin_url( 'admin.php?page=gasf-crm' ) ) . '">Check Graph status</a>.'
 		. '</p><p><code>' . esc_html( $s['last_error'] ) . '</code></p></div>';
 } );

@@ -597,7 +597,7 @@ function gasf_crm_photo_zip_build( array $ids ) {
 		'by'   => get_current_user_id(),
 	), GASF_CRM_LIB_ZIP_TTL );
 
-	gasf_mec_log( sprintf( 'CRM library: built a %s zip of %d photo(s) for user %d%s',
+	gasf_crm_log( sprintf( 'CRM library: built a %s zip of %d photo(s) for user %d%s',
 		size_format( filesize( $path ) ), count( $files ), get_current_user_id(),
 		$refused ? sprintf( ' — %d left out, marked do-not-publish', count( $refused ) ) : '' ) );
 
@@ -629,7 +629,7 @@ function gasf_crm_photo_zip_sweep() {
 		@unlink( $f ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		$n++;
 	}
-	if ( $n ) { gasf_mec_log( 'CRM library: swept ' . $n . ' expired download(s)' ); }
+	if ( $n ) { gasf_crm_log( 'CRM library: swept ' . $n . ' expired download(s)' ); }
 	return $n;
 }
 add_action( 'gasf_crm_sync_event', 'gasf_crm_photo_zip_sweep', 30 );
@@ -809,7 +809,7 @@ add_action( 'rest_api_init', function () {
 				$nc = function_exists( 'gasf_photo_person_counts' ) ? gasf_photo_person_counts() : array();
 				$n  = isset( $nc[ (int) $term->term_id ] ) ? (int) $nc[ (int) $term->term_id ] : 0;
 
-				gasf_mec_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s) — user %d',
+				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s) — user %d',
 					$term->name, $to, $n, get_current_user_id() ) );
 
 				return array( 'ok' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => $n );
@@ -838,7 +838,7 @@ add_action( 'rest_api_init', function () {
 
 				wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
 
-				gasf_mec_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s) — user %d',
+				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s) — user %d',
 					$term->name, $dest->name, count( $posts ), get_current_user_id() ) );
 
 				return array( 'ok' => true, 'action' => 'merge', 'from' => $term->name, 'to' => $dest->name, 'photos' => count( $posts ) );
@@ -865,7 +865,7 @@ add_action( 'rest_api_init', function () {
 					if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
 				}
 
-				gasf_mec_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s) — user %d',
+				gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s) — user %d',
 					$term->name, count( $posts ), get_current_user_id() ) );
 
 				return array( 'ok' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => count( $posts ) );
@@ -941,7 +941,7 @@ add_action( 'rest_api_init', function () {
 						array( 'status' => 409 ) );
 				}
 				$term = get_term( $r['term_id'], 'gasf_photo_place' );
-				gasf_mec_log( sprintf( 'Photo places: added "%s"%s — user %d', $name,
+				gasf_crm_log( sprintf( 'Photo places: added "%s"%s — user %d', $name,
 					$parent ? ' under ' . get_term( $parent, 'gasf_photo_place' )->name : '', get_current_user_id() ) );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'name' => $term->name );
 			}
@@ -980,7 +980,7 @@ add_action( 'rest_api_init', function () {
 					update_term_meta( (int) $term->term_id, $meta, 'gasf_radius' === $meta ? (int) $v : (float) $v );
 				}
 
-				gasf_mec_log( sprintf( 'Photo places: saved "%s" — user %d', $name ?: $term->name, get_current_user_id() ) );
+				gasf_crm_log( sprintf( 'Photo places: saved "%s" — user %d', $name ?: $term->name, get_current_user_id() ) );
 				$term = get_term( (int) $term->term_id, 'gasf_photo_place' );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'name' => $term->name );
 			}
@@ -1001,7 +1001,7 @@ add_action( 'rest_api_init', function () {
 				$n  = isset( $pc[ (int) $term->term_id ] ) ? (int) $pc[ (int) $term->term_id ] : 0;
 				$nm = $term->name;
 				wp_delete_term( (int) $term->term_id, 'gasf_photo_place' );
-				gasf_mec_log( sprintf( 'Photo places: deleted "%s" (was on %d photo(s); %d child place(s) moved up) — user %d',
+				gasf_crm_log( sprintf( 'Photo places: deleted "%s" (was on %d photo(s); %d child place(s) moved up) — user %d',
 					$nm, $n, count( $kids ), get_current_user_id() ) );
 				return array( 'ok' => true, 'deleted' => $nm, 'photos' => $n, 'moved' => count( $kids ) );
 			}

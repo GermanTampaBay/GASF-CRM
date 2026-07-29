@@ -47,8 +47,13 @@ runtime — see the note above `gasf_crm_cfg()` in `includes/loader.php`.
 
 ## Coexistence with GASF-Utilities
 
-Runs beside it happily; the utilities plugin's log, settings and admin screen
-are used when present, with guarded fallbacks when not. If a GASF-Utilities
-build that still carries the old modules is loaded, this plugin detects the
-copy already in memory and steps back with an admin notice instead of
-fataling the site.
+Fully independent as of v2.1.0: its own top-level **Email CRM** admin menu,
+its own log (`gasf-crm.log`, beside the webroot), and activation as the only
+on/off switch — the old `gasf_site_enable_*` options are no longer read.
+The only remaining ties are two tiny guarded fallbacks (`gasf_site_enabled`,
+`gasf_anthropic_key`) so the Anthropic key configured on the utilities
+Settings screen keeps working when both plugins run.
+
+If a GASF-Utilities build that still carries the old modules is loaded, this
+plugin detects the copy already in memory and steps back with an admin notice
+instead of fataling the site.

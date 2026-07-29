@@ -352,7 +352,7 @@ function gasf_crm_upsert_thread( $conversation_id, $subject, $from_name, $from_a
 		// (Unchecked, insert_id 0 flowed straight into messages.thread_id.)
 		$row = $wpdb->get_row( $wpdb->prepare( "SELECT id, status FROM {$t} WHERE stream = %s AND conversation_id = %s", $stream, $conversation_id ), ARRAY_A );
 		if ( ! $row ) {
-			gasf_mec_log( 'CRM: thread insert failed for conversation ' . substr( $conversation_id, 0, 24 ) . '… — ' . $wpdb->last_error );
+			gasf_crm_log( 'CRM: thread insert failed for conversation ' . substr( $conversation_id, 0, 24 ) . '… — ' . $wpdb->last_error );
 			return array( 'id' => 0, 'reopened' => false, 'created' => false );
 		}
 	}
@@ -596,7 +596,7 @@ function gasf_crm_delete_contact( $id ) {
 
 	if ( ! $wpdb->delete( $t, array( 'id' => $id ), array( '%d' ) ) ) { return false; }
 
-	gasf_mec_log( 'CRM: address book entry ' . $email . ' deleted by user ' . get_current_user_id() );
+	gasf_crm_log( 'CRM: address book entry ' . $email . ' deleted by user ' . get_current_user_id() );
 	return $email;
 }
 

@@ -34,7 +34,13 @@
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-if ( function_exists( 'gasf_site_enabled' ) ? gasf_site_enabled( 'gasf_site_enable_photocatalog' ) : true ) {
+/*
+ * No gate option any more — deactivating the plugin is the off switch,
+ * which is what a plugin has instead of a settings row on another
+ * plugin's screen. The old gasf_site_enable_photocatalog option is simply
+ * no longer read; both were ON at the moment this changed.
+ */
+if ( true ) {
 
 	/**
 	 * How close a photo's GPS has to be to a known place to be counted as
@@ -1606,7 +1612,7 @@ JS;
 		}
 
 		if ( $apply ) {
-			gasf_mec_log( sprintf(
+			gasf_crm_log( sprintf(
 				'Photo catalogue: backfilled %d photo(s) from EXIF — %d placed by GPS, %d matched to a single event, %d left for a person (several events that day).',
 				$out['dated'], $out['placed'], $out['evented'], $out['ambiguous']
 			) );
@@ -1652,7 +1658,7 @@ JS;
 			$n++;
 		}
 
-		gasf_mec_log( 'Photo catalogue: undid the EXIF backfill on ' . $n . ' photo(s)' );
+		gasf_crm_log( 'Photo catalogue: undid the EXIF backfill on ' . $n . ' photo(s)' );
 		return $n;
 	}
 

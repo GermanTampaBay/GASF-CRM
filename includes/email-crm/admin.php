@@ -11,10 +11,26 @@
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
+/*
+ * A top-level menu of its own, always — never a tab on somebody else's screen.
+ *
+ * Until v2.1.0 this registered as a tab on the GASF-Utilities page when that
+ * plugin was present, a leftover from the years it WAS one of that plugin's
+ * modules. The tenant's Graph credentials, the volunteer approval queue and
+ * the mailbox config deserve a front door with the plugin's own name on it,
+ * and "which screen manages the CRM" should not depend on what else happens
+ * to be installed.
+ */
 add_action( 'admin_menu', function () {
-	if ( function_exists( 'gasf_utilities_add_tab' ) ) {
-		gasf_utilities_add_tab( 'emailcrm', 'Email CRM', 'gasf_crm_admin_tab', 60 );
-	}
+	add_menu_page(
+		'Email CRM', 'Email CRM', 'manage_options', 'gasf-crm',
+		function () {
+			echo '<div class="wrap"><h1>Email CRM &amp; Photo Catalogue</h1>';
+			gasf_crm_admin_tab();
+			echo '</div>';
+		},
+		'dashicons-email-alt', 26
+	);
 } );
 
 function gasf_crm_admin_tab() {
@@ -54,7 +70,7 @@ function gasf_crm_admin_tab() {
 				if ( 0 === strcasecmp( $addr, $was[ $stream ] ) ) { continue; }
 				unset( $by[ $stream ] );
 				if ( 'general' === $stream ) { $cfg['last_sync'] = 0; }
-				gasf_mec_log( sprintf(
+				gasf_crm_log( sprintf(
 					'CRM: %s mailbox changed from %s to %s — sync cursor reset so the new mailbox is read from the start.',
 					$stream, $was[ $stream ] ?: '(none)', $addr ?: '(none)'
 				) );
@@ -868,7 +884,7 @@ add_action( 'admin_notices', function () {
 		: sprintf( 'the Microsoft client secret expires in %d days (%s)', (int) $s['days'], $s['date'] );
 
 	echo '<div class="notice notice-error"><p><strong>Email CRM:</strong> '
-		. esc_html( $what ) . '. <a href="' . esc_url( admin_url( 'admin.php?page=gasf-utilities&tab=emailcrm' ) ) . '">Renew it</a> '
+		. esc_html( $what ) . '. <a href="' . esc_url( admin_url( 'admin.php?page=gasf-crm' ) ) . '">Renew it</a> '
 		. '&mdash; once it lapses, mail to ' . esc_html( gasf_crm_cfg()['mailbox'] )
 		. ' silently stops reaching the club inbox.</p></div>';
 } );

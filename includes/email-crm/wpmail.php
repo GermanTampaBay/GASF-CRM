@@ -148,14 +148,14 @@ add_filter( 'pre_wp_mail', function ( $short, $atts ) {
 		$path = is_array( $path ) ? reset( $path ) : $path;
 		if ( ! is_string( $path ) || '' === $path || ! is_readable( $path )
 			|| filesize( $path ) > GASF_CRM_ATTACH_MAX ) {
-			gasf_mec_log( 'CRM mail: attachment not carryable via Graph ('
+			gasf_crm_log( 'CRM mail: attachment not carryable via Graph ('
 				. ( is_string( $path ) && '' !== $path ? basename( $path ) : 'non-path entry' )
 				. ') — whole message handed to the native mailer.' );
 			return $short;
 		}
 		$bytes = @file_get_contents( $path );
 		if ( false === $bytes ) {
-			gasf_mec_log( 'CRM mail: attachment unreadable (' . basename( $path ) . ') — whole message handed to the native mailer.' );
+			gasf_crm_log( 'CRM mail: attachment unreadable (' . basename( $path ) . ') — whole message handed to the native mailer.' );
 			return $short;
 		}
 		$message['attachments'][] = array(
@@ -174,7 +174,7 @@ add_filter( 'pre_wp_mail', function ( $short, $atts ) {
 
 	if ( is_wp_error( $sent ) ) {
 		set_transient( 'gasf_crm_mail_down', 1, GASF_CRM_MAIL_BACKOFF );
-		gasf_mec_log( 'CRM mail: Graph send failed, falling back to PHP mail — ' . $sent->get_error_message() );
+		gasf_crm_log( 'CRM mail: Graph send failed, falling back to PHP mail — ' . $sent->get_error_message() );
 		return $short; // let WordPress try it the old way
 	}
 

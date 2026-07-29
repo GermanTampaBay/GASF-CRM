@@ -319,14 +319,14 @@ function gasf_crm_draft_reply( $thread_id ) {
 	// evidence out and handing over the rest would hide that from the volunteer.
 	foreach ( array( 'REFERENCE_BEGIN', 'UNTRUSTED_EMAIL_BEGIN', 'THEY ASKED:', 'WE REPLIED:', 'CLUB INFORMATION' ) as $marker ) {
 		if ( false !== stripos( $text, $marker ) ) {
-			gasf_mec_log( 'CRM AI: draft withheld for thread ' . (int) $thread_id . ' — echoed the marker "' . $marker . '"' );
+			gasf_crm_log( 'CRM AI: draft withheld for thread ' . (int) $thread_id . ' — echoed the marker "' . $marker . '"' );
 			return new WP_Error( 'gasf_crm_ai_leak', 'The draft came back containing our own reference material, which usually means the email was written to make that happen. Nothing has been inserted — please write this one by hand, and mention it to whoever looks after the website.' );
 		}
 	}
 
 	$leak = gasf_crm_ai_leak( $text, $recent );
 	if ( '' !== $leak ) {
-		gasf_mec_log( 'CRM AI: draft withheld for thread ' . (int) $thread_id
+		gasf_crm_log( 'CRM AI: draft withheld for thread ' . (int) $thread_id
 			. ' — reproduced past correspondence: "' . mb_substr( $leak, 0, 80 ) . '…"' );
 		return new WP_Error( 'gasf_crm_ai_leak', 'The draft repeated a passage from somebody else\'s correspondence, so it has been withheld. Please write this one by hand, and mention it to whoever looks after the website.' );
 	}

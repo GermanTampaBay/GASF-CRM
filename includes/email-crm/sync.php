@@ -90,7 +90,7 @@ function gasf_crm_sync() {
 		$result['notified'] = gasf_crm_flush_notifications();
 
 		if ( $result['new'] || $result['reopened'] ) {
-			gasf_mec_log( sprintf(
+			gasf_crm_log( sprintf(
 				'CRM sync: %d new, %d reopened, %d notified.',
 				$result['new'], $result['reopened'], $result['notified']
 			) );
@@ -129,7 +129,7 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 	// here is bookkeeping; if this call fails, mail is not reaching the club.
 	if ( is_wp_error( $inbox ) ) {
 		$result['errors'][] = $mailbox . ': ' . $inbox->get_error_message();
-		gasf_mec_log( 'CRM sync: inbox fetch failed for ' . $mailbox . ' — ' . $inbox->get_error_message() );
+		gasf_crm_log( 'CRM sync: inbox fetch failed for ' . $mailbox . ' — ' . $inbox->get_error_message() );
 		return $inbox->get_error_message();
 	}
 
@@ -156,7 +156,7 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 		// whether a thread shows as addressed. The cursor below refuses to
 		// advance, so the window is re-read next hour.
 		$result['errors'][] = $mailbox . ' (sent): ' . $sent->get_error_message();
-		gasf_mec_log( 'CRM sync: sent-items fetch failed for ' . $mailbox . ' — ' . $sent->get_error_message() );
+		gasf_crm_log( 'CRM sync: sent-items fetch failed for ' . $mailbox . ' — ' . $sent->get_error_message() );
 	} else {
 		foreach ( $sent['items'] as $m ) {
 			$r = gasf_crm_ingest( $m, 'out', $stream );
@@ -219,7 +219,7 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 			if ( 'general' === $stream ) { $cfg['last_sync'] = $cursor; } // legacy display field
 			gasf_crm_save_cfg( $cfg );
 		} else {
-			gasf_mec_log( 'CRM sync: cursor held for ' . $mailbox . ' — truncated read returned no usable timestamp.' );
+			gasf_crm_log( 'CRM sync: cursor held for ' . $mailbox . ' — truncated read returned no usable timestamp.' );
 		}
 	}
 

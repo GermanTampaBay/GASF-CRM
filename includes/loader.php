@@ -26,7 +26,13 @@
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
-if ( function_exists( 'gasf_site_enabled' ) ? gasf_site_enabled( 'gasf_site_enable_emailcrm' ) : true ) {
+/*
+ * No gate option any more — deactivating the plugin is the off switch,
+ * which is what a plugin has instead of a settings row on another
+ * plugin's screen. The old gasf_site_enable_emailcrm option is simply
+ * no longer read; both were ON at the moment this changed.
+ */
+if ( true ) {
 
 	define( 'GASF_CRM_DIR', __DIR__ . '/email-crm' );
 
@@ -253,7 +259,7 @@ if ( function_exists( 'gasf_site_enabled' ) ? gasf_site_enabled( 'gasf_site_enab
 			  WHERE m.stream <> t.stream" // phpcs:ignore WordPress.DB
 		);
 		if ( $fixed ) {
-			gasf_mec_log( 'CRM: stamped the owning mailbox onto ' . $fixed . ' message(s)' );
+			gasf_crm_log( 'CRM: stamped the owning mailbox onto ' . $fixed . ' message(s)' );
 		}
 
 		/*
@@ -280,12 +286,12 @@ if ( function_exists( 'gasf_site_enabled' ) ? gasf_site_enabled( 'gasf_site_enab
 			// messages and threads, silently, with no constraint to catch them.
 			$ok = $wpdb->get_var( $wpdb->prepare( "SHOW INDEX FROM {$table} WHERE Key_name = %s", $replacement ) ); // phpcs:ignore
 			if ( ! $ok ) {
-				gasf_mec_log( 'CRM: NOT dropping ' . $index . ' on ' . $table . ' — its replacement ' . $replacement . ' is missing' );
+				gasf_crm_log( 'CRM: NOT dropping ' . $index . ' on ' . $table . ' — its replacement ' . $replacement . ' is missing' );
 				continue;
 			}
 
 			$wpdb->query( "ALTER TABLE {$table} DROP INDEX `{$index}`" ); // phpcs:ignore
-			gasf_mec_log( 'CRM: dropped legacy global unique index ' . $index . ' on ' . $table );
+			gasf_crm_log( 'CRM: dropped legacy global unique index ' . $index . ' on ' . $table );
 		}
 
 		// Give every photo taken in before the item table a claim of its own.
@@ -315,13 +321,13 @@ if ( function_exists( 'gasf_site_enabled' ) ? gasf_site_enabled( 'gasf_site_enab
 		 */
 		$missing = gasf_crm_schema_gaps();
 		if ( $missing ) {
-			gasf_mec_log( 'CRM: schema upgrade to ' . GASF_CRM_SCHEMA . ' INCOMPLETE — ' . implode( '; ', $missing )
+			gasf_crm_log( 'CRM: schema upgrade to ' . GASF_CRM_SCHEMA . ' INCOMPLETE — ' . implode( '; ', $missing )
 				. '. Version NOT stamped; it will be retried on the next load.' );
 			return;
 		}
 
 		update_option( 'gasf_crm_schema', GASF_CRM_SCHEMA, false );
-		gasf_mec_log( 'CRM: schema/rewrites upgraded to ' . GASF_CRM_SCHEMA );
+		gasf_crm_log( 'CRM: schema/rewrites upgraded to ' . GASF_CRM_SCHEMA );
 	}, 20 );
 
 	/**

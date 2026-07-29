@@ -190,7 +190,7 @@ function gasf_crm_flush_notifications( $force = false ) {
 	 * a whole. The hourly cadence is the backoff.
 	 */
 	if ( 0 === $delivered ) {
-		gasf_mec_log( sprintf(
+		gasf_crm_log( sprintf(
 			'CRM: notification delivery failed for all %d recipient(s); batch of %d thread(s) held for retry.',
 			count( $recipients ), count( $threads )
 		) );
@@ -200,7 +200,7 @@ function gasf_crm_flush_notifications( $force = false ) {
 	$dequeue();
 	update_option( 'gasf_crm_notify_last', time(), false );
 
-	gasf_mec_log( sprintf(
+	gasf_crm_log( sprintf(
 		'CRM: notified %d of %d recipient(s) about %d thread(s)%s.',
 		$delivered, count( $recipients ), count( $threads ),
 		$failed ? sprintf( '; %d still owed and carried to the next run', $failed ) : ''
@@ -304,7 +304,7 @@ function gasf_crm_notify_send( $to, $subject, $body ) {
 	if ( gasf_crm_ready() ) {
 		$sent = gasf_crm_graph_send( $to, $subject, $body );
 		if ( ! is_wp_error( $sent ) ) { return true; }
-		gasf_mec_log( 'CRM notify: Graph send failed for ' . $to . ' — ' . $sent->get_error_message() );
+		gasf_crm_log( 'CRM notify: Graph send failed for ' . $to . ' — ' . $sent->get_error_message() );
 	}
 
 	return (bool) wp_mail( $to, $subject, $body );
@@ -329,6 +329,6 @@ function gasf_crm_notify_admin_pending( $user_id, $name, $email, $provider ) {
 			. 'Email:    ' . $email . "\n"
 			. 'Provider: ' . $provider . "\n\n"
 			. 'Approve or deny here:' . "\n"
-			. admin_url( 'admin.php?page=gasf-utilities&tab=emailcrm' ) . "\n"
+			. admin_url( 'admin.php?page=gasf-crm' ) . "\n"
 	);
 }

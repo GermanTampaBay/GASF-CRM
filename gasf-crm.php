@@ -3,7 +3,7 @@
  * Plugin Name:  GASF Email CRM & Photo Catalogue
  * Plugin URI:   https://github.com/GermanTampaBay/GASF-CRM
  * Description:  Shared-inbox CRM for the club's mailboxes, and the photo catalogue that grew out of it — intake, tagging, permissions, library, bulk upload.
- * Version:      2.0.0
+ * Version:      2.1.0
  * Author:       German-American Society of Tampa Bay
  * Text Domain:  gasf
  *
@@ -62,18 +62,22 @@ if ( ! function_exists( 'gasf_anthropic_key' ) ) {
 	}
 }
 
-if ( ! function_exists( 'gasf_mec_log' ) ) {
-	// Same shape and same file as the utilities plugin's logger, so the log
-	// stays one stream whichever plugin wrote a given line.
-	if ( ! defined( 'GASF_MEC_LOG' ) )     { define( 'GASF_MEC_LOG', dirname( ABSPATH ) . '/gasf-mec-importer.log' ); }
-	if ( ! defined( 'GASF_MEC_LOG_MAX' ) ) { define( 'GASF_MEC_LOG_MAX', 2 * MB_IN_BYTES ); }
-	function gasf_mec_log( $msg ) {
-		$f = GASF_MEC_LOG;
-		if ( @file_exists( $f ) && @filesize( $f ) > GASF_MEC_LOG_MAX ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			@rename( $f, $f . '.1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-		}
-		@file_put_contents( $f, '[' . date( 'Y-m-d H:i:s' ) . '] ' . $msg . "\n", FILE_APPEND | LOCK_EX ); // phpcs:ignore
+/*
+ * The CRM's own log, unconditionally. Through v2.0.0 the CRM wrote into the
+ * utilities plugin's gasf-mec-importer.log, which meant "what did the CRM do
+ * last night" required knowing another plugin's filename. Same rotation shape,
+ * its own file — and no function_exists guard, because the name is ours alone
+ * and a guard would only hide a collision worth hearing about.
+ */
+if ( ! defined( 'GASF_CRM_LOG' ) )     { define( 'GASF_CRM_LOG', dirname( ABSPATH ) . '/gasf-crm.log' ); }
+if ( ! defined( 'GASF_CRM_LOG_MAX' ) ) { define( 'GASF_CRM_LOG_MAX', 2 * MB_IN_BYTES ); }
+function gasf_crm_log( $msg ) {
+	$f = GASF_CRM_LOG;
+	if ( @file_exists( $f ) && @filesize( $f ) > GASF_CRM_LOG_MAX ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		@rename( $f, $f . '.1' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
+	@file_put_contents( $f, '[' . date( 'Y-m-d H:i:s' ) . '] ' . $msg . "
+", FILE_APPEND | LOCK_EX ); // phpcs:ignore
 }
 
 /*
@@ -86,28 +90,6 @@ if ( ! function_exists( 'gasf_mec_log' ) ) {
  */
 require_once __DIR__ . '/includes/loader.php';
 require_once __DIR__ . '/includes/photo-catalog.php';
-
-/*
- * The admin screen, when GASF-Utilities is not there to hang it on.
- *
- * admin.php registers itself as a tab on the utilities screen when that exists
- * — kept, so sites running both plugins see no change. This fallback only
- * fires when the CRM is truly standalone. Priority 20: the check has to run
- * after the utilities plugin would have defined its tab function, not before.
- */
-add_action( 'admin_menu', function () {
-	if ( function_exists( 'gasf_utilities_add_tab' ) ) { return; }
-	if ( ! function_exists( 'gasf_crm_admin_tab' ) ) { return; }
-	add_menu_page(
-		'Email CRM', 'Email CRM', 'manage_options', 'gasf-crm',
-		function () {
-			echo '<div class="wrap"><h1>Email CRM</h1>';
-			gasf_crm_admin_tab();
-			echo '</div>';
-		},
-		'dashicons-email-alt', 26
-	);
-}, 20 );
 
 /*
  * Rewrites and schema on activation.

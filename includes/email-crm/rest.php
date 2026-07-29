@@ -419,7 +419,7 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 
 	$sent = gasf_crm_graph_forward( $target['graph_message_id'], $to, $comment, $stream );
 	if ( is_wp_error( $sent ) ) {
-		gasf_mec_log( 'CRM forward failed (thread ' . $thread_id . '): ' . $sent->get_error_message() );
+		gasf_crm_log( 'CRM forward failed (thread ' . $thread_id . '): ' . $sent->get_error_message() );
 		return new WP_Error( 'gasf_crm_send', $sent->get_error_message(), array( 'status' => 502 ) );
 	}
 
@@ -456,7 +456,7 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 
 	gasf_crm_log_event( $thread_id, 'forwarded', 'Forwarded to ' . implode( ', ', $to ) . ' — closed as answered' );
 	gasf_crm_set_status( $thread_id, 'addressed' );
-	gasf_mec_log( 'CRM: thread ' . $thread_id . ' forwarded to ' . implode( ', ', $to ) . ' by user ' . $user_id );
+	gasf_crm_log( 'CRM: thread ' . $thread_id . ' forwarded to ' . implode( ', ', $to ) . ' by user ' . $user_id );
 
 	return array( 'ok' => true, 'to' => $to );
 }
@@ -562,7 +562,7 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 		: gasf_crm_graph_reply( $target['graph_message_id'], $html, $stream );
 
 	if ( is_wp_error( $sent ) ) {
-		gasf_mec_log( 'CRM reply failed (thread ' . $thread_id . '): ' . $sent->get_error_message() );
+		gasf_crm_log( 'CRM reply failed (thread ' . $thread_id . '): ' . $sent->get_error_message() );
 		return new WP_Error( 'gasf_crm_send', $sent->get_error_message(), array( 'status' => 502 ) );
 	}
 
@@ -589,7 +589,7 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 	gasf_crm_touch_contact( $thread['last_from_addr'], $thread['last_from_name'], 'out', (string) $thread['subject'], (string) $thread['stream'] );
 	gasf_crm_set_status( $thread_id, 'addressed' );
 	gasf_crm_log_event( $thread_id, 'replied', 'Replied to ' . $thread['last_from_addr'] );
-	gasf_mec_log( 'CRM: thread ' . $thread_id . ' answered by user ' . $user_id );
+	gasf_crm_log( 'CRM: thread ' . $thread_id . ' answered by user ' . $user_id );
 
 	return array( 'ok' => true );
 }

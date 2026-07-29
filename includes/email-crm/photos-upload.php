@@ -313,7 +313,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 */
 	$path = get_attached_file( $id );
 	if ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) {
-		gasf_mec_log( sprintf( 'CRM upload: media #%d did not publish cleanly (still private=%s, file=%s) — removed',
+		gasf_crm_log( sprintf( 'CRM upload: media #%d did not publish cleanly (still private=%s, file=%s) — removed',
 			$id, gasf_crm_photo_is_private( $id ) ? 'yes' : 'no', $path ?: 'none' ) );
 		wp_delete_attachment( $id, true );
 		return new WP_Error( 'gasf_crm_pub', $name . ' could not be filed away safely, so it has not been kept. Nothing was published.', array( 'status' => 500 ) );
@@ -349,11 +349,11 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	// itself is already safe — scrubbed, consented, in the library. Losing it
 	// over a bad place name would be the worse outcome.
 	if ( is_wp_error( $saved ) ) {
-		gasf_mec_log( sprintf( 'CRM upload: media #%d uploaded but its batch tags did not apply — %s',
+		gasf_crm_log( sprintf( 'CRM upload: media #%d uploaded but its batch tags did not apply — %s',
 			$id, $saved->get_error_message() ) );
 	}
 
-	gasf_mec_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
+	gasf_crm_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
 		$id, $name, gasf_crm_display_name( get_current_user_id() ) ) );
 
 	return gasf_crm_photo_library_card( $id );

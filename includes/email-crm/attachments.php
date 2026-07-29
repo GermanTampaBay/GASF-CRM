@@ -276,7 +276,7 @@ function gasf_crm_attach_for_graph( $id ) {
 
 	$path = gasf_crm_attach_path( $row['stored_name'] );
 	if ( ! file_exists( $path ) ) {
-		gasf_mec_log( 'CRM attach: file missing on disk for id ' . (int) $id . ' (' . $row['original_name'] . ')' );
+		gasf_crm_log( 'CRM attach: file missing on disk for id ' . (int) $id . ' (' . $row['original_name'] . ')' );
 		return null;
 	}
 
@@ -308,7 +308,7 @@ add_action( 'gasf_crm_attach_sweep', function () {
 	), ARRAY_A );
 
 	foreach ( $rows as $r ) { gasf_crm_attach_delete( (int) $r['id'] ); }
-	if ( $rows ) { gasf_mec_log( 'CRM attach: swept ' . count( $rows ) . ' expired upload(s).' ); }
+	if ( $rows ) { gasf_crm_log( 'CRM attach: swept ' . count( $rows ) . ' expired upload(s).' ); }
 } );
 
 add_action( 'init', function () {
