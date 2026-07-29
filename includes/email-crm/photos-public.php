@@ -186,6 +186,97 @@ function gasf_crm_door_open_token() {
 }
 
 /* =====================================================================
+ * Keeping the commodity bots out
+ * ================================================================== */
+
+/*
+ * Three layers, in rising order of what they cost a human: a honeypot no
+ * person can see, a floor on how fast a form can be filled, and Cloudflare
+ * Turnstile — which for almost everyone is nothing at all.
+ *
+ * Said plainly, because pretending otherwise is how these things get
+ * oversold: none of this stops a capable operator driving a real browser.
+ * Nothing at the entrance does any more. The volunteer clicking Keep is the
+ * actual defence; these layers exist so the queue is not buried in the
+ * commodity spam that finds every open form eventually, and they are chosen
+ * to cost a person in a pretzel queue nothing.
+ *
+ * The party door is exempt from all of it — possession of a QR code inside
+ * the building during the window is a better credential than any of this.
+ */
+
+/** Both keys, or nothing. Half a configuration must not half-enforce. */
+function gasf_crm_turnstile_keys() {
+	$cfg = gasf_crm_cfg();
+	$site   = trim( (string) ( $cfg['turnstile_site'] ?? '' ) );
+	$secret = trim( (string) ( $cfg['turnstile_secret'] ?? '' ) );
+	return ( '' !== $site && '' !== $secret ) ? array( 'site' => $site, 'secret' => $secret ) : null;
+}
+
+/**
+ * A pass proving this browser already cleared Turnstile once.
+ *
+ * Turnstile tokens are single-use and a batch is many requests, so the first
+ * upload spends the token and earns this instead: an HMAC over the IP and an
+ * expiry, nothing stored server-side. Half an hour covers any real batch on
+ * any real wifi.
+ */
+function gasf_crm_door_pass() {
+	$exp = time() + 30 * MINUTE_IN_SECONDS;
+	return $exp . '.' . hash_hmac( 'sha256', gasf_crm_client_ip() . '|' . $exp, wp_salt( 'auth' ) );
+}
+
+function gasf_crm_door_pass_ok( $pass ) {
+	if ( ! preg_match( '~^(\d{10,11})\.([a-f0-9]{64})$~', (string) $pass, $m ) ) { return false; }
+	if ( time() > (int) $m[1] ) { return false; }
+	return hash_equals( hash_hmac( 'sha256', gasf_crm_client_ip() . '|' . (int) $m[1], wp_salt( 'auth' ) ), $m[2] );
+}
+
+/**
+ * A signed statement of when the form was served, for the speed floor.
+ *
+ * Stateless on purpose: the page is uncacheable, so the moment it rendered is
+ * a fact worth signing, and a submission arriving faster than a human can
+ * pick a photo — or from a form served more than a day ago — did not come
+ * from a person holding a phone.
+ */
+function gasf_crm_door_stamp() {
+	$now = time();
+	return $now . '.' . hash_hmac( 'sha256', 'doorstamp|' . $now, wp_salt( 'auth' ) );
+}
+
+function gasf_crm_door_stamp_age( $stamp ) {
+	if ( ! preg_match( '~^(\d{10,11})\.([a-f0-9]{64})$~', (string) $stamp, $m ) ) { return -1; }
+	if ( ! hash_equals( hash_hmac( 'sha256', 'doorstamp|' . (int) $m[1], wp_salt( 'auth' ) ), $m[2] ) ) { return -1; }
+	return time() - (int) $m[1];
+}
+
+/** Ask Cloudflare whether the token is good. */
+function gasf_crm_turnstile_verify( $token, $secret ) {
+	$r = wp_remote_post( 'https://challenges.cloudflare.com/turnstile/v0/siteverify', array(
+		'timeout' => 8,
+		'body'    => array(
+			'secret'   => $secret,
+			'response' => (string) $token,
+			'remoteip' => gasf_crm_client_ip(),
+		),
+	) );
+	if ( is_wp_error( $r ) ) {
+		/*
+		 * Cloudflare unreachable is OUR outage, not the guest's fault. Fail
+		 * open: the year-round queue is still volunteer-gated behind this, so
+		 * the cost of letting a request through is one more row to review,
+		 * while failing closed turns somebody's outage into "the club's photo
+		 * form is broken" with nobody able to say why.
+		 */
+		gasf_crm_log( 'Turnstile: siteverify unreachable — allowing without it (' . $r->get_error_message() . ')' );
+		return true;
+	}
+	$body = json_decode( (string) wp_remote_retrieve_body( $r ), true );
+	return ! empty( $body['success'] );
+}
+
+/* =====================================================================
  * The route
  * ================================================================== */
 
@@ -257,6 +348,42 @@ function gasf_crm_door_receive( array $door ) {
 	 * is recorded per photo.
 	 */
 	$full_consent = '1' === (string) ( $_POST['consent'] ?? '' );
+
+	if ( ! $party ) {
+		// The honeypot: a field labelled like a website box, hidden from every
+		// sighted, styled browser. Humans cannot see it; the form-filler kits
+		// that find open forms fill everything.
+		if ( '' !== trim( (string) ( $_POST['website'] ?? '' ) ) ) {
+			gasf_crm_log( sprintf( 'Door "%s": honeypot tripped %s', $door['label'],
+				gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
+			return $fail( 'The club could not take that one.' );
+		}
+
+		// The speed floor. Five seconds is glacial for a script and impossible
+		// to beat for a person who has to pick a photo off a camera roll.
+		$age = gasf_crm_door_stamp_age( (string) ( $_POST['stamp'] ?? '' ) );
+		if ( $age < 5 || $age > DAY_IN_SECONDS ) {
+			gasf_crm_log( sprintf( 'Door "%s": speed floor refused a submission aged %ds %s',
+				$door['label'], $age, gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
+			return $fail( 'That arrived faster than a person could send it. Give the page a moment and try again.' );
+		}
+
+		// Turnstile, when configured. One token clears a batch: the first
+		// upload spends it and the answer carries a pass for the rest.
+		$keys = gasf_crm_turnstile_keys();
+		$pass = '';
+		if ( $keys && ! gasf_crm_door_pass_ok( (string) ( $_POST['pass'] ?? '' ) ) ) {
+			$token = (string) ( $_POST['cf_token'] ?? '' );
+			if ( '' === $token || ! gasf_crm_turnstile_verify( $token, $keys['secret'] ) ) {
+				gasf_crm_log( sprintf( 'Door "%s": Turnstile refused a submission %s',
+					$door['label'], gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
+				return $fail( 'The security check did not pass. Reload the page and try again.', 403 );
+			}
+			$pass = gasf_crm_door_pass();
+		} elseif ( $keys ) {
+			$pass = gasf_crm_door_pass();
+		}
+	}
 
 	if ( gasf_crm_door_device_count( $door['token'] ) >= GASF_CRM_DOOR_MAX_PER_DEVICE ) {
 		return $fail( sprintf( 'That is %d photos from this phone — plenty! Find a volunteer if you have more.',
@@ -362,6 +489,7 @@ function gasf_crm_door_receive( array $door ) {
 		'ok'   => true,
 		'id'   => (int) $card['id'],
 		'held' => ! $party,
+		'pass' => isset( $pass ) ? $pass : '',
 	) );
 }
 
@@ -570,10 +698,25 @@ function gasf_crm_door_page( $door, $notice ) {
 
 		echo '<p><label for="pfrom"><strong>Your name (optional)</strong></label><br>';
 		echo '<input type="text" id="pfrom" maxlength="80" placeholder="So we know who to thank" autocomplete="name"></p>';
+
+		// The honeypot. aria-hidden and tabindex out so no screen reader or
+		// keyboard ever lands here; only software that reads the raw form does.
+		echo '<p style="position:absolute;left:-9999px;top:-9999px" aria-hidden="true"><label>Website<input type="text" id="pwebsite" tabindex="-1" autocomplete="off"></label></p>';
 	}
 
 	echo '</div>';
 
+	if ( ! $party ) {
+		printf( '<input type="hidden" id="pstamp" value="%s">', esc_attr( gasf_crm_door_stamp() ) );
+		$ts_keys = gasf_crm_turnstile_keys();
+		if ( $ts_keys ) {
+			// Rendered explicitly so the token lands in a place the uploader
+			// can reach, and reset after each spend.
+			echo '<div id="pturnstile" style="margin:10px 0"></div>';
+			printf( '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=gasfTsReady" async defer></script><script>var GASF_TS_SITE=%s,gasfTsToken="",gasfTsWidget=null;function gasfTsReady(){gasfTsWidget=turnstile.render("#pturnstile",{sitekey:GASF_TS_SITE,callback:function(t){gasfTsToken=t;}});}</script>',
+				wp_json_encode( $ts_keys['site'] ) );
+		}
+	}
 	echo '<p class="gasf-door-send"><button type="button" id="psend" disabled>Submit</button></p>';
 	echo '<p class="gasf-door-msg" id="pmsg"></p>';
 
@@ -862,6 +1005,13 @@ function gasf_crm_door_script( $party ) {
 			var fd = new FormData();
 			fd.append('file', p.file);
 			fd.append('consent', document.getElementById('pconsent').checked ? '1' : '0');
+			fd.append('website', val('pwebsite'));
+			fd.append('stamp', val('pstamp'));
+			if (window.gasfDoorPass) {
+				fd.append('pass', window.gasfDoorPass);
+			} else if (typeof gasfTsToken !== 'undefined' && gasfTsToken) {
+				fd.append('cf_token', gasfTsToken);
+			}
 			people.forEach(function(n){ fd.append('people[]', n); });
 			if (extra) { Object.keys(extra).forEach(function(k){ fd.append(k, extra[k]); }); }
 
@@ -874,6 +1024,9 @@ function gasf_crm_door_script( $party ) {
 					try { b = JSON.parse(t); } catch (e) {}
 					if (!b || !b.ok) { throw new Error((b && b.message) || 'The club could not take that one.'); }
 					if (b.held) { held = true; }
+					// The Turnstile token is spent; the pass covers the rest of
+					// the batch and the next half hour.
+					if (b.pass) { window.gasfDoorPass = b.pass; }
 					p.state = 'done'; ok++;
 				})
 				.catch(function(e){ p.state = 'err'; bad++; if (!why) { why = e.message; } })

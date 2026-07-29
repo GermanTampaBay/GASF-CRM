@@ -101,6 +101,7 @@ function gasf_crm_admin_tab() {
 			$cfg['client_id']      = sanitize_text_field( wp_unslash( $_POST['client_id'] ?? '' ) );
 			$cfg['google_id']      = sanitize_text_field( wp_unslash( $_POST['google_id'] ?? '' ) );
 			$cfg['ms_id']          = sanitize_text_field( wp_unslash( $_POST['ms_id'] ?? '' ) );
+			$cfg['turnstile_site'] = sanitize_text_field( wp_unslash( $_POST['turnstile_site'] ?? '' ) );
 			$cfg['signature_org']  = sanitize_text_field( wp_unslash( $_POST['signature_org'] ?? '' ) );
 			$cfg['secret_expiry']  = sanitize_text_field( wp_unslash( $_POST['secret_expiry'] ?? '' ) );
 			$cfg['board_address']  = sanitize_email( wp_unslash( $_POST['board_address'] ?? '' ) );
@@ -110,7 +111,7 @@ function gasf_crm_admin_tab() {
 
 			// Blank = keep. Secrets are not echoed back, so an empty box means the
 			// admin didn't retype it, not that they want it cleared.
-			foreach ( array( 'client_secret', 'google_secret', 'ms_secret' ) as $f ) {
+			foreach ( array( 'client_secret', 'google_secret', 'ms_secret', 'turnstile_secret' ) as $f ) {
 				$v = trim( (string) wp_unslash( $_POST[ $f ] ?? '' ) );
 				if ( '' !== $v ) { $cfg[ $f ] = $v; }
 				if ( ! empty( $_POST[ $f . '_clear' ] ) ) { $cfg[ $f ] = ''; }
@@ -369,6 +370,13 @@ function gasf_crm_admin_tab() {
 				<td><input type="password" class="regular-text" name="ms_secret" autocomplete="new-password" placeholder="leave blank to keep">
 					<?php echo $set( $cfg['ms_secret'] ); // phpcs:ignore WordPress.Security.EscapeOutput ?>
 					<label style="margin-left:12px"><input type="checkbox" name="ms_secret_clear" value="1"> clear</label></td></tr>
+			<tr><th scope="row">Turnstile site key</th>
+				<td><input type="text" class="regular-text code" name="turnstile_site" value="<?php echo esc_attr( $cfg['turnstile_site'] ); ?>">
+					<p class="description">Cloudflare dashboard &rarr; Turnstile &rarr; your widget. Guards the public photo link against commodity bots; both keys blank switches the check off entirely. Party links are never challenged &mdash; possession of the QR code during the window is their gate.</p></td></tr>
+			<tr><th scope="row">Turnstile secret</th>
+				<td><input type="password" class="regular-text" name="turnstile_secret" autocomplete="new-password" placeholder="leave blank to keep">
+					<?php echo $set( $cfg['turnstile_secret'] ); // phpcs:ignore WordPress.Security.EscapeOutput ?>
+					<label style="margin-left:12px"><input type="checkbox" name="turnstile_secret_clear" value="1"> clear</label></td></tr>
 		</table>
 
 		<h3>Replies &amp; notifications</h3>

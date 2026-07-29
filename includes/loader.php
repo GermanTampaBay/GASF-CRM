@@ -163,6 +163,11 @@ if ( true ) {
 			'google_secret'  => '',
 			'ms_id'          => '',
 			'ms_secret'      => '',
+			// Cloudflare Turnstile, guarding the public photo door. Blank keys
+			// mean the check simply is not made — the door worked before the
+			// keys existed and must not break if they are ever cleared.
+			'turnstile_site'   => '',
+			'turnstile_secret' => '',
 			'signature_org'  => 'German-American Society Friendship of Pinellas County',
 			// One-click forward destination. Configurable rather than hardcoded
 			// so a change of address is a settings edit, not a deploy. Blank
