@@ -364,7 +364,7 @@ function gasf_crm_backup_one( $id ) {
 	$index[ $id ] = array( 'name' => $name, 'folder' => $folder, 'items' => $new_state['items'] );
 	update_option( 'gasf_crm_backup_index', $index, false );
 
-	return true;
+	return $new_state;
 }
 
 /** Remove a photo's remote copies, from a state/index entry. Best-effort. */
@@ -421,8 +421,10 @@ function gasf_crm_backup_run( $dry = false ) {
 		}
 		$done++;
 		$bytes += (int) filesize( get_attached_file( $id ) );
-		gasf_crm_log( sprintf( 'Backup: #%d done — %s (%s)', $id,
-			(string) get_post_meta( $id, '_gasf_photo_backup', true )['name'] ?? '', $why ) );
+		// The state the call just handed back — never a re-read of meta, which
+		// is how the first version of this line fataled an entire pass over a
+		// log message. A log line must not be able to kill the thing it logs.
+		gasf_crm_log( sprintf( 'Backup: #%d done — %s (%s)', $id, (string) ( $r['name'] ?? '?' ), $why ) );
 	}
 
 	/*
