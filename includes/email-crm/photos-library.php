@@ -95,6 +95,32 @@ function gasf_crm_photo_library_ids( array $f = array() ) {
 	) );
 
 	$all = array_values( array_unique( array_map( 'intval', array_merge( $ids, $tagged ) ) ) );
+
+	/*
+	 * And the same exclusion the membership test applies, applied here.
+	 *
+	 * The comment above in_library() warns that "what counts as in the library"
+	 * and "what the grid shows" must not drift apart, because the moment they
+	 * do one of them is a hole. This is that pair: the $tagged half of the
+	 * union would otherwise list a guest's held photo purely because the guest
+	 * tagged it.
+	 */
+	$awaiting = get_posts( array(
+		'post_type'      => 'attachment',
+		'post_status'    => array( 'inherit', 'private' ),
+		'posts_per_page' => -1,
+		'fields'         => 'ids',
+		'no_found_rows'  => true,
+		'meta_query'     => array(
+			'relation' => 'AND',
+			array( 'key' => '_gasf_photo_source', 'compare' => 'EXISTS' ),
+			array( 'key' => '_gasf_photo_confirmed', 'compare' => 'NOT EXISTS' ),
+		),
+	) );
+	if ( $awaiting ) {
+		$all = array_values( array_diff( $all, array_map( 'intval', $awaiting ) ) );
+	}
+
 	if ( ! $all ) { return array(); }
 
 	/*
@@ -215,9 +241,40 @@ function gasf_crm_photo_term_names( $id, $tax ) {
  * grid show" must not be allowed to drift apart — the moment they do, one of
  * them is a hole.
  */
+/**
+ * Is this photo still waiting for a volunteer to say yes?
+ *
+ * Provenance without confirmation. That is exactly the review queue's own
+ * rule, named here because two other things now depend on it.
+ */
+function gasf_crm_photo_awaits_review( $attachment_id ) {
+	$id = (int) $attachment_id;
+	return (bool) get_post_meta( $id, '_gasf_photo_source', true )
+		&& ! get_post_meta( $id, '_gasf_photo_confirmed', true );
+}
+
 function gasf_crm_photo_in_library( $attachment_id ) {
 	$id = (int) $attachment_id;
 	if ( 'attachment' !== get_post_type( $id ) ) { return false; }
+
+	/*
+	 * Waiting on a volunteer beats every other signal, and this test comes
+	 * first for a reason found the hard way.
+	 *
+	 * The rule below — any catalogue term means catalogued — was written when
+	 * nothing could be both tagged and unreviewed: tags arrived from volunteers,
+	 * and a volunteer touching a photo was itself the approval. The public
+	 * photo doors broke that. A guest sending photos through the year-round
+	 * link describes them as they send — names, a place — and those answers
+	 * are written onto the photo so the volunteer reviewing it sees a photo
+	 * that already knows what it is.
+	 *
+	 * Which promoted it straight into the library, unreviewed and unscrubbed,
+	 * on the strength of the guest's own tags. The hold did nothing. Caught by
+	 * checking where a held drill photo actually landed rather than trusting
+	 * that hold meant held.
+	 */
+	if ( gasf_crm_photo_awaits_review( $id ) ) { return false; }
 
 	if ( get_post_meta( $id, '_gasf_photo_confirmed', true ) ) { return true; }
 	if ( get_post_meta( $id, '_gasf_photo_autotag', true ) ) { return true; }
