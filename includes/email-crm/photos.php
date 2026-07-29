@@ -1381,6 +1381,14 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 		return $id;
 	}
 
+	// The incoming bytes' fingerprint, before the scrub re-encodes them — what
+	// the bulk uploader's duplicate defense compares against, so the same
+	// photo cannot arrive once by email and again by drag-and-drop.
+	$src_path = get_attached_file( (int) $id );
+	if ( $src_path && is_file( $src_path ) ) {
+		update_post_meta( (int) $id, '_gasf_photo_src_md5', md5_file( $src_path ) );
+	}
+
 	// Provenance, bound to the message these bytes actually arrived on.
 	//
 	// The question asked about a club photo two years later is not "what is it"

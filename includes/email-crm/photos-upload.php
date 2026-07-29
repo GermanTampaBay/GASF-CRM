@@ -48,6 +48,29 @@ function gasf_crm_upload_video_types() {
 	return array( 'mp4', 'm4v', 'mov' );
 }
 
+/**
+ * Formats we do not keep but CAN read: converted to JPEG on the way in.
+ *
+ * HEIC is what every iPhone saves by default, which made it the single most
+ * common real-world intake failure — answered until now by a rejection message
+ * explaining a phone setting. AVIF is its Android cousin. This host's Imagick
+ * reads both (checked live, not assumed), so the right answer is to take the
+ * file and quietly hand the volunteer a JPEG-shaped photo.
+ */
+function gasf_crm_upload_convert_types() {
+	return array( 'heic', 'heif', 'avif' );
+}
+
+/** Can this Imagick actually read them? Cached for the request. */
+function gasf_crm_upload_convert_ok() {
+	static $ok = null;
+	if ( null !== $ok ) { return $ok; }
+	if ( ! class_exists( 'Imagick' ) ) { return $ok = false; }
+	try { $ok = count( ( new Imagick() )->queryFormats( 'HEIC' ) ) > 0; }
+	catch ( Exception $e ) { $ok = false; }
+	return $ok;
+}
+
 /*
  * A minute of phone video, near enough.
  *
@@ -93,20 +116,81 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			$why[ (int) $f['error'] ] ?? 'could not be uploaded' ), array( 'status' => 400 ) );
 	}
 
-	$ext     = strtolower( (string) pathinfo( $name, PATHINFO_EXTENSION ) );
-	$isVideo = in_array( $ext, gasf_crm_upload_video_types(), true );
+	$ext       = strtolower( (string) pathinfo( $name, PATHINFO_EXTENSION ) );
+	$isVideo   = in_array( $ext, gasf_crm_upload_video_types(), true );
+	$isConvert = in_array( $ext, gasf_crm_upload_convert_types(), true ) && gasf_crm_upload_convert_ok();
 
-	if ( ! $isVideo && ! in_array( $ext, gasf_crm_upload_types(), true ) ) {
+	if ( ! $isVideo && ! $isConvert && ! in_array( $ext, gasf_crm_upload_types(), true ) ) {
 		// HEIC named explicitly: it is what an iPhone produces by default, so it
 		// is the likeliest thing to be turned away, and "not a supported image"
 		// gives somebody no idea that the fix is a setting on their phone.
-		$hint = in_array( $ext, array( 'heic', 'heif' ), true )
-			? ' iPhones save HEIC by default — in Settings → Camera → Formats, choose "Most Compatible", or share the photos rather than sending the originals.'
+		// Only reachable for HEIC when Imagick cannot read it — conversion is
+		// attempted first on hosts that can.
+		$hint = in_array( $ext, array( 'heic', 'heif', 'avif' ), true )
+			? ' This server cannot convert that format — in Settings → Camera → Formats, choose "Most Compatible", or share the photos rather than sending the originals.'
 			: '';
 		return new WP_Error( 'gasf_crm_type', sprintf(
 			'%s is a .%s, which cannot be catalogued. JPEG, PNG, GIF and WebP work, and MP4 or MOV for video.%s',
 			$name, $ext ?: '?', $hint
 		), array( 'status' => 415 ) );
+	}
+
+	/*
+	 * HEIC/HEIF/AVIF become JPEG here, before anything downstream has to know
+	 * they existed. Profiles are carried across best-effort so the EXIF date
+	 * and GPS survive to be read at intake (and scrubbed at publish, exactly
+	 * like any JPEG's); if a profile does not survive, the cost is an empty
+	 * date box the batch fields already cover — not a lost photo.
+	 */
+	if ( $isConvert ) {
+		try {
+			$im = new Imagick( $f['tmp_name'] );
+			$im->setImageFormat( 'jpeg' );
+			$im->setImageCompressionQuality( 90 );
+			$jtmp = wp_tempnam( 'gasf-convert.jpg' );
+			$im->writeImage( $jtmp );
+			$im->clear();
+			$im->destroy();
+		} catch ( Exception $e ) {
+			return new WP_Error( 'gasf_crm_type', sprintf(
+				'%s could not be converted from %s: %s', $name, strtoupper( $ext ), $e->getMessage()
+			), array( 'status' => 415 ) );
+		}
+		@unlink( $f['tmp_name'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		$f['tmp_name'] = $jtmp;
+		$f['size']     = (int) filesize( $jtmp );
+		$f['type']     = 'image/jpeg';
+		$name          = preg_replace( '~\.[a-z0-9]+$~i', '', $name ) . '.jpg';
+		$f['name']     = $name;
+		$ext           = 'jpg';
+		gasf_crm_log( sprintf( 'CRM upload: converted %s to JPEG on intake', $f['name'] ) );
+	}
+
+	/*
+	 * Duplicate defense. Drag the same folder in twice — a browser hiccup, or
+	 * March — and without this the library gains twenty-five twins. The hash
+	 * is of the INCOMING bytes, stamped on every photo at intake from here on,
+	 * so it also catches the cross-route case: a photo that arrived by email
+	 * and is then bulk-uploaded. (Photos taken in before this existed cannot
+	 * be matched — publishing re-encoded their bytes — so the defense is
+	 * forward-looking, and says so here rather than pretending otherwise.)
+	 */
+	$src_md5 = md5_file( $f['tmp_name'] );
+	if ( $src_md5 ) {
+		$dupe = get_posts( array(
+			'post_type'      => 'attachment',
+			'post_status'    => array( 'inherit', 'private' ),
+			'posts_per_page' => 1,
+			'fields'         => 'ids',
+			'meta_key'       => '_gasf_photo_src_md5',   // phpcs:ignore WordPress.DB.SlowDBQuery
+			'meta_value'     => $src_md5,                // phpcs:ignore WordPress.DB.SlowDBQuery
+		) );
+		if ( $dupe ) {
+			return new WP_Error( 'gasf_crm_dupe', sprintf(
+				'%s is already in the collection — byte-for-byte the same file as “%s” (photo #%d). Skipped rather than doubled.',
+				$name, get_the_title( $dupe[0] ) ?: 'an existing photo', (int) $dupe[0]
+			), array( 'status' => 409 ) );
+		}
 	}
 
 	$size = (int) ( $f['size'] ?? 0 );
@@ -352,6 +436,8 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		gasf_crm_log( sprintf( 'CRM upload: media #%d uploaded but its batch tags did not apply — %s',
 			$id, $saved->get_error_message() ) );
 	}
+
+	if ( ! empty( $src_md5 ) ) { update_post_meta( $id, '_gasf_photo_src_md5', $src_md5 ); }
 
 	gasf_crm_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
 		$id, $name, gasf_crm_display_name( get_current_user_id() ) ) );

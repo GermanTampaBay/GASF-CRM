@@ -719,6 +719,79 @@ add_action( 'rest_api_init', function () {
 	 * Counts come along so the people who appear in the most photos sort first.
 	 * In a club archive that is almost always who you are looking for.
 	 */
+	/*
+	 * Bulk tagging. Names are ADDED, never replaced — a bulk operation that
+	 * could silently strip somebody's tags from twelve photos is a footgun,
+	 * and removing a person is what the per-photo editor and the names panel
+	 * are for. Place, event and date apply only when given, and each photo
+	 * goes through the same library_save every other edit uses — revision
+	 * CAS, name application, autotag release — so bulk is a loop over the
+	 * one true write path, not a second write path.
+	 */
+	register_rest_route( 'gasf/v1', '/crm/photos/bulk-tag', array(
+		'methods'             => 'POST',
+		'permission_callback' => $lib_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$in  = (array) $req->get_json_params();
+			$ids = array_slice( array_filter( array_map( 'intval', (array) ( $in['ids'] ?? array() ) ) ), 0, 100 );
+			if ( ! $ids ) {
+				return new WP_Error( 'gasf_crm_none', 'No photos selected.', array( 'status' => 400 ) );
+			}
+
+			$adds = array();
+			foreach ( (array) ( $in['people'] ?? array() ) as $p ) {
+				$p = trim( sanitize_text_field( $p ) );
+				if ( '' !== $p ) { $adds[] = $p; }
+			}
+			$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
+			$event = trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) );
+			$eid   = (int) ( $in['event_id'] ?? 0 );
+			$taken = trim( sanitize_text_field( (string) ( $in['taken'] ?? '' ) ) );
+
+			if ( ! $adds && '' === $place && '' === $event && '' === $taken ) {
+				return new WP_Error( 'gasf_crm_noop', 'Nothing to apply — add a name, a place, an event or a date.', array( 'status' => 400 ) );
+			}
+
+			$updated = 0;
+			$skipped = array();
+			foreach ( $ids as $id ) {
+				if ( ! gasf_crm_photo_in_library( $id ) ) {
+					$skipped[] = array( 'id' => $id, 'why' => 'not in the library' );
+					continue;
+				}
+				$card  = gasf_crm_photo_library_card( $id );
+				$saved = (array) ( $card['saved'] ?? array() );
+
+				$merged = array_values( array_unique( array_merge(
+					array_map( 'strval', (array) ( $saved['people'] ?? array() ) ), $adds
+				) ) );
+
+				$r = gasf_crm_photo_library_save( $id, array(
+					'people'   => $merged,
+					'place'    => '' !== $place ? $place : (string) ( $saved['place'] ?? '' ),
+					'event'    => '' !== $event ? $event : (string) ( $saved['event'] ?? '' ),
+					'event_id' => '' !== $event ? $eid : (int) ( $saved['event_id'] ?? 0 ),
+					'taken'    => '' !== $taken ? $taken : (string) ( $saved['taken'] ?? '' ),
+					'caption'  => (string) ( $saved['caption'] ?? '' ),
+					'revision' => $card['revision'],
+				) );
+				if ( is_wp_error( $r ) ) {
+					$skipped[] = array( 'id' => $id, 'why' => $r->get_error_message() );
+					continue;
+				}
+				$updated++;
+			}
+
+			gasf_crm_log( sprintf( 'CRM library: bulk tag by %s — %d photo(s) updated, %d skipped (%s%s%s)',
+				gasf_crm_display_name( get_current_user_id() ), $updated, count( $skipped ),
+				$adds ? 'people: ' . implode( ', ', $adds ) : 'no people',
+				'' !== $place ? '; place: ' . $place : '',
+				'' !== $event ? '; event: ' . $event : '' ) );
+
+			return array( 'ok' => true, 'updated' => $updated, 'skipped' => $skipped );
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/people', array(
 		'methods'             => 'GET',
 		'permission_callback' => $lib_guard,
