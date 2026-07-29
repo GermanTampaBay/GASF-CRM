@@ -1702,6 +1702,17 @@ function gasf_crm_render_inbox() {
 			if (!photosFirst) { html += pb; }
 			html += history(t.events);
 			pane.innerHTML = html;
+
+			/* Links out of a stranger's email open a NEW tab, carrying nothing.
+			   Done here, after injection, rather than in the sanitiser — kses
+			   strips attributes it does not allowlist, and allowlisting target
+			   would let a sender choose their own. Set by us, uniformly:
+			   the CRM tab keeps whatever reply is half-typed, and noopener
+			   keeps the opened page's hands off this window. */
+			Array.prototype.forEach.call(pane.querySelectorAll('.msg .body a'), function(a){
+				a.target = '_blank';
+				a.rel = 'noopener noreferrer';
+			});
 			wire(id, t.status);
 			wireCopy();
 			wirePhotos(id, t);

@@ -390,6 +390,31 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 		}
 	}
 
+	/*
+	 * Volume limit, counted in RECIPIENTS rather than requests.
+	 *
+	 * Replies are naturally bounded — they need the thread claim and go to the
+	 * thread — but forward takes any addresses a volunteer types, which makes it
+	 * the one place a compromised account could pump mail out of the club's
+	 * mailbox until the domain's sending reputation is gone. Counting requests
+	 * would leave one forward to fifty addresses inside the limit; counting
+	 * recipients is counting the thing that actually goes out.
+	 *
+	 * Twenty an hour is roomy for the real use — a thread forwarded to a
+	 * handful of board members — and useless for a spammer. Same transient
+	 * shape as the draft endpoint's cap, so there is one pattern to know.
+	 */
+	$rk = 'gasf_crm_fwd_' . $user_id;
+	$rn = (int) get_transient( $rk );
+	if ( $rn >= 20 || ( $rn + count( $to ) ) > 20 ) {
+		gasf_crm_log( sprintf( 'CRM forward: rate limit hit by user %d (%d sent this hour, %d more requested)',
+			$user_id, $rn, count( $to ) ) );
+		return new WP_Error( 'gasf_crm_rate',
+			'That is more forwarding than this account can do in one hour (20 recipients). If this is club business at volume, do it from the mailbox itself.',
+			array( 'status' => 429 ) );
+	}
+	set_transient( $rk, $rn + count( $to ), HOUR_IN_SECONDS );
+
 	$thread = gasf_crm_rest_thread( $thread_id );
 	if ( is_wp_error( $thread ) ) { return $thread; }
 	$stream = (string) $thread['stream'];
