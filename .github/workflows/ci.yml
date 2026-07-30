@@ -1,0 +1,31 @@
+# The static half of the test suite, on every push.
+#
+# The runtime half (tests/runtime.php) needs the club's WordPress — its
+# database, its taxonomies, its Imagick — and there is exactly one of those,
+# so it runs on the server after each deploy instead:
+#
+#     wp eval-file gasf-crm/tests/runtime.php
+#
+# CI failing here means a parse error, a leaked patch-script artifact, an
+# unguarded REST route, unprepared SQL, or a serial-comma violation reached
+# the repository. All of these shipped at least once before these checks
+# existed; that is why they exist.
+name: static-checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Inline JS and CSS parse
+        run: node tools/check-js.js
+      - name: Static sweeps
+        run: node tools/static-checks.js

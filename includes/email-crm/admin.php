@@ -588,7 +588,7 @@ function gasf_crm_admin_tab() {
 				echo '</tr>';
 			}
 			echo '</tbody></table>';
-			echo '<p class="description">Newest 60. <strong>Addresses shown as <code>1.2.3.4 (via 5.6.7.8)</code></strong> mean the first was claimed by a proxy header and the second is where the connection actually came from &mdash; the claimed one is only as trustworthy as the proxy in front of it. No password, token or sign-in code is ever recorded here.</p>';
+			echo '<p class="description">Newest 60. <strong>Addresses shown as <code>1.2.3.4 (via 5.6.7.8)</code></strong> mean the first was claimed by a proxy header and the second is where the connection actually came from &mdash; the claimed one is only as trustworthy as the proxy in front of it. No password, token, or sign-in code is ever recorded here.</p>';
 		}
 	}
 	?>
@@ -672,7 +672,7 @@ function gasf_crm_admin_tab() {
 	// point of it is seeing the club's correspondence as one picture.
 	$contacts = gasf_crm_contacts( '', 50, null );
 	if ( ! $contacts ) {
-		echo '<p class="description">Empty. It fills itself in as mail is received, replied to and forwarded — there is nothing to maintain by hand.</p>';
+		echo '<p class="description">Empty. It fills itself in as mail is received, replied to, and forwarded — there is nothing to maintain by hand.</p>';
 	} else {
 		echo '<table class="widefat striped"><thead><tr><th>Email</th><th>Name</th><th>Sent to</th><th>Received from</th><th>Last seen</th><th></th></tr></thead><tbody>';
 		foreach ( $contacts as $c ) {
@@ -718,7 +718,7 @@ function gasf_crm_admin_tab() {
 		echo '</tbody></table>';
 		echo '<p class="description">Newest 50. Every address the club has written to or heard from; the forward box on <code>/email</code> autocompletes from this list.</p>';
 		echo '<p class="description">Names normally arrive from the sender\'s own email, so there is nothing to maintain here — but some mail clients send no name at all, and those you can fill in. A name you type is marked &#128274; and the sync will not overwrite it. Clearing the box removes the padlock too, so the address goes back to naming itself. The address cannot be edited: it is what every message is filed against, and changing it would detach that history while looking like a correction.</p>';
-		echo '<p class="description"><strong>Delete</strong> removes the entry from this list and nothing else &mdash; no email, reply or thread is touched, and none of them stop working. This list is built from mail as it comes and goes, so a deleted address <strong>reappears by itself the next time it is used</strong>. It is for tidying a typo or a one-off out of the forward box\'s suggestions, not for stopping mail from somebody &mdash; for that, use <strong>Ignore&hellip;</strong> on the message itself.</p>';
+		echo '<p class="description"><strong>Delete</strong> removes the entry from this list and nothing else &mdash; no email, reply, or thread is touched, and none of them stop working. This list is built from mail as it comes and goes, so a deleted address <strong>reappears by itself the next time it is used</strong>. It is for tidying a typo or a one-off out of the forward box\'s suggestions, not for stopping mail from somebody &mdash; for that, use <strong>Ignore&hellip;</strong> on the message itself.</p>';
 	}
 	?>
 

@@ -386,6 +386,20 @@ function gasf_crm_backup_delete_remote( array $entry ) {
 	$failed = array();
 	foreach ( (array) ( $entry['items'] ?? array() ) as $item_id ) {
 		if ( '' === (string) $item_id ) { continue; }
+
+		/*
+		 * The test seam. Genuine deletion failures are 403s, 429s and outages
+		 * — none of which a self-test can conjure against live Graph without
+		 * breaking something real. The filter lets the suite declare an item's
+		 * fate (true = gone, false = failed) before the network is consulted;
+		 * production never registers it and never takes this branch.
+		 */
+		$pre = apply_filters( 'gasf_crm_backup_pre_delete_item', null, (string) $item_id );
+		if ( null !== $pre ) {
+			if ( true !== $pre ) { $failed[] = (string) $item_id; }
+			continue;
+		}
+
 		$r = gasf_crm_backup_graph( 'DELETE',
 			'https://graph.microsoft.com/v1.0/drives/' . rawurlencode( $cfg['drive_id'] ) . '/items/' . rawurlencode( $item_id ) );
 		if ( is_wp_error( $r ) ) {
