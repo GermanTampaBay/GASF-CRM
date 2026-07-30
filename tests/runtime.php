@@ -133,20 +133,19 @@ final class GASF_CRM_Selftest {
 	/**
 	 * A synthetic photo HELD in the private review store, guest-shaped.
 	 *
-	 * Under a Y/m subfolder with matching relative meta, because that is how
-	 * intake really stores them: WordPress applies its date paths through the
-	 * upload-dir filter. The first version wrote flat with a bare-name meta,
-	 * and publish moved the file where the metadata did not point — the test
-	 * failing on its own fixture, not on the code.
+	 * The storage contract, learned by failing against it twice: files sit
+	 * FLAT in the review store, the attached-file meta is prefixed with the
+	 * review dir — that prefix IS how gasf_crm_photo_is_private answers —
+	 * and publish moves the flat file into the dated public folder and
+	 * rewrites the meta. A fixture with date subfolders in the private half
+	 * was describing a layout the system never had.
 	 */
 	private function held_photo( $slug, $bytes = null ) {
 		$dir = gasf_crm_photo_review_dir();
 		if ( is_wp_error( $dir ) ) { return $dir; }
-		$sub = gmdate( 'Y/m' );
-		wp_mkdir_p( trailingslashit( $dir ) . $sub );
 		$name = $slug . '-' . wp_rand() . '.jpg';
-		$rel  = $sub . '/' . $name;
-		$path = trailingslashit( $dir ) . $rel;
+		$rel  = GASF_CRM_PHOTO_REVIEW_DIR . '/' . $name;
+		$path = trailingslashit( $dir ) . $name;
 		file_put_contents( $path, null === $bytes ? $this->jpeg_bytes() : $bytes );
 
 		$id = wp_insert_attachment( array(
