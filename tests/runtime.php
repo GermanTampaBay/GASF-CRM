@@ -130,19 +130,30 @@ final class GASF_CRM_Selftest {
 		return $id;
 	}
 
-	/** A synthetic photo HELD in the private review store, guest-shaped. */
+	/**
+	 * A synthetic photo HELD in the private review store, guest-shaped.
+	 *
+	 * Under a Y/m subfolder with matching relative meta, because that is how
+	 * intake really stores them: WordPress applies its date paths through the
+	 * upload-dir filter. The first version wrote flat with a bare-name meta,
+	 * and publish moved the file where the metadata did not point — the test
+	 * failing on its own fixture, not on the code.
+	 */
 	private function held_photo( $slug, $bytes = null ) {
 		$dir = gasf_crm_photo_review_dir();
 		if ( is_wp_error( $dir ) ) { return $dir; }
+		$sub = gmdate( 'Y/m' );
+		wp_mkdir_p( trailingslashit( $dir ) . $sub );
 		$name = $slug . '-' . wp_rand() . '.jpg';
-		$path = trailingslashit( $dir ) . $name;
+		$rel  = $sub . '/' . $name;
+		$path = trailingslashit( $dir ) . $rel;
 		file_put_contents( $path, null === $bytes ? $this->jpeg_bytes() : $bytes );
 
 		$id = wp_insert_attachment( array(
 			'post_title' => $slug, 'post_mime_type' => 'image/jpeg', 'post_status' => 'private',
 		), $path );
-		update_post_meta( $id, '_wp_attached_file', $name );
-		wp_update_attachment_metadata( $id, array( 'file' => $name, 'width' => 160, 'height' => 120, 'sizes' => array() ) );
+		update_post_meta( $id, '_wp_attached_file', $rel );
+		wp_update_attachment_metadata( $id, array( 'file' => $rel, 'width' => 160, 'height' => 120, 'sizes' => array() ) );
 		update_post_meta( $id, '_gasf_photo_source', array(
 			'thread' => 0, 'stream' => 'photos', 'email' => '', 'name' => 'Selftest',
 			'subject' => 'selftest fixture', 'approved_by' => 0, 'approved_at' => '', 'upload' => true,
@@ -332,6 +343,8 @@ final class GASF_CRM_Selftest {
 		if ( ! $this->ok( ! is_wp_error( $r ), 'approve: held decide succeeds' ) ) { return; }
 		$this->ok( (bool) get_post_meta( $id, '_gasf_photo_confirmed', true ), 'approve: confirmed stamp applied' );
 		$this->ok( ! gasf_crm_photo_is_private( $id ), 'approve: photo published out of the review store' );
+		$p = get_attached_file( $id );
+		$this->ok( $p && is_file( $p ), 'approve: the published file is where the metadata says' );
 		$this->ok( gasf_crm_photo_in_library( $id ), 'approve: photo is in the library' );
 		$this->ok( in_array( 'Selftest Person', wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) ), true ),
 			'approve: guest tags survived approval' );
