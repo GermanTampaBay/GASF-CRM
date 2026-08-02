@@ -3692,6 +3692,125 @@ function gasf_crm_photo_flag( $raw ) {
 	return in_array( $v, array( '1', 'true', 'yes', 'on' ), true );
 }
 
+/**
+ * Apply a photo's tags/metadata in one place so every flow stays consistent.
+ *
+ * @return array Normalized values actually applied/used.
+ */
+function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts = array() ) {
+	$id = (int) $attachment_id;
+	$opts = wp_parse_args( $opts, array(
+		'clear_people_when_empty'  => true,
+		'place_require_existing'   => false,
+		'clear_place_when_empty'   => true,
+		'set_event_term'           => true,
+		'clear_event_when_empty'   => true,
+		'set_event_id'             => true,
+		'clear_event_id_when_bad'  => true,
+		'clear_taken_when_empty'   => false,
+		'clear_caption_when_empty' => false,
+		'caption_limit'            => 0,
+		'caption_textarea'         => false,
+		'write_flyer'              => true,
+		'apply_names'              => false,
+	) );
+
+	$people = array();
+	foreach ( (array) ( $in['people'] ?? array() ) as $p ) {
+		$p = trim( sanitize_text_field( (string) $p ) );
+		if ( '' !== $p ) { $people[] = $p; }
+	}
+	$people = array_slice( array_values( array_unique( $people ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
+	if ( $people || $opts['clear_people_when_empty'] ) {
+		wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
+	}
+
+	$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
+	if ( '' === $place ) {
+		if ( $opts['clear_place_when_empty'] ) {
+			wp_set_object_terms( $id, array(), 'gasf_photo_place', false );
+		}
+	} elseif ( $opts['place_require_existing'] ) {
+		$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
+		if ( $pt && ! is_wp_error( $pt ) ) {
+			wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
+			$place = (string) $pt->name;
+		} else {
+			$place = '';
+		}
+	} else {
+		wp_set_object_terms( $id, array( $place ), 'gasf_photo_place', false );
+	}
+
+	$event = trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) );
+	if ( $opts['set_event_term'] ) {
+		if ( '' === $event ) {
+			if ( $opts['clear_event_when_empty'] ) {
+				wp_set_object_terms( $id, array(), 'gasf_photo_event', false );
+			}
+		} else {
+			wp_set_object_terms( $id, array( $event ), 'gasf_photo_event', false );
+		}
+	}
+
+	$event_id = (int) ( $in['event_id'] ?? 0 );
+	$event_ok = $event_id
+		&& function_exists( 'gasf_photo_has_calendar' ) && gasf_photo_has_calendar()
+		&& defined( 'GASF_EVENTS_CPT' ) && GASF_EVENTS_CPT === get_post_type( $event_id );
+	if ( $opts['set_event_id'] && $event_ok ) {
+		update_post_meta( $id, '_gasf_photo_event_id', $event_id );
+	} elseif ( $opts['set_event_id'] && $opts['clear_event_id_when_bad'] ) {
+		delete_post_meta( $id, '_gasf_photo_event_id' );
+		$event_id = 0;
+	}
+
+	$taken = gasf_crm_photo_clean_date( $in['taken'] ?? '' );
+	if ( $taken ) {
+		update_post_meta( $id, '_gasf_photo_taken', $taken );
+	} elseif ( $opts['clear_taken_when_empty'] ) {
+		delete_post_meta( $id, '_gasf_photo_taken' );
+	}
+
+	$caption = $opts['caption_textarea']
+		? trim( sanitize_textarea_field( (string) ( $in['caption'] ?? '' ) ) )
+		: trim( sanitize_text_field( (string) ( $in['caption'] ?? '' ) ) );
+	if ( $opts['caption_limit'] > 0 && mb_strlen( $caption ) > (int) $opts['caption_limit'] ) {
+		$caption = mb_substr( $caption, 0, (int) $opts['caption_limit'] );
+	}
+	if ( '' !== $caption || $opts['clear_caption_when_empty'] ) {
+		wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
+	}
+
+	$flyer = gasf_crm_photo_flag( $in['flyer'] ?? '' );
+	if ( $opts['write_flyer'] ) {
+		$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
+		if ( $flyer ) {
+			update_post_meta( $id, '_gasf_photo_flyer', 1 );
+			delete_post_meta( $id, '_gasf_face_suggestions' );
+		} else {
+			delete_post_meta( $id, '_gasf_photo_flyer' );
+			if ( $was_flyer ) {
+				delete_post_meta( $id, '_gasf_face_scanned' );
+				delete_post_meta( $id, '_gasf_face_count' );
+			}
+		}
+	}
+
+	if ( $opts['apply_names'] && function_exists( 'gasf_photo_apply_names' ) ) {
+		gasf_photo_apply_names( $id );
+	}
+
+	return array(
+		'people'   => $people,
+		'place'    => $place,
+		'event'    => $event,
+		'event_id' => $event_ok ? $event_id : 0,
+		'taken'    => $taken,
+		'caption'  => $caption,
+		'flyer'    => $flyer,
+	);
+}
+
 /** Build a calendar event from flyer details. */
 function gasf_crm_photo_event_from_flyer( array $in ) {
 	if ( ! function_exists( 'gasf_photo_has_calendar' ) || ! gasf_photo_has_calendar() || ! defined( 'GASF_EVENTS_CPT' ) ) {
@@ -3866,13 +3985,6 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 		);
 	}
 
-	$people = array();
-	foreach ( (array) ( $keep['people'] ?? array() ) as $p ) {
-		$p = trim( sanitize_text_field( $p ) );
-		if ( '' !== $p ) { $people[] = $p; }
-	}
-	$people = array_slice( array_values( array_unique( $people ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
-
 	/*
 	 * Publish BEFORE anything is written, and hand the revision back if it
 	 * refuses.
@@ -3897,16 +4009,6 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 		return $moved;
 	}
 
-	// wp_set_object_terms with names creates any that do not exist. That is
-	// exactly what is wanted HERE and exactly what must not happen on the public
-	// form.
-	wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
-
-	foreach ( array( 'place' => 'gasf_photo_place', 'event' => 'gasf_photo_event' ) as $k => $tax ) {
-		$v = trim( sanitize_text_field( (string) ( $keep[ $k ] ?? '' ) ) );
-		wp_set_object_terms( $id, '' === $v ? array() : array( $v ), $tax, false );
-	}
-
 	// Which occurrence, when the occasion came from the club's own calendar.
 	//
 	// The TERM stays the plain event name — "Oktoberfest", not "Oktoberfest
@@ -3914,43 +4016,20 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 	// actually ask, and a term per occurrence would mean 200 Biergarten terms
 	// for 200 Wednesdays. The exact event is kept alongside it as meta, so
 	// "photos from THIS one" stays answerable without polluting the vocabulary.
-	$eid = (int) ( $keep['event_id'] ?? 0 );
-	if ( $eid && function_exists( 'gasf_photo_has_calendar' ) && gasf_photo_has_calendar()
-		&& defined( 'GASF_EVENTS_CPT' ) && GASF_EVENTS_CPT === get_post_type( $eid ) ) {
-		update_post_meta( $id, '_gasf_photo_event_id', $eid );
-	} else {
-		delete_post_meta( $id, '_gasf_photo_event_id' );
-	}
-
-	$taken = gasf_crm_photo_clean_date( $keep['taken'] ?? '' );
-	if ( $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
-
-	$caption = trim( sanitize_text_field( (string) ( $keep['caption'] ?? '' ) ) );
-	if ( '' !== $caption ) {
-		wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
-	}
-
-	$flyer     = gasf_crm_photo_flag( $keep['flyer'] ?? '' );
-	$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
-	if ( $flyer ) {
-		update_post_meta( $id, '_gasf_photo_flyer', 1 );
-		// A flyer/ad should never show stale face guesses.
-		delete_post_meta( $id, '_gasf_face_suggestions' );
-	} else {
-		delete_post_meta( $id, '_gasf_photo_flyer' );
-		// Re-entering normal photos should rejoin the scan queue.
-		if ( $was_flyer ) {
-			delete_post_meta( $id, '_gasf_face_scanned' );
-			delete_post_meta( $id, '_gasf_face_count' );
-		}
-	}
-
-	// Title and alt, now that there is finally something true to say. Both are
-	// safe to rewrite — nothing links to them — unlike the filename, which is
-	// left exactly where it is and described at download time instead.
-	if ( function_exists( 'gasf_photo_apply_names' ) ) {
-		gasf_photo_apply_names( $id );
-	}
+	gasf_crm_photo_apply_metadata( $id, $keep, array(
+		'clear_people_when_empty'  => true,
+		'place_require_existing'   => false,
+		'clear_place_when_empty'   => true,
+		'set_event_term'           => true,
+		'clear_event_when_empty'   => true,
+		'set_event_id'             => true,
+		'clear_event_id_when_bad'  => true,
+		'clear_taken_when_empty'   => false,
+		'clear_caption_when_empty' => false,
+		'caption_textarea'         => false,
+		'write_flyer'              => true,
+		'apply_names'              => true,
+	) );
 
 	// Clearing the pending record is what takes it off the review list. Kept as
 	// history on the photo so "who said this was Hans" stays answerable.

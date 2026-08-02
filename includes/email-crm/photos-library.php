@@ -519,59 +519,23 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 		return new WP_Error( 'gasf_crm_stale', 'Somebody else was editing this at the same moment. Reload to see where it got to.', array( 'status' => 409 ) );
 	}
 
-	$people = array();
-	foreach ( (array) ( $in['people'] ?? array() ) as $p ) {
-		$p = trim( sanitize_text_field( $p ) );
-		if ( '' !== $p ) { $people[] = $p; }
-	}
-	$people = array_slice( array_values( array_unique( $people ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
-	wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
-
 	// Emptying a field is a real answer — "this is not at a place we know" has
 	// to be expressible, or a wrong tag can never be removed, only replaced.
-	foreach ( array( 'place' => 'gasf_photo_place', 'event' => 'gasf_photo_event' ) as $k => $tax ) {
-		$v = trim( sanitize_text_field( (string) ( $in[ $k ] ?? '' ) ) );
-		wp_set_object_terms( $id, '' === $v ? array() : array( $v ), $tax, false );
-	}
-
-	$eid = (int) ( $in['event_id'] ?? 0 );
-	if ( $eid && gasf_photo_has_calendar() && defined( 'GASF_EVENTS_CPT' ) && GASF_EVENTS_CPT === get_post_type( $eid ) ) {
-		update_post_meta( $id, '_gasf_photo_event_id', $eid );
-	} else {
-		delete_post_meta( $id, '_gasf_photo_event_id' );
-	}
-
-	$taken = gasf_crm_photo_clean_date( $in['taken'] ?? '' );
-	if ( $taken ) {
-		update_post_meta( $id, '_gasf_photo_taken', $taken );
-	} else {
-		delete_post_meta( $id, '_gasf_photo_taken' );
-	}
-
-	$note = trim( sanitize_textarea_field( (string) ( $in['caption'] ?? '' ) ) );
-	if ( mb_strlen( $note ) > GASF_CRM_LIB_NOTE_MAX ) { $note = mb_substr( $note, 0, GASF_CRM_LIB_NOTE_MAX ); }
-	wp_update_post( array( 'ID' => $id, 'post_excerpt' => $note ) );
-
-	$flyer = function_exists( 'gasf_crm_photo_flag' )
-		? gasf_crm_photo_flag( $in['flyer'] ?? '' )
-		: ! empty( $in['flyer'] );
-	$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
-	if ( $flyer ) {
-		update_post_meta( $id, '_gasf_photo_flyer', 1 );
-		delete_post_meta( $id, '_gasf_face_suggestions' );
-	} else {
-		delete_post_meta( $id, '_gasf_photo_flyer' );
-		if ( $was_flyer ) {
-			delete_post_meta( $id, '_gasf_face_scanned' );
-			delete_post_meta( $id, '_gasf_face_count' );
-		}
-	}
-
-	// Title and alt follow the tags. The FILENAME deliberately does not: the
-	// file may already be linked from a page or sitting in somebody's downloads,
-	// and renaming it would break both. The catalogued name is applied at
-	// download time instead, which is where it actually matters.
-	if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $id ); }
+	gasf_crm_photo_apply_metadata( $id, $in, array(
+		'clear_people_when_empty'  => true,
+		'place_require_existing'   => false,
+		'clear_place_when_empty'   => true,
+		'set_event_term'           => true,
+		'clear_event_when_empty'   => true,
+		'set_event_id'             => true,
+		'clear_event_id_when_bad'  => true,
+		'clear_taken_when_empty'   => true,
+		'clear_caption_when_empty' => true,
+		'caption_limit'            => GASF_CRM_LIB_NOTE_MAX,
+		'caption_textarea'         => true,
+		'write_flyer'              => true,
+		'apply_names'              => true,
+	) );
 
 	/*
 	 * A human has now had their say, so the backfill's claim on this photo ends.

@@ -532,14 +532,15 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 	$place = trim( (string) ( $in['place'] ?? '' ) );
 	if ( '' === $place && $own_place && ! is_wp_error( $own_place ) ) { $place = $own_place->name; }
-	$flyer = in_array( strtolower( trim( (string) ( $in['flyer'] ?? '' ) ) ), array( '1', 'true', 'yes', 'on' ), true );
-
-	$people = array_values( array_filter( array_map(
-		'strval', (array) ( $in['people'] ?? array() )
-	) ) );
-	$event   = trim( (string) ( $in['event'] ?? '' ) );
-	$taken   = $own_date ?: trim( (string) ( $in['taken'] ?? '' ) );
-	$caption = trim( (string) ( $in['caption'] ?? '' ) );
+	$meta_in = array(
+		'people'   => (array) ( $in['people'] ?? array() ),
+		'place'    => $place,
+		'event'    => trim( (string) ( $in['event'] ?? '' ) ),
+		'event_id' => (int) ( $in['event_id'] ?? 0 ),
+		'taken'    => $own_date ?: trim( (string) ( $in['taken'] ?? '' ) ),
+		'caption'  => trim( (string) ( $in['caption'] ?? '' ) ),
+		'flyer'    => $in['flyer'] ?? '',
+	);
 
 	/*
 	 * Both of these belong to the PHOTO, not to whether it published, so they
@@ -581,34 +582,33 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		 * occasion stays free text for a volunteer to match against the
 		 * calendar, because a guest saying "Oktoberfest" cannot know which one.
 		 */
-		if ( $people ) { wp_set_object_terms( $id, $people, 'gasf_photo_person', false ); }
-		if ( '' !== $place ) {
-			$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
-			if ( $pt && ! is_wp_error( $pt ) ) {
-				wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
-			}
-		}
-		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
-		if ( $flyer ) { update_post_meta( $id, '_gasf_photo_flyer', 1 ); }
-		else { delete_post_meta( $id, '_gasf_photo_flyer' ); }
+		$meta = gasf_crm_photo_apply_metadata( $id, $meta_in, array(
+			'clear_people_when_empty'  => false,
+			'place_require_existing'   => true,
+			'clear_place_when_empty'   => false,
+			'set_event_term'           => false,
+			'set_event_id'             => false,
+			'clear_taken_when_empty'   => false,
+			'clear_caption_when_empty' => false,
+			'caption_textarea'         => false,
+			'write_flyer'              => true,
+			'apply_names'              => false,
+		) );
 		update_post_meta( $id, '_gasf_photo_guest', array(
-			'event'    => $event,
+			'event'    => (string) $meta['event'],
 			// Which calendar entry they picked, if they picked one. The volunteer
 			// approving it then links the photo to the event instead of matching
 			// a name by eye.
-			'event_id' => (int) ( $in['event_id'] ?? 0 ),
-			'caption' => $caption,
+			'event_id' => (int) $meta_in['event_id'],
+			'caption' => (string) $meta['caption'],
 			'from'    => (string) ( $anon['from'] ?? '' ),
-			'place'   => $place,
-			'people'  => $people,
+			'place'   => (string) $meta['place'],
+			'people'  => (array) $meta['people'],
 			'at'      => current_time( 'mysql', true ),
 		) );
-		if ( '' !== $caption ) {
-			wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
-		}
 
 		gasf_crm_log( sprintf( 'CRM upload: media #%d held for a volunteer (%s)', $id,
-			'' !== $event ? 'said to be ' . $event : 'no occasion given' ) );
+			'' !== $meta['event'] ? 'said to be ' . $meta['event'] : 'no occasion given' ) );
 
 		return array( 'id' => $id, 'held' => true, 'name' => $name );
 	}
@@ -635,34 +635,29 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		 * a guest must not grow that taxonomy). The event may create, because a
 		 * party's event tag is club-authored configuration, not guest input.
 		 */
-		if ( $people ) { wp_set_object_terms( $id, $people, 'gasf_photo_person', false ); }
-		if ( '' !== $place ) {
-			$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
-			if ( $pt && ! is_wp_error( $pt ) ) {
-				wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
-			}
-		}
-		if ( '' !== $event ) {
-			wp_set_object_terms( $id, array( $event ), 'gasf_photo_event', false );
-			if ( (int) ( $in['event_id'] ?? 0 ) ) {
-				update_post_meta( $id, '_gasf_photo_event_id', (int) $in['event_id'] );
-			}
-		}
-		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
-		if ( $flyer ) { update_post_meta( $id, '_gasf_photo_flyer', 1 ); }
-		else { delete_post_meta( $id, '_gasf_photo_flyer' ); }
-		if ( '' !== $caption ) {
-			wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
-		}
+		gasf_crm_photo_apply_metadata( $id, $meta_in, array(
+			'clear_people_when_empty'  => false,
+			'place_require_existing'   => true,
+			'clear_place_when_empty'   => false,
+			'set_event_term'           => true,
+			'clear_event_when_empty'   => false,
+			'set_event_id'             => true,
+			'clear_event_id_when_bad'  => false,
+			'clear_taken_when_empty'   => false,
+			'clear_caption_when_empty' => false,
+			'caption_textarea'         => false,
+			'write_flyer'              => true,
+			'apply_names'              => false,
+		) );
 	} else {
 		$saved = gasf_crm_photo_library_save( $id, array(
-			'people'   => $people,
-			'place'    => $place,
-			'event'    => $event,
-			'event_id' => (int) ( $in['event_id'] ?? 0 ),
-			'taken'    => $taken,
-			'flyer'    => $flyer,
-			'caption'  => $caption,
+			'people'   => $meta_in['people'],
+			'place'    => $meta_in['place'],
+			'event'    => $meta_in['event'],
+			'event_id' => $meta_in['event_id'],
+			'taken'    => $meta_in['taken'],
+			'flyer'    => $meta_in['flyer'],
+			'caption'  => $meta_in['caption'],
 		) );
 		// A tagging failure here is recoverable by editing the photo, and the
 		// photo itself is already safe — scrubbed, consented, in the library.
