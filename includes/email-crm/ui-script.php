@@ -1486,8 +1486,44 @@ function gasf_crm_render_inbox_script() {
 	 */
 	var upQueue = [], upBusy = false, upStop = false;
 	var upConcurrency = 2, upRetryMax = 2;
+	var upDefaults = null;
 
 	function upEl(id){ return document.getElementById(id); }
+
+	function upRememberDefaults(){
+		if (upDefaults) { return; }
+		upDefaults = {
+			consent: !!(upEl('upconsent') && upEl('upconsent').checked),
+			note: upEl('upnote') ? upEl('upnote').value : '',
+			date: upEl('update') ? upEl('update').value : '',
+			place: upEl('upplace') ? upEl('upplace').value : '',
+			event: upEl('upevent') ? upEl('upevent').value : '',
+			eventId: upEl('upeventid') ? upEl('upeventid').value : '',
+			flyer: !!(upEl('upflyer') && upEl('upflyer').checked),
+			flyStart: upEl('upflystart') ? upEl('upflystart').value : '18:00',
+			flyEnd: upEl('upflyend') ? upEl('upflyend').value : '22:00'
+		};
+	}
+
+	function upResetForm(){
+		upQueue = [];
+		upEl('upstatus').textContent = '';
+		if (upEl('upconsent')) { upEl('upconsent').checked = !!upDefaults.consent; }
+		if (upEl('upnote'))    { upEl('upnote').value = upDefaults.note; }
+		if (upEl('update'))    { upEl('update').value = upDefaults.date; }
+		if (upEl('upplace'))   { upEl('upplace').value = upDefaults.place; }
+		if (upEl('upevent'))   { upEl('upevent').value = upDefaults.event; }
+		if (upEl('upeventid')) { upEl('upeventid').value = upDefaults.eventId; }
+		if (upEl('upflyer'))   { upEl('upflyer').checked = !!upDefaults.flyer; }
+		if (upEl('upflystart')) { upEl('upflystart').value = upDefaults.flyStart || '18:00'; }
+		if (upEl('upflyend'))   { upEl('upflyend').value = upDefaults.flyEnd || '22:00'; }
+		if (window._upEventPicker) { window._upEventPicker.search(); }
+		upEvSay('', '');
+		var upFlyMsg = upEl('upflymsg');
+		if (upFlyMsg) { upFlyMsg.textContent = ''; }
+		upFlySync();
+		upPaint();
+	}
 
 	function upFill(){
 		// Places, from the same list the rest of the app already holds.
@@ -1880,6 +1916,7 @@ function gasf_crm_render_inbox_script() {
 	(function upWire(){
 		var drop = upEl('updrop'), input = upEl('upinput');
 		if (!drop || !input) { return; }
+		upRememberDefaults();
 
 		drop.onclick = function(){ input.click(); };
 		drop.onkeydown = function(e){ if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
@@ -1916,7 +1953,7 @@ function gasf_crm_render_inbox_script() {
 		});
 
 		upEl('upgo').onclick = upRunFast;
-		upEl('upclear').onclick = function(){ upQueue = []; upEl('upstatus').textContent = ''; upPaint(); };
+		upEl('upclear').onclick = upResetForm;
 
 		/* Stop means stop after this one, and abort anything in flight.
 		   Anything still waiting stays in the list rather than being thrown away —

@@ -658,7 +658,7 @@ function gasf_crm_render_inbox() {
 		<div id="uplist" class="uplist"></div>
 		<div class="actions" style="margin-top:14px">
 			<button class="btn" id="upgo" type="button" disabled>Upload</button>
-			<button class="btn sec" id="upclear" type="button" hidden>Clear the list</button>
+			<button class="btn sec" id="upclear" type="button" hidden>Reset form</button>
 			<button class="btn warn" id="upstop" type="button" hidden>Stop</button>
 			<span class="muted" id="upstatus"></span>
 		</div>
