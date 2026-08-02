@@ -424,7 +424,10 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .prow{display:flex;gap:8px;flex-wrap:wrap}
 .prow .pf{flex:1 1 130px}
 .pfcheck{display:flex;gap:8px;align-items:flex-start}
-.pfcheck input{margin-top:2px}
+.pfcheck input[type=checkbox]{width:18px;height:18px;flex:0 0 auto;margin:1px 0 0;padding:0;border:0;border-radius:0;
+	background:none;box-shadow:none;accent-color:var(--gasf-accent)}
+.pfcheck>span{display:block;margin:0;padding:0;border:0;font-size:12px;line-height:1.4;color:var(--gasf-text);
+	letter-spacing:0;text-transform:none}
 .pgeo{font-size:12px;color:var(--gasf-muted);margin:2px 0 8px}
 .pev{margin:0 0 8px}
 .pevlist{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
