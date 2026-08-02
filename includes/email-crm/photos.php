@@ -1904,6 +1904,18 @@ function gasf_crm_photo_img_url( $attachment_id, $size = 'medium', $token = '' )
 	};
 
 	if ( ! gasf_crm_photo_is_private( $id ) ) {
+		/*
+		 * Edited public photos in the CRM go through the no-cache stream route.
+		 * Some edge caches ignore query-string busters on static file paths.
+		 */
+		if ( $edited && '' === $token ) {
+			return add_query_arg( array(
+				'photo'    => $id,
+				'size'     => $size,
+				'_wpnonce' => wp_create_nonce( 'wp_rest' ),
+				'rv'       => $rev,
+			), rest_url( 'gasf/v1/crm/photos/file' ) );
+		}
 		$u = wp_get_attachment_image_url( $id, $size );
 		return $u ? $bust( $u ) : $bust( (string) wp_get_attachment_url( $id ) );
 	}
@@ -4070,8 +4082,12 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $photo_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$id = (int) $req->get_param( 'photo' );
-			// Must be a submitted photo, not any attachment ID handed to us.
-			if ( ! gasf_crm_photo_card( $id ) ) { status_header( 404 ); exit; }
+			// Review cards are source-backed; library cards may be volunteer-added.
+			$ok = (bool) gasf_crm_photo_card( $id );
+			if ( ! $ok && function_exists( 'gasf_crm_photo_in_library' ) ) {
+				$ok = gasf_crm_photo_in_library( $id );
+			}
+			if ( ! $ok ) { status_header( 404 ); exit; }
 			gasf_crm_photo_send_file( $id, (string) $req->get_param( 'size' ) );
 		},
 	) );

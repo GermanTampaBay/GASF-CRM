@@ -317,18 +317,19 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 	 * along as a query so an edit is visible the moment it lands, and a
 	 * never-edited photo keeps its clean URL.
 	 */
-	$rev    = (int) get_post_meta( $id, '_gasf_photo_rev', true );
-	$edited = (bool) get_post_meta( $id, '_gasf_photo_edit', true );
-	$bust   = function ( $u ) use ( $rev, $edited ) {
-		if ( ! $u || ! $edited ) { return $u; }
-		return $u . ( false === strpos( $u, '?' ) ? '?' : '&' ) . 'rv=' . $rev;
+	$img = function ( $size ) use ( $id ) {
+		if ( function_exists( 'gasf_crm_photo_img_url' ) ) {
+			return gasf_crm_photo_img_url( $id, $size );
+		}
+		$u = wp_get_attachment_image_url( $id, $size );
+		return $u ? $u : (string) wp_get_attachment_url( $id );
 	};
 
 	return array(
 		'id'      => $id,
-		'thumb'   => $bust( wp_get_attachment_image_url( $id, 'medium' ) ),
-		'full'    => $bust( wp_get_attachment_image_url( $id, 'large' ) ),
-		'url'     => $bust( wp_get_attachment_url( $id ) ),
+		'thumb'   => $img( 'medium' ),
+		'full'    => $img( 'large' ),
+		'url'     => $img( 'full' ),
 		'dlname'  => function_exists( 'gasf_photo_filename' ) ? gasf_photo_filename( $id ) : '',
 		// Decoded, not the stored form — the client escapes it once more. See
 		// gasf_crm_photo_display_title().
