@@ -3191,7 +3191,7 @@ function gasf_crm_render_inbox_script() {
 				// Without this the second photo of the same person is spelled
 				// from memory, which is exactly what the suggestions prevent.
 				loadPeople(true);
-				lbEdit(card);
+				lbOpen(card.id, null, card);
 				loadLib();
 			}).catch(function(e){
 				ok.disabled = false;
