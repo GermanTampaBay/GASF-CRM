@@ -1203,6 +1203,12 @@ function gasf_crm_render_inbox() {
 			<label class="lf"><span>Where</span><select id="lplace"><option value="">Anywhere</option></select></label>
 			<label class="lf"><span>Occasion</span><select id="levent"><option value="">Any</option></select></label>
 			<label class="lf"><span>Year</span><select id="lyear"><option value="">Any</option></select></label>
+			<label class="lf"><span>Sort</span><select id="lsort">
+				<option value="upload_desc">Upload date: newest first</option>
+				<option value="upload_asc">Upload date: oldest first</option>
+				<option value="title_asc">Alphabetical: A-Z</option>
+				<option value="title_desc">Alphabetical: Z-A</option>
+			</select></label>
 			<button class="btn sec" id="lclear" type="button">Clear</button>
 			<button class="btn sec" id="lnames" type="button">Fix names</button>
 			<button class="btn sec" id="lplaces" type="button">Places</button>
@@ -3464,7 +3470,7 @@ function gasf_crm_render_inbox() {
 
 	function lfilters(){
 		return { q: lval('lq'), person: lval('lperson'), place: lval('lplace'),
-		         event: lval('levent'), year: lval('lyear') };
+		         event: lval('levent'), year: lval('lyear'), sort: lval('lsort') || 'upload_desc' };
 	}
 
 	function lselCount(){ return Object.keys(lsel).length; }
@@ -3577,7 +3583,7 @@ function gasf_crm_render_inbox() {
 	// pages shows an empty grid and looks broken.
 	function lrefilter(){ lpage = 1; loadLib(); }
 
-	['lperson','lplace','levent','lyear'].forEach(function(id){
+	['lperson','lplace','levent','lyear','lsort'].forEach(function(id){
 		var e = document.getElementById(id);
 		if (e) { e.onchange = lrefilter; }
 	});

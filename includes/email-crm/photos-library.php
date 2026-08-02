@@ -65,7 +65,7 @@ define( 'GASF_CRM_LIB_ZIP_TTL', 30 * MINUTE_IN_SECONDS );
  * Private photos are excluded outright. Anything still awaiting review is not
  * cleared for use, and this list exists to be used from.
  *
- * @param array $f person|place|event|year|q
+ * @param array $f person|place|event|year|q|sort
  * @return int[]
  */
 function gasf_crm_photo_library_ids( array $f = array() ) {
@@ -141,23 +141,29 @@ function gasf_crm_photo_library_ids( array $f = array() ) {
 	$all = gasf_crm_photo_library_filter( $all, $f );
 	if ( ! $all ) { return array(); }
 
-	/*
-	 * Newest first by when the photo was TAKEN, falling back to when it reached
-	 * us. A collection sorted by upload date puts a 1974 Fasching scan between
-	 * last week's two, which is not how anybody looks for a picture.
-	 *
-	 * Keys computed ONCE, not inside the comparator. usort calls its callback
-	 * O(n log n) times, so reading two meta values in there meant thousands of
-	 * lookups to order a few hundred photos — and get_post_field is not cached
-	 * the way get_post_meta is, so a good share of them were real queries.
-	 */
+	$sort = (string) ( $f['sort'] ?? 'upload_desc' );
+
+	// Keys are precomputed once. Pulling meta/fields in a comparator scales
+	// badly with list size because usort calls it O(n log n) times.
 	$key = array();
-	foreach ( $all as $id ) {
-		$key[ $id ] = (string) ( get_post_meta( $id, '_gasf_photo_taken', true ) ?: get_post_field( 'post_date', $id ) );
+	if ( 'title_asc' === $sort || 'title_desc' === $sort ) {
+		foreach ( $all as $id ) {
+			$key[ $id ] = strtolower( (string) get_the_title( $id ) );
+		}
+		usort( $all, function ( $a, $b ) use ( $key, $sort ) {
+			$cmp = strcmp( $key[ $a ], $key[ $b ] ) ?: ( $a - $b );
+			return ( 'title_desc' === $sort ) ? -$cmp : $cmp;
+		} );
+	} else {
+		foreach ( $all as $id ) {
+			$when       = (string) get_post_field( 'post_date_gmt', $id );
+			$key[ $id ] = '' !== $when && '0000-00-00 00:00:00' !== $when ? $when : (string) get_post_field( 'post_date', $id );
+		}
+		usort( $all, function ( $a, $b ) use ( $key, $sort ) {
+			$cmp = strcmp( $key[ $a ], $key[ $b ] ) ?: ( $a - $b );
+			return ( 'upload_asc' === $sort ) ? $cmp : -$cmp;
+		} );
 	}
-	usort( $all, function ( $a, $b ) use ( $key ) {
-		return strcmp( $key[ $b ], $key[ $a ] ) ?: ( $b - $a );
-	} );
 
 	return $all;
 }
@@ -758,13 +764,21 @@ add_action( 'rest_api_init', function () {
 				'event'  => (string) $req->get_param( 'event' ),
 				'year'   => (string) $req->get_param( 'year' ),
 				'q'      => (string) $req->get_param( 'q' ),
+				'sort'   => (string) $req->get_param( 'sort' ),
 			);
 
-			// Facets come from the UNFILTERED set, so the bar does not collapse
-			// to whatever is left after the first choice — picking a place must
-			// not hide every year you might narrow it to next.
 			$all      = gasf_crm_photo_library_ids();
-			$matching = gasf_crm_photo_library_filter( $all, $filters );
+			$ordered  = gasf_crm_photo_library_ids( array( 'sort' => $filters['sort'] ) );
+			$matching = gasf_crm_photo_library_filter( $ordered, $filters );
+			$for_who  = $filters; $for_who['person'] = '';
+			$for_where = $filters; $for_where['place'] = '';
+			$for_event = $filters; $for_event['event'] = '';
+			$for_year = $filters; $for_year['year'] = '';
+
+			$f_who   = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_who ) );
+			$f_where = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_where ) );
+			$f_event = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_event ) );
+			$f_year  = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_year ) );
 
 			$page  = max( 1, (int) $req->get_param( 'page' ) );
 			$slice = array_slice( $matching, ( $page - 1 ) * GASF_CRM_LIB_PER_PAGE, GASF_CRM_LIB_PER_PAGE );
@@ -781,7 +795,12 @@ add_action( 'rest_api_init', function () {
 				'all'     => count( $all ),
 				'page'    => $page,
 				'pages'   => max( 1, (int) ceil( count( $matching ) / GASF_CRM_LIB_PER_PAGE ) ),
-				'facets'  => gasf_crm_photo_library_facets( $all ),
+				'facets'  => array(
+					'people' => $f_who['people'],
+					'places' => $f_where['places'],
+					'events' => $f_event['events'],
+					'years'  => $f_year['years'],
+				),
 				// Every matching id, so "select all" can act on the whole result
 				// rather than only the page in front of you.
 				'ids'     => array_map( 'intval', $matching ),
