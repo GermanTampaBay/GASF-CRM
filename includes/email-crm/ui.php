@@ -410,13 +410,15 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .prow2 .pdel{color:#b02d2e}
 .pnew{border-top:1px solid var(--gasf-border);margin-top:12px;padding-top:12px}
 .phome{background:var(--s-tint);font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600}
-.fchips{margin:0 0 6px;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.fchips{margin:0 0 7px;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
 .fchips-lead{font:12px/1.5 var(--slug);letter-spacing:.04em;text-transform:uppercase;opacity:.7}
-.fchip{font:inherit;font-size:12px;line-height:1.5;padding:3px 9px;cursor:pointer;
+.fchips-note{font-size:11px;color:var(--gasf-muted)}
+.fchip,.fchip-all{font:inherit;font-size:12px;line-height:1.5;padding:3px 9px;cursor:pointer;
 	background:var(--card);border:1px solid var(--s-accent);color:var(--s-accent);border-radius:11px}
-.fchip:hover{background:var(--s-accent);color:var(--card)}
+.fchip:hover,.fchip-all:hover{background:var(--s-accent);color:var(--card)}
 .fchip.used{opacity:.45}
-.fchip .fpct{opacity:.65;font-size:11px}
+.fchip .fmeta{opacity:.65;font-size:11px}
+.fchip-all{border-style:dashed}
 .addp{background:none;border:0;padding:2px 0;margin:4px 0 0;font:inherit;font-size:12px;color:var(--s-accent);cursor:pointer}
 .addp:hover{text-decoration:underline}
 .prow{display:flex;gap:8px;flex-wrap:wrap}
@@ -2023,15 +2025,35 @@ function gasf_crm_render_inbox() {
 	 */
 	function faceChips(faces){
 		if (!faces || !faces.length) { return ''; }
+		var note = 'Click a face to fill one name box. Use "Add all" to fill every visible suggestion at once.';
 		return '<div class="fchips">' +
-			'<span class="fchips-lead">The scanner suggests:</span> ' +
+			'<span class="fchips-lead">Suggested names</span>' +
+			'<button type="button" class="fchip-all" data-action="apply-all" ' +
+				'title="Fill one name box for each shown suggestion. Nothing is saved until you press Save.">Add all</button>' +
+			'<span class="fchips-note">' + esc(note) + '</span>' +
 			faces.map(function(f){
 				var pct = f.confidence || 0;   // already a whole percent
+				var tier = pct >= 90 ? 'High confidence' : (pct >= 75 ? 'Likely' : 'Possible');
 				return '<button type="button" class="fchip" data-name="' + esc(f.name) + '" ' +
 					'title="Click to put this name in a box. Nothing is saved until you press the save button.">' +
-					esc(f.name) + ' <span class="fpct">' + pct + '%</span></button>';
+					esc(f.name) + ' <span class="fmeta">' + esc(tier) + '</span></button>';
 			}).join('') +
 			'</div>';
+	}
+
+	function addSuggestedName(box, name){
+		var empty = null;
+		Array.prototype.forEach.call(box.querySelectorAll('.p-person'), function(i){
+			if (!empty && !i.value.trim()) { empty = i; }
+		});
+		if (!empty) {
+			box.insertAdjacentHTML('beforeend', personBox(''));
+			empty = box.lastElementChild.querySelector('.p-person');
+		}
+		if (!empty) { return null; }
+		empty.value = name;
+		empty.dispatchEvent(new Event('input', { bubbles: true }));
+		return empty;
 	}
 
 	/* ============ name suggestions ============
@@ -2098,21 +2120,36 @@ function gasf_crm_render_inbox() {
 		 * to put the name back.
 		 */
 		root.addEventListener('click', function(ev){
+			var all = ev.target.closest ? ev.target.closest('.fchip-all') : null;
+			if (all && root.contains(all)) {
+				ev.preventDefault();
+				var pf = all.closest('.pf');
+				var box = pf ? pf.querySelector('.p-people') : null;
+				if (!box) { return; }
+				var existing = peopleValues(pf).map(function(n){ return n.toLowerCase(); });
+				var last = null;
+				Array.prototype.forEach.call(pf.querySelectorAll('.fchip'), function(chip){
+					var name = (chip.dataset.name || '').trim();
+					if (!name) { return; }
+					if (existing.indexOf(name.toLowerCase()) !== -1) {
+						chip.classList.add('used');
+						return;
+					}
+					last = addSuggestedName(box, name) || last;
+					existing.push(name.toLowerCase());
+					chip.classList.add('used');
+				});
+				if (last) { last.focus(); }
+				return;
+			}
+
 			var chip = ev.target.closest ? ev.target.closest('.fchip') : null;
 			if (!chip || !root.contains(chip)) { return; }
 			ev.preventDefault();
 			var box = chip.closest('.pf').querySelector('.p-people');
 			if (!box) { return; }
-			var empty = null;
-			Array.prototype.forEach.call(box.querySelectorAll('.p-person'), function(i){
-				if (!empty && !i.value.trim()) { empty = i; }
-			});
-			if (!empty) {
-				box.insertAdjacentHTML('beforeend', personBox(''));
-				empty = box.lastElementChild.querySelector('.p-person');
-			}
-			empty.value = chip.dataset.name;
-			empty.dispatchEvent(new Event('input', { bubbles: true }));
+			var empty = addSuggestedName(box, chip.dataset.name);
+			if (!empty) { return; }
 			chip.classList.add('used');
 			empty.focus();
 		});

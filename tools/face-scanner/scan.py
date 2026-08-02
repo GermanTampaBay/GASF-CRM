@@ -74,6 +74,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     import numpy as np
@@ -107,6 +108,10 @@ DEFAULT_TOLERANCE = {
 # somebody is an accident waiting to happen — a bad angle becomes "the system
 # thinks everyone is Hans".
 MIN_REFERENCES = 3
+MAX_SCAN_RETRIES = 3
+QUARANTINE_FAILS = 3
+RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+DETERMINISTIC_HTTP = {400, 401, 403, 404, 410, 415, 422}
 
 
 # --------------------------------------------------------------------------- config
@@ -148,6 +153,8 @@ class Api:
     """The CRM, reached the only way this machine talks to anything: outward."""
 
     def __init__(self, base, key):
+        parts = urlsplit(base.rstrip("/"))
+        self.origin = (parts.scheme + "://" + parts.netloc).rstrip("/")
         self.base = base + "/wp-json/gasf/v1/crm/photos/faces"
         self.s = requests.Session()
         self.s.headers["Authorization"] = "Bearer " + key
@@ -168,6 +175,12 @@ class Api:
         return r.json()
 
     def image(self, url):
+        parts = urlsplit(url)
+        if not parts.scheme or not parts.netloc:
+            raise RuntimeError(f"refusing non-absolute image URL: {url!r}")
+        origin = (parts.scheme + "://" + parts.netloc).rstrip("/")
+        if origin != self.origin:
+            raise RuntimeError(f"refusing cross-origin image URL: {origin}")
         r = self.s.get(url, timeout=120)
         r.raise_for_status()
         return r.content
@@ -319,7 +332,7 @@ def _migrate(conn):
                photo_id INTEGER NOT NULL,
                engine TEXT NOT NULL DEFAULT '',
                vector BLOB NOT NULL,
-               UNIQUE(person, photo_id, engine)
+               UNIQUE(photo_id, engine)
            )"""
     )
     conn.execute("CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT)")
@@ -329,8 +342,43 @@ def _migrate(conn):
         conn.execute("ALTER TABLE refs ADD COLUMN engine TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE refs SET engine = 'face_recognition:dlib-hog' WHERE engine = ''")
 
+    if not _has_unique_photo_engine(conn):
+        conn.execute("DROP TABLE IF EXISTS refs_new")
+        conn.execute(
+            """CREATE TABLE refs_new (
+                   id INTEGER PRIMARY KEY,
+                   person TEXT NOT NULL,
+                   photo_id INTEGER NOT NULL,
+                   engine TEXT NOT NULL DEFAULT '',
+                   vector BLOB NOT NULL,
+                   UNIQUE(photo_id, engine)
+               )"""
+        )
+        conn.execute(
+            """INSERT INTO refs_new (id, person, photo_id, engine, vector)
+               SELECT r.id, r.person, r.photo_id, r.engine, r.vector
+               FROM refs r
+               INNER JOIN (
+                   SELECT photo_id, engine, MAX(id) AS keep_id
+                   FROM refs
+                   GROUP BY photo_id, engine
+               ) k ON k.keep_id = r.id"""
+        )
+        conn.execute("DROP TABLE refs")
+        conn.execute("ALTER TABLE refs_new RENAME TO refs")
+
     conn.execute("CREATE INDEX IF NOT EXISTS refs_person ON refs(engine, person)")
     conn.commit()
+
+
+def _has_unique_photo_engine(conn):
+    for _, index_name, is_unique, *_ in conn.execute("PRAGMA index_list(refs)"):
+        if not is_unique:
+            continue
+        cols = [row[2] for row in conn.execute(f"PRAGMA index_info({index_name!r})")]
+        if cols == ["photo_id", "engine"]:
+            return True
+    return False
 
 
 def state_key(engine, base):
@@ -396,18 +444,32 @@ def learn(api, conn, backend, verbose=True):
     The watermark is per engine, so switching backends relearns from scratch
     into that engine's own vectors rather than trusting the other's homework.
     """
-    wk = state_key(backend.name, "learned_to")
-    since = int(state_get(conn, wk, "0"))
+    wk_mod = state_key(backend.name, "learned_modified")
+    wk_id = state_key(backend.name, "learned_id")
+    since_mod = state_get(conn, wk_mod, "")
+    since_id = int(state_get(conn, wk_id, "0") or 0)
     added = skipped = 0
 
     while True:
-        data = api.get("/confirmed", since=since, limit=100)
+        params = {"limit": 100}
+        if since_mod:
+            params.update({"after": since_mod, "after_id": since_id})
+        elif since_id > 0:
+            params.update({"since": since_id})
+        data = api.get("/confirmed", **params)
         photos = data.get("photos", [])
         if not photos:
             break
 
         for p in photos:
-            since = max(since, int(p["id"]))
+            photo_id = int(p["id"])
+            modified = str(p.get("modified") or "")
+            if modified:
+                if modified > since_mod or (modified == since_mod and photo_id > since_id):
+                    since_mod, since_id = modified, photo_id
+            else:
+                since_id = max(since_id, photo_id)
+
             people = [n for n in p.get("people", []) if n.strip()]
             if len(people) != 1:
                 skipped += 1
@@ -424,13 +486,20 @@ def learn(api, conn, backend, verbose=True):
 
             _, vector = found[0]
             conn.execute(
-                "INSERT OR IGNORE INTO refs (person, photo_id, engine, vector) VALUES (?, ?, ?, ?)",
-                (people[0].strip(), int(p["id"]), backend.name, vector.astype(np.float32).tobytes()),
+                """INSERT INTO refs (person, photo_id, engine, vector)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(photo_id, engine) DO UPDATE SET
+                       person = excluded.person,
+                       vector = excluded.vector""",
+                (people[0].strip(), photo_id, backend.name, vector.astype(np.float32).tobytes()),
             )
             added += 1
 
         conn.commit()
-        state_set(conn, wk, since)
+        if since_mod:
+            state_set(conn, wk_mod, since_mod)
+        state_set(conn, wk_id, since_id)
+        state_set(conn, state_key(backend.name, "learned_to"), since_id)
 
     if verbose:
         print(f"learned: {added} new reference face(s); {skipped} photo(s) too ambiguous to learn from")
@@ -445,50 +514,116 @@ def scan(api, conn, backend, tolerance, verbose=True):
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
 
-    data = api.get("/queue")
-    photos = data.get("photos", [])
-    if not photos:
-        if verbose:
-            print("nothing waiting")
-        return 0
+    total_seen = 0
+    total_kept = 0
 
-    results = []
-    for p in photos:
-        try:
-            found = backend.embed(api.image(p["url"]))
-        except Exception as e:
-            if verbose:
-                print(f"  #{p['id']}: {e}")
-            # Reported as looked-at-and-found-nothing rather than left in the
-            # queue forever: a file this machine cannot read will never become
-            # readable by asking again.
-            results.append({"id": p["id"], "found": 0, "faces": []})
-            continue
+    while True:
+        data = api.get("/queue")
+        photos = data.get("photos", [])
+        if not photos:
+            if verbose and total_seen == 0:
+                print("nothing waiting")
+            if verbose and total_seen > 0:
+                print(f"sent {total_seen} photo(s), {total_kept} suggestion(s) kept")
+                print(f"{data.get('remaining', 0)} still waiting")
+            return total_seen
 
-        already = {n.strip().lower() for n in p.get("people", [])}
-        faces = []
-        for (top, right, bottom, left), vector in found:
-            name, conf = identify(vector, references, backend, tolerance)
-            if not name or name.lower() in already:
+        results = []
+        for p in photos:
+            photo_id = int(p["id"])
+            found = None
+            err = None
+            for attempt in range(MAX_SCAN_RETRIES):
+                try:
+                    found = backend.embed(api.image(p["url"]))
+                    err = None
+                    break
+                except Exception as e:
+                    err = e
+                    if not _is_retryable_error(e) or attempt == MAX_SCAN_RETRIES - 1:
+                        break
+                    wait = 2 ** attempt
+                    if verbose:
+                        print(f"  #{photo_id}: temporary fetch error, retrying in {wait}s")
+                    time.sleep(wait)
+
+            if err is not None or found is None:
+                if _is_deterministic_error(err):
+                    n = _bump_failure(conn, backend.name, photo_id)
+                    if verbose:
+                        print(f"  #{photo_id}: deterministic failure ({n}/{QUARANTINE_FAILS}) — {err}")
+                    if n >= QUARANTINE_FAILS:
+                        results.append({"id": photo_id, "found": 0, "faces": []})
+                        _clear_failure(conn, backend.name, photo_id)
+                        if verbose:
+                            print(f"  #{photo_id}: quarantined after repeated deterministic failures")
+                else:
+                    if verbose:
+                        print(f"  #{photo_id}: temporary failure left in queue — {err}")
                 continue
-            faces.append(
-                {
-                    "name": name,
-                    "confidence": conf,
-                    "box": [int(left), int(top), int(right - left), int(bottom - top)],
-                }
-            )
 
-        results.append({"id": p["id"], "found": len(found), "faces": faces})
-        if verbose:
-            names = ", ".join(f["name"] for f in faces) or "no one recognised"
-            print(f"  #{p['id']}: {len(found)} face(s) — {names}")
+            _clear_failure(conn, backend.name, photo_id)
 
-    out = api.post("/suggest", {"photos": results})
-    if verbose:
-        print(f"sent {out.get('photos', 0)} photo(s), {out.get('suggestions', 0)} suggestion(s) kept")
-        print(f"{data.get('remaining', 0)} still waiting")
-    return len(results)
+            already = {n.strip().lower() for n in p.get("people", [])}
+            faces = []
+            for (top, right, bottom, left), vector in found:
+                name, conf = identify(vector, references, backend, tolerance)
+                if not name or name.lower() in already:
+                    continue
+                faces.append(
+                    {
+                        "name": name,
+                        "confidence": conf,
+                        "box": [int(left), int(top), int(right - left), int(bottom - top)],
+                    }
+                )
+
+            results.append({"id": photo_id, "found": len(found), "faces": faces})
+            if verbose:
+                names = ", ".join(f["name"] for f in faces) or "no one recognised"
+                print(f"  #{photo_id}: {len(found)} face(s) — {names}")
+
+        if not results:
+            if verbose:
+                print("no scan results were safe to commit; leaving this batch in queue for retry")
+            return total_seen
+
+        out = api.post("/suggest", {"photos": results})
+        total_seen += int(out.get("photos", 0))
+        total_kept += int(out.get("suggestions", 0))
+
+
+def _fail_key(engine, photo_id):
+    return f"scan_fail:{engine}:{int(photo_id)}"
+
+
+def _bump_failure(conn, engine, photo_id):
+    k = _fail_key(engine, photo_id)
+    now = int(state_get(conn, k, "0") or 0) + 1
+    state_set(conn, k, now)
+    return now
+
+
+def _clear_failure(conn, engine, photo_id):
+    conn.execute("DELETE FROM state WHERE k = ?", (_fail_key(engine, photo_id),))
+    conn.commit()
+
+
+def _is_retryable_error(err):
+    if isinstance(err, (requests.Timeout, requests.ConnectionError)):
+        return True
+    if isinstance(err, requests.HTTPError):
+        code = err.response.status_code if err.response is not None else 0
+        return code in RETRYABLE_HTTP
+    return False
+
+
+def _is_deterministic_error(err):
+    if isinstance(err, requests.HTTPError):
+        code = err.response.status_code if err.response is not None else 0
+        return code in DETERMINISTIC_HTTP
+    msg = str(err or "").lower()
+    return "cannot identify image file" in msg or "unsupported image" in msg
 
 
 # --------------------------------------------------------------------------- status

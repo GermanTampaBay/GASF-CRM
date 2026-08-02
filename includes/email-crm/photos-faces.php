@@ -299,8 +299,16 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'GET',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			$since = (int) $req->get_param( 'since' );
-			$limit = min( 200, max( 1, (int) $req->get_param( 'limit' ) ?: 100 ) );
+			$since    = (int) $req->get_param( 'since' ); // Legacy cursor, kept for older scanners.
+			$after_id = max( 0, (int) $req->get_param( 'after_id' ) );
+			$after    = trim( (string) $req->get_param( 'after' ) );
+			$limit    = min( 200, max( 1, (int) $req->get_param( 'limit' ) ?: 100 ) );
+
+			if ( '' !== $after ) {
+				$ts = strtotime( $after );
+				if ( false === $ts ) { $after = ''; }
+				else { $after = gmdate( 'Y-m-d H:i:s', $ts ); }
+			}
 
 			$ids = get_posts( array(
 				'post_type'      => 'attachment',
@@ -308,8 +316,7 @@ add_action( 'rest_api_init', function () {
 				'posts_per_page' => $limit,
 				'fields'         => 'ids',
 				'no_found_rows'  => true,
-				'orderby'        => 'ID',
-				'order'          => 'ASC',
+				'orderby'        => array( 'modified' => 'ASC', 'ID' => 'ASC' ),
 				'post_mime_type' => 'image',
 				'post__not_in'   => array(),
 				'meta_query'     => array(
@@ -318,16 +325,34 @@ add_action( 'rest_api_init', function () {
 				'tax_query'      => array(
 					array( 'taxonomy' => 'gasf_photo_person', 'operator' => 'EXISTS' ),
 				),
+				'date_query'     => '' !== $after
+					? array(
+						array(
+							'column'    => 'post_modified_gmt',
+							'after'     => $after,
+							'inclusive' => true,
+						),
+					)
+					: array(),
 			) );
 
 			$out = array();
 			foreach ( $ids as $id ) {
 				if ( (int) $id <= $since ) { continue; }
+				$modified = (string) get_post_field( 'post_modified_gmt', $id );
+				if ( '0000-00-00 00:00:00' === $modified || '' === $modified ) {
+					$modified = (string) get_post_field( 'post_date_gmt', $id );
+				}
+				if ( '' !== $after ) {
+					if ( $modified < $after ) { continue; }
+					if ( $modified === $after && (int) $id <= $after_id ) { continue; }
+				}
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
 				if ( ! $people ) { continue; }
 				$out[] = array(
 					'id'     => (int) $id,
+					'modified' => $modified,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
 					'people' => array_map( 'html_entity_decode', $people ),
 				);
