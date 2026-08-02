@@ -330,6 +330,7 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		'caption' => (string) ( $info['caption'] ?? '' ),
 		'taken'   => (string) ( $info['taken'] ?? '' ),
 		'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
+		'flyer'   => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
 		// A clip has no thumbnail and no sizes, so the grid and the viewer both
 		// need to know before they try to put it in an <img>.
 		'kind'    => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
@@ -386,6 +387,7 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 			'event_id' => (int) get_post_meta( $id, '_gasf_photo_event_id', true ),
 			'caption'  => (string) get_post_field( 'post_excerpt', $id ),
 			'taken'    => (string) get_post_meta( $id, '_gasf_photo_taken', true ),
+			'flyer'    => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
 			// Read-only. The date is editable because a human can know better
 			// than a camera about the day; the time is evidence, and its whole
 			// value is that nobody has touched it.
@@ -542,6 +544,21 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	$note = trim( sanitize_textarea_field( (string) ( $in['caption'] ?? '' ) ) );
 	if ( mb_strlen( $note ) > GASF_CRM_LIB_NOTE_MAX ) { $note = mb_substr( $note, 0, GASF_CRM_LIB_NOTE_MAX ); }
 	wp_update_post( array( 'ID' => $id, 'post_excerpt' => $note ) );
+
+	$flyer = function_exists( 'gasf_crm_photo_flag' )
+		? gasf_crm_photo_flag( $in['flyer'] ?? '' )
+		: ! empty( $in['flyer'] );
+	$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
+	if ( $flyer ) {
+		update_post_meta( $id, '_gasf_photo_flyer', 1 );
+		delete_post_meta( $id, '_gasf_face_suggestions' );
+	} else {
+		delete_post_meta( $id, '_gasf_photo_flyer' );
+		if ( $was_flyer ) {
+			delete_post_meta( $id, '_gasf_face_scanned' );
+			delete_post_meta( $id, '_gasf_face_count' );
+		}
+	}
 
 	// Title and alt follow the tags. The FILENAME deliberately does not: the
 	// file may already be linked from a page or sitting in somebody's downloads,
@@ -1190,6 +1207,7 @@ add_action( 'rest_api_init', function () {
 				'event_id' => (int) $req->get_param( 'event_id' ),
 				'taken'    => (string) $req->get_param( 'taken' ),
 				'caption'  => (string) $req->get_param( 'caption' ),
+				'flyer'    => $req->get_param( 'flyer' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
 		},

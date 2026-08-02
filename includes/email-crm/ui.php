@@ -423,6 +423,8 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .addp:hover{text-decoration:underline}
 .prow{display:flex;gap:8px;flex-wrap:wrap}
 .prow .pf{flex:1 1 130px}
+.pfcheck{display:flex;gap:8px;align-items:flex-start}
+.pfcheck input{margin-top:2px}
 .pgeo{font-size:12px;color:var(--gasf-muted);margin:2px 0 8px}
 .pev{margin:0 0 8px}
 .pevlist{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:6px}
@@ -526,6 +528,7 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:9px;background:var(--gasf-chip);color:var(--gasf-muted);vertical-align:middle}
 .badge.ig{background:#fcf0f1;color:var(--danger)}
 .badge.an{background:#edf4ea;color:var(--ok)}
+.badge.fly{background:#efeaff;color:#5a2c8f}
 
 /* ===================== the archive card =====================
  *
@@ -2280,8 +2283,13 @@ function gasf_crm_render_inbox() {
 		return [ (p && p.taken) || '', (p && p.taken_at) || '' ].filter(Boolean).join(' ');
 	}
 
+	function isFlyer(v){
+		return v === true || v === 1 || v === '1';
+	}
+
 	function photoForm(p, q, opts){
 		opts = opts || {};
+		var flyer = isFlyer((q && q.flyer) || (p && p.flyer));
 		var note = opts.big
 			? '<textarea class="p-caption" rows="3" maxlength="600">' + esc(q.caption||'') + '</textarea>'
 			: '<input type="text" class="p-caption" maxlength="150" value="' + esc(q.caption||'') + '">';
@@ -2289,6 +2297,8 @@ function gasf_crm_render_inbox() {
 		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces) + peopleField(q.people || []) + '</div>' +
 			'<label class="pf"><span>' + (opts.big ? 'Notes — what is happening, anything worth remembering' : 'What is happening') + '</span>' +
 			note + '</label>' +
+			'<label class="pf pfcheck"><input type="checkbox" class="p-flyer" ' + (flyer ? 'checked' : '') + '>' +
+				'<span>This image is a flyer or ad, and not a candid/event photo.</span></label>' +
 			'<div class="prow">' +
 			'<label class="pf"><span>Where</span>' + placeSelect(q.place || p.guess || '') + '</label>' +
 			'<label class="pf"><span>Occasion</span><input type="text" class="p-event" value="' + esc(q.event||'') + '"></label>' +
@@ -2372,6 +2382,7 @@ function gasf_crm_render_inbox() {
 
 			if (p.confirmed) {
 				s += '<div class="pdone">✓ Tagged' + (p.people.length ? ' — ' + esc(p.people.join(', ')) : '') + '</div>' +
+					(p.flyer ? '<div class="muted"><span class="badge fly">flyer/ad</span></div>' : '') +
 					(p.caption ? '<p class="muted">' + esc(p.caption) + '</p>' : '') +
 					// Offered only once it is tagged: before that the name would
 					// have nothing in it worth carrying.
@@ -2464,6 +2475,7 @@ function gasf_crm_render_inbox() {
 					photo: parseInt(card.dataset.photo, 10),
 					people: peopleValues(card),
 					place: placeValue(card), event: v('.p-event'),
+					flyer: !!(card.querySelector('.p-flyer') && card.querySelector('.p-flyer').checked),
 					// Set only when the occasion was picked from the calendar, so
 					// a hand-typed name never claims to be a specific event.
 					event_id: parseInt(v('.p-evid'), 10) || 0,
@@ -3222,6 +3234,7 @@ function gasf_crm_render_inbox() {
 			} else if (p.state === 'confirmed') {
 				h += '<div class="note ok">Approved and tagged.</div>';
 			}
+			if (p.flyer) { h += '<div class="note">Marked as <strong>flyer/ad</strong>.</div>'; }
 
 			h += photoForm(p, q);
 			h += '<div class="actions" style="margin-top:6px">' +
@@ -3250,6 +3263,7 @@ function gasf_crm_render_inbox() {
 					photo: id,
 					people: peopleValues(ppane),
 					place: placeValue(ppane), event: v('.p-event'),
+					flyer: !!(ppane.querySelector('.p-flyer') && ppane.querySelector('.p-flyer').checked),
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					revision: v('.p-rev')
@@ -3454,6 +3468,7 @@ function gasf_crm_render_inbox() {
 			lgrid.innerHTML = (r.photos || []).map(function(p){
 				var sub = [whenOf(p), (p.places[0] || ''), (p.events[0] || '')].filter(Boolean).join(' · ');
 				var who = p.people.length ? p.people.join(', ') : '';
+				var marks = p.flyer ? '<span class="badge fly">flyer/ad</span>' : '';
 				return '<div class="lcard' + (lsel[p.id] ? ' sel' : '') + '" data-id="' + p.id + '">' +
 					'<input type="checkbox" class="ltick" ' + (lsel[p.id] ? 'checked' : '') +
 						' aria-label="Select this photo">' +
@@ -3473,7 +3488,7 @@ function gasf_crm_render_inbox() {
 					'</button>' +
 					'<div class="lmeta">' +
 						'<span class="lt">' + esc(who || p.title) + '</span>' +
-						'<span class="lsub">' + esc(sub || '—') + '</span>' +
+						'<span class="lsub">' + esc(sub || '—') + (marks ? ' ' + marks : '') + '</span>' +
 					'</div></div>';
 			}).join('');
 
@@ -4293,6 +4308,7 @@ function gasf_crm_render_inbox() {
 				photo: p.id,
 				people: peopleValues(edit),
 				place: placeValue(edit), event: v('.p-event'),
+				flyer: !!(edit.querySelector('.p-flyer') && edit.querySelector('.p-flyer').checked),
 				event_id: parseInt(v('.p-evid'), 10) || 0,
 				taken: v('.p-taken'), caption: v('.p-caption'),
 				revision: v('.p-rev')

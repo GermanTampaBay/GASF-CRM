@@ -3660,6 +3660,13 @@ function gasf_crm_photo_clean_date( $raw ) {
 	return $d;
 }
 
+/** Truthy request/form values for photo flags. */
+function gasf_crm_photo_flag( $raw ) {
+	if ( is_bool( $raw ) ) { return $raw; }
+	$v = strtolower( trim( (string) $raw ) );
+	return in_array( $v, array( '1', 'true', 'yes', 'on' ), true );
+}
+
 /* =====================================================================
  * Review — pending answers become real tags
  * ================================================================== */
@@ -3815,6 +3822,21 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 	$caption = trim( sanitize_text_field( (string) ( $keep['caption'] ?? '' ) ) );
 	if ( '' !== $caption ) {
 		wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
+	}
+
+	$flyer     = gasf_crm_photo_flag( $keep['flyer'] ?? '' );
+	$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
+	if ( $flyer ) {
+		update_post_meta( $id, '_gasf_photo_flyer', 1 );
+		// A flyer/ad should never show stale face guesses.
+		delete_post_meta( $id, '_gasf_face_suggestions' );
+	} else {
+		delete_post_meta( $id, '_gasf_photo_flyer' );
+		// Re-entering normal photos should rejoin the scan queue.
+		if ( $was_flyer ) {
+			delete_post_meta( $id, '_gasf_face_scanned' );
+			delete_post_meta( $id, '_gasf_face_count' );
+		}
 	}
 
 	// Title and alt, now that there is finally something true to say. Both are
@@ -3984,6 +4006,7 @@ add_action( 'rest_api_init', function () {
 				'event_id' => (int) $req->get_param( 'event_id' ),
 				'taken'    => (string) $req->get_param( 'taken' ),
 				'caption'  => (string) $req->get_param( 'caption' ),
+				'flyer'    => $req->get_param( 'flyer' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
 			return is_wp_error( $ok ) ? $ok : gasf_crm_photo_card( $aid );
@@ -4121,6 +4144,7 @@ add_action( 'rest_api_init', function () {
 				'event_id' => (int) $req->get_param( 'event_id' ),
 				'taken'    => (string) $req->get_param( 'taken' ),
 				'caption'  => (string) $req->get_param( 'caption' ),
+				'flyer'    => $req->get_param( 'flyer' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
 			if ( is_wp_error( $ok ) ) { return $ok; }
@@ -4165,6 +4189,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 				'place'    => (string) ( $g['place'] ?? '' ),
 				'event'    => (string) ( $g['event'] ?? '' ),
 				'event_id' => (int) ( $g['event_id'] ?? 0 ),
+				'flyer'    => false,
 			);
 		}
 	}
@@ -4199,6 +4224,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 		'thread'  => (int) ( $src['thread'] ?? 0 ),
 		'taken'   => $info['taken'] ?? '',
 		'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
+		'flyer'   => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
 		'guess'   => ( ! empty( $info['place_guess'] ) && ! is_wp_error( $info['place_guess'] ) ) ? $info['place_guess']->name : '',
 		'alts'    => ! empty( $info['place_alts'] ) ? wp_list_pluck( $info['place_alts'], 'name' ) : array(),
 		'people'  => $info['people'] ?? array(),
@@ -4229,6 +4255,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 			'event_id' => (int) get_post_meta( $id, '_gasf_photo_event_id', true ),
 			'caption'  => (string) get_post_field( 'post_excerpt', $id ),
 			'taken'    => (string) get_post_meta( $id, '_gasf_photo_taken', true ),
+			'flyer'    => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
 			// Read-only, and most useful right here: this is the card where a
 			// volunteer picks the event, and two of them can share a day.
 			'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',

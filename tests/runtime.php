@@ -361,6 +361,7 @@ final class GASF_CRM_Selftest {
 			'event_id' => 0,
 			'taken'    => '2026-01-01',
 			'caption'  => 'selftest caption',
+			'flyer'    => 1,
 			'revision' => gasf_crm_photo_revision( $id ),
 		) );
 		if ( ! $this->ok( ! is_wp_error( $r ), 'confirm: succeeds on a held fixture' . ( is_wp_error( $r ) ? ' — ' . $r->get_error_message() : '' ) ) ) { return; }
@@ -368,6 +369,7 @@ final class GASF_CRM_Selftest {
 		$this->ok( in_array( 'Selftest Confirm', wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) ), true ),
 			'confirm: person applied' );
 		$this->ok( 'selftest caption' === get_post_field( 'post_excerpt', $id ), 'confirm: caption applied' );
+		$this->ok( (bool) get_post_meta( $id, '_gasf_photo_flyer', true ), 'confirm: flyer/ad flag stored' );
 		foreach ( array( array( 'Selftest Confirm', 'gasf_photo_person' ), array( 'Selftest Event', 'gasf_photo_event' ) ) as $pair ) {
 			$t = get_term_by( 'name', $pair[0], $pair[1] );
 			if ( $t ) { wp_delete_term( (int) $t->term_id, $pair[1] ); }

@@ -222,6 +222,7 @@ add_action( 'rest_api_init', function () {
 
 			$out = array();
 			foreach ( $ids as $id ) {
+				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$out[] = array(
 					'id'     => (int) $id,
@@ -278,6 +279,7 @@ add_action( 'rest_api_init', function () {
 			foreach ( array_slice( $items, 0, GASF_CRM_FACES_BATCH ) as $item ) {
 				$id = (int) ( $item['id'] ?? 0 );
 				if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) { continue; }
+				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				$stored += gasf_crm_faces_store( $id, (array) ( $item['faces'] ?? array() ), (int) ( $item['found'] ?? 0 ) );
 				$seen++;
 			}
@@ -347,6 +349,7 @@ add_action( 'rest_api_init', function () {
 					if ( $modified < $after ) { continue; }
 					if ( $modified === $after && (int) $id <= $after_id ) { continue; }
 				}
+				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
 				if ( ! $people ) { continue; }
@@ -377,7 +380,11 @@ function gasf_crm_faces_unscanned_count() {
 			array( 'key' => '_gasf_face_scanned', 'compare' => 'NOT EXISTS' ),
 		),
 	) );
-	return count( $ids );
+	$left = 0;
+	foreach ( $ids as $id ) {
+		if ( ! get_post_meta( (int) $id, '_gasf_photo_flyer', true ) && gasf_crm_photo_in_library( $id ) ) { $left++; }
+	}
+	return $left;
 }
 
 /* =====================================================================
