@@ -464,8 +464,8 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	$defer_sizes = static function ( $threshold, $imagesize, $file, $attachment_id ) { return false; };
 	$no_sizes    = static function ( $sizes, $metadata ) { return array(); };
 	if ( ! $isVideo ) {
-		add_filter( 'big_image_size_threshold', $defer_sizes, 99 );
-		add_filter( 'intermediate_image_sizes_advanced', $no_sizes, 99 );
+		add_filter( 'big_image_size_threshold', $defer_sizes, 99, 4 );
+		add_filter( 'intermediate_image_sizes_advanced', $no_sizes, 99, 2 );
 	}
 	// EXIF is read on the way in by the catalogue module's add_attachment hook,
 	// which is what puts the date, the time and the geofence guess on the photo
