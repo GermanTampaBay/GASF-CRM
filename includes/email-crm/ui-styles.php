@@ -367,8 +367,6 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 /* Actions in a row, not a column. They wrap on a narrow phone, which is the one
    place stacking is the right answer rather than the accidental one. */
 .lbacts{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:12px}
-.lbnav{display:flex;gap:8px;justify-content:space-between;align-items:center;margin:0 0 10px}
-.lbnav .btn{min-width:98px}
 .lbclose{position:absolute;top:14px;right:18px;background:none;border:0;color:#fff;font-size:34px;line-height:1;cursor:pointer}
 /* The editor sits on a light card inside the dark overlay — the form controls
    are styled for a pane, and white-on-black inputs would be unreadable. */

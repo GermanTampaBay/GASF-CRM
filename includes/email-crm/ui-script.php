@@ -2828,15 +2828,6 @@ function gasf_crm_render_inbox_script() {
 		return (at >= 0 && at < ids.length) ? ids[at] : 0;
 	}
 
-	function lbNavMarkup(id){
-		var prev = lbNeighbor(id, -1), next = lbNeighbor(id, 1);
-		if (!prev && !next) { return ''; }
-		return '<div class="lbnav">' +
-			'<button class="btn sec lbnav-prev" type="button"' + (prev ? '' : ' disabled') + '>← Previous</button>' +
-			'<button class="btn sec lbnav-next" type="button"' + (next ? '' : ' disabled') + '>Next →</button>' +
-		'</div>';
-	}
-
 	function lbOpen(id, fromCard, card){
 		// card wins when given: the review screens hold their own photo objects
 		// and are not backed by the library grid at all. One viewer for both,
@@ -2918,6 +2909,11 @@ function gasf_crm_render_inbox_script() {
 		// form, which has approve and reject beside it — and the edit route
 		// refuses anything not yet in the collection, so offering the button
 		// here would be a dead end.
+		var prevId = lbNeighbor(p.id, -1), nextId = lbNeighbor(p.id, 1);
+		if (prevId || nextId) {
+			acts.push('<button class="btn sec" id="lbprev" type="button"' + (prevId ? '' : ' disabled') + '>← Previous</button>');
+			acts.push('<button class="btn sec" id="lbnext" type="button"' + (nextId ? '' : ' disabled') + '>Next →</button>');
+		}
 		if (p.lib) { acts.push('<button class="btn" id="lbeditbtn" type="button">Edit details</button>'); }
 		// Crop and light. Photos only — a clip has no still to crop.
 		if (p.lib && p.kind !== 'video') {
@@ -2951,6 +2947,16 @@ function gasf_crm_render_inbox_script() {
 		if (cb) { cb.onclick = function(){ lbConsent(p); }; }
 		var db = document.getElementById('lbdelbtn');
 		if (db) { db.onclick = function(){ lbDelete(p); }; }
+		var pb = document.getElementById('lbprev');
+		if (pb) { pb.onclick = function(){
+			if (!prevId) { return; }
+			lbOpen(prevId, null, (lgrid && lgrid._photos) ? lgrid._photos[prevId] : null);
+		}; }
+		var nb = document.getElementById('lbnext');
+		if (nb) { nb.onclick = function(){
+			if (!nextId) { return; }
+			lbOpen(nextId, null, (lgrid && lgrid._photos) ? lgrid._photos[nextId] : null);
+		}; }
 
 		box.hidden = false;
 
@@ -2978,25 +2984,6 @@ function gasf_crm_render_inbox_script() {
 		});
 	}
 
-	function lbWireEditNav(edit, p, reopen){
-		var prevBtn = edit.querySelector('.lbnav-prev');
-		var nextBtn = edit.querySelector('.lbnav-next');
-		if (prevBtn) {
-			prevBtn.onclick = function(){
-				var id = lbNeighbor(p.id, -1);
-				if (!id || !lgrid || !lgrid._photos || !lgrid._photos[id]) { return; }
-				reopen(lgrid._photos[id]);
-			};
-		}
-		if (nextBtn) {
-			nextBtn.onclick = function(){
-				var id = lbNeighbor(p.id, 1);
-				if (!id || !lgrid || !lgrid._photos || !lgrid._photos[id]) { return; }
-				reopen(lgrid._photos[id]);
-			};
-		}
-	}
-
 	/* ===================== the image editor =====================
 	 *
 	 * Crop, rotate, brightness, contrast — and that is the whole tool. The volunteer
@@ -3014,7 +3001,6 @@ function gasf_crm_render_inbox_script() {
 
 		edit.dataset.photo = p.id;
 		edit.innerHTML = '<h3>Crop &amp; light</h3>' +
-			lbNavMarkup(p.id) +
 			'<div class="imged"><div class="iewrap">' +
 				'<img id="ieimg" src="' + esc(p.full || p.url) + '" alt="" draggable="false">' +
 				'<div class="cropbox" id="iecrop">' +
@@ -3102,7 +3088,6 @@ function gasf_crm_render_inbox_script() {
 
 		var bri = document.getElementById('iebri'), con = document.getElementById('iecon');
 		var rotv = document.getElementById('ierotv');
-		lbWireEditNav(edit, p, function(np){ lbImage(np); });
 		function drawPreview(){
 			// Fast visual aim. The server render on Apply is still the source of truth.
 			img.style.filter = 'brightness(' + (1 + bri.value / 100) + ') contrast(' + (1 + con.value / 100) + ')';
@@ -3171,7 +3156,6 @@ function gasf_crm_render_inbox_script() {
 
 		edit.dataset.photo = p.id; // so Escape knows which photo to step back to
 		edit.innerHTML = '<h3>' + esc(p.title || 'This photo') + '</h3>' +
-			lbNavMarkup(p.id) +
 			photoForm(p, p.saved || {}, { big: true, okLabel: 'Save' });
 		document.getElementById('lbinfo').hidden = true;
 		edit.hidden = false;
@@ -3180,7 +3164,6 @@ function gasf_crm_render_inbox_script() {
 		wireEventPickers(edit);
 		wirePlaceSelects(edit);
 		wirePeople(edit);
-		lbWireEditNav(edit, p, function(np){ lbEdit(np); });
 
 		var cancel = edit.querySelector('.p-cancel');
 		if (cancel) { cancel.onclick = function(){ lbOpen(p.id); }; }
