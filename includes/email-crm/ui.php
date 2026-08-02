@@ -2026,7 +2026,7 @@ function gasf_crm_render_inbox() {
 		return '<div class="fchips">' +
 			'<span class="fchips-lead">The scanner suggests:</span> ' +
 			faces.map(function(f){
-				var pct = Math.round((f.confidence || 0) * 100);
+				var pct = f.confidence || 0;   // already a whole percent
 				return '<button type="button" class="fchip" data-name="' + esc(f.name) + '" ' +
 					'title="Click to put this name in a box. Nothing is saved until you press the save button.">' +
 					esc(f.name) + ' <span class="fpct">' + pct + '%</span></button>';

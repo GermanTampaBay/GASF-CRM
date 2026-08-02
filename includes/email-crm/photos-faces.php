@@ -132,10 +132,18 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found ) {
 		$box = array_map( 'intval', (array) ( $f['box'] ?? array() ) );
 		if ( 4 !== count( $box ) ) { $box = array( 0, 0, 0, 0 ); }
 
+		/*
+		 * Stored as a whole percent, not a float. round(0.88, 3) is not
+		 * exactly 0.88 in binary, and PHP serialises the difference in full:
+		 * the first drill put 0.88000000000000000444089209850062616 into the
+		 * postmeta and into the JSON the browser reads. An integer is what
+		 * every consumer wants anyway — the chip prints a percent — and it
+		 * cannot accumulate noise.
+		 */
 		$keep[] = array(
 			'box'        => array_values( $box ),
 			'name'       => $name,
-			'confidence' => round( min( 1, max( 0, $conf ) ), 3 ),
+			'confidence' => (int) round( min( 1, max( 0, $conf ) ) * 100 ),
 		);
 	}
 
