@@ -4374,19 +4374,26 @@ function gasf_crm_render_inbox() {
 
 		var bri = document.getElementById('iebri'), con = document.getElementById('iecon');
 		var rotv = document.getElementById('ierotv');
+		function drawPreview(){
+			// Fast visual aim. The server render on Apply is still the source of truth.
+			img.style.filter = 'brightness(' + (1 + bri.value / 100) + ') contrast(' + (1 + con.value / 100) + ')';
+			img.style.transformOrigin = '50% 50%';
+			img.style.transform = 'rotate(' + rot + 'deg)';
+		}
 		function rotset(v){
 			rot = ((v % 360) + 360) % 360;
 			rotv.textContent = rot + '\u00B0';
+			drawPreview();
 		}
 		document.getElementById('ierotl').onclick = function(){ rotset(rot - 90); };
 		document.getElementById('ierotr').onclick = function(){ rotset(rot + 90); };
 		function tune(){
 			document.getElementById('iebriv').textContent = bri.value;
 			document.getElementById('ieconv').textContent = con.value;
-			// Approximate preview; the server's Imagick render is the truth.
-			img.style.filter = 'brightness(' + (1 + bri.value / 100) + ') contrast(' + (1 + con.value / 100) + ')';
+			drawPreview();
 		}
 		bri.oninput = tune; con.oninput = tune;
+		tune();
 
 		function done(r){
 			window.removeEventListener('resize', full);

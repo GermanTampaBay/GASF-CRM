@@ -1896,21 +1896,28 @@ add_filter( 'query_vars', function ( $v ) {
  */
 function gasf_crm_photo_img_url( $attachment_id, $size = 'medium', $token = '' ) {
 	$id = (int) $attachment_id;
+	$edited = (bool) get_post_meta( $id, '_gasf_photo_edit', true );
+	$rev    = (int) get_post_meta( $id, '_gasf_photo_rev', true );
+	$bust   = function ( $u ) use ( $edited, $rev ) {
+		if ( ! $u || ! $edited ) { return $u; }
+		return $u . ( false === strpos( $u, '?' ) ? '?' : '&' ) . 'rv=' . $rev;
+	};
+
 	if ( ! gasf_crm_photo_is_private( $id ) ) {
 		$u = wp_get_attachment_image_url( $id, $size );
-		return $u ? $u : (string) wp_get_attachment_url( $id );
+		return $u ? $bust( $u ) : $bust( (string) wp_get_attachment_url( $id ) );
 	}
 
 	$size = preg_replace( '~[^a-z0-9_-]~', '', strtolower( (string) $size ) ) ?: 'full';
 
 	if ( $token ) {
-		return home_url( '/photos/img/' . rawurlencode( $token ) . '/' . $id . '/' . $size . '/' );
+		return $bust( home_url( '/photos/img/' . rawurlencode( $token ) . '/' . $id . '/' . $size . '/' ) );
 	}
-	return add_query_arg( array(
+	return $bust( add_query_arg( array(
 		'photo'    => $id,
 		'size'     => $size,
 		'_wpnonce' => wp_create_nonce( 'wp_rest' ),
-	), rest_url( 'gasf/v1/crm/photos/file' ) );
+	), rest_url( 'gasf/v1/crm/photos/file' ) ) );
 }
 
 /**
