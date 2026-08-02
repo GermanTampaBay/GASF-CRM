@@ -140,6 +140,11 @@ function gasf_crm_door_device_bump( $token ) {
 	set_transient( gasf_crm_door_device_key( $token ), gasf_crm_door_device_count( $token ) + 1, GASF_CRM_DOOR_DEVICE_TTL );
 }
 
+function gasf_crm_door_device_drop( $token ) {
+	$n = max( 0, gasf_crm_door_device_count( $token ) - 1 );
+	set_transient( gasf_crm_door_device_key( $token ), $n, GASF_CRM_DOOR_DEVICE_TTL );
+}
+
 function gasf_crm_door_total( $token ) {
 	$all = gasf_crm_doors();
 	return (int) ( $all[ $token ]['count'] ?? 0 );
@@ -150,6 +155,85 @@ function gasf_crm_door_total_bump( $token ) {
 	if ( ! isset( $all[ $token ] ) ) { return; }
 	$all[ $token ]['count'] = (int) ( $all[ $token ]['count'] ?? 0 ) + 1;
 	gasf_crm_doors_save( $all );
+}
+
+function gasf_crm_door_total_drop( $token ) {
+	$all = gasf_crm_doors();
+	if ( ! isset( $all[ $token ] ) ) { return; }
+	$all[ $token ]['count'] = max( 0, (int) ( $all[ $token ]['count'] ?? 0 ) - 1 );
+	gasf_crm_doors_save( $all );
+}
+
+/** Per-door mutex name for MySQL advisory locking. */
+function gasf_crm_door_lock_name( $token ) {
+	return 'gasf_door_' . substr( hash( 'sha256', (string) $token ), 0, 48 );
+}
+
+/** Acquire a short lock so door counters can be checked and updated atomically. */
+function gasf_crm_door_lock_acquire( $token, $wait = 5 ) {
+	global $wpdb;
+	$got = $wpdb->get_var( $wpdb->prepare(
+		'SELECT GET_LOCK(%s, %d)',
+		gasf_crm_door_lock_name( $token ),
+		max( 0, (int) $wait )
+	) );
+	return 1 === (int) $got;
+}
+
+function gasf_crm_door_lock_release( $token ) {
+	global $wpdb;
+	$wpdb->get_var( $wpdb->prepare(
+		'SELECT RELEASE_LOCK(%s)',
+		gasf_crm_door_lock_name( $token )
+	) );
+}
+
+/**
+ * Reserve one upload slot atomically.
+ *
+ * Done before intake so two uploads that arrive together cannot both pass the
+ * "still under budget" check and then both increment.
+ *
+ * @return true|WP_Error
+ */
+function gasf_crm_door_reserve_slot( $token ) {
+	if ( ! gasf_crm_door_lock_acquire( $token ) ) {
+		return new WP_Error( 'gasf_crm_busy', 'The upload counter is busy. Please try again in a moment.', array( 'status' => 503 ) );
+	}
+
+	$device = gasf_crm_door_device_count( $token );
+	if ( $device >= GASF_CRM_DOOR_MAX_PER_DEVICE ) {
+		gasf_crm_door_lock_release( $token );
+		return new WP_Error( 'gasf_crm_quota_device',
+			sprintf( 'That is %d photos from this phone — plenty! Find a volunteer if you have more.',
+				GASF_CRM_DOOR_MAX_PER_DEVICE ),
+			array( 'status' => 429 ) );
+	}
+
+	$total = gasf_crm_door_total( $token );
+	if ( $total >= GASF_CRM_DOOR_MAX_TOTAL ) {
+		gasf_crm_door_lock_release( $token );
+		return new WP_Error( 'gasf_crm_quota_total',
+			'The club has taken in all the photos it can hold through this link. Thank you!',
+			array( 'status' => 429 ) );
+	}
+
+	gasf_crm_door_device_bump( $token );
+	gasf_crm_door_total_bump( $token );
+	gasf_crm_door_lock_release( $token );
+	return true;
+}
+
+/** Roll back a reserved slot when intake fails after reservation. */
+function gasf_crm_door_release_slot( $token ) {
+	if ( ! gasf_crm_door_lock_acquire( $token ) ) {
+		gasf_crm_log( sprintf( 'Door "%s": could not roll back a reserved upload slot (counter lock busy).', (string) $token ) );
+		return false;
+	}
+	gasf_crm_door_device_drop( $token );
+	gasf_crm_door_total_drop( $token );
+	gasf_crm_door_lock_release( $token );
+	return true;
 }
 
 /** The URL behind the QR code. */
@@ -464,15 +548,13 @@ function gasf_crm_door_receive( array $door ) {
 		}
 	}
 
-	if ( gasf_crm_door_device_count( $door['token'] ) >= GASF_CRM_DOOR_MAX_PER_DEVICE ) {
-		return $fail( sprintf( 'That is %d photos from this phone — plenty! Find a volunteer if you have more.',
-			GASF_CRM_DOOR_MAX_PER_DEVICE ), 429 );
-	}
-	if ( gasf_crm_door_total( $door['token'] ) >= GASF_CRM_DOOR_MAX_TOTAL ) {
-		return $fail( 'The club has taken in all the photos it can hold through this link. Thank you!', 429 );
-	}
 	if ( empty( $_FILES['file'] ) ) {
 		return $fail( 'No photo arrived.' );
+	}
+	$reserve = gasf_crm_door_reserve_slot( $door['token'] );
+	if ( is_wp_error( $reserve ) ) {
+		$code = (int) ( $reserve->get_error_data()['status'] ?? 503 );
+		return $fail( $reserve->get_error_message(), ( $code >= 400 && $code < 600 ) ? $code : 503 );
 	}
 
 	$people = array();
@@ -563,13 +645,11 @@ function gasf_crm_door_receive( array $door ) {
 	) );
 
 	if ( is_wp_error( $card ) ) {
+		gasf_crm_door_release_slot( $door['token'] );
 		$code = (int) ( $card->get_error_data()['status'] ?? 400 );
 		gasf_crm_log( sprintf( 'Door "%s": upload refused — %s', $door['label'], $card->get_error_message() ) );
 		return $fail( $card->get_error_message(), ( $code >= 400 && $code < 600 ) ? $code : 400 );
 	}
-
-	gasf_crm_door_device_bump( $door['token'] );
-	gasf_crm_door_total_bump( $door['token'] );
 
 	gasf_crm_log( sprintf( 'Door "%s": guest photo #%d %s%s %s',
 		$door['label'], (int) $card['id'],

@@ -344,7 +344,7 @@ function gasf_crm_photo_consent_state( $attachment_id ) {
 			'at'    => (string) ( $rec['at'] ?? '' ),
 			'by'    => $manual
 				? (string) ( $rec['recorded_by_name'] ?? '' )
-				: (string) ( $rec['name'] ?: ( $rec['by'] ?? '' ) ),
+				: (string) ( ( $rec['name'] ?? '' ) !== '' ? $rec['name'] : ( $rec['by'] ?? '' ) ),
 			'note'  => (string) ( $rec['note'] ?? '' ),
 			'text'  => (string) ( $rec['text'] ?? '' ),
 		);
