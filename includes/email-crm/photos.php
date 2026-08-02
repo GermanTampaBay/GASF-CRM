@@ -3660,11 +3660,98 @@ function gasf_crm_photo_clean_date( $raw ) {
 	return $d;
 }
 
+/** HH:MM in 24h or ''. */
+function gasf_crm_photo_clean_time( $raw ) {
+	$t = trim( sanitize_text_field( (string) $raw ) );
+	return preg_match( '~^(?:[01]\d|2[0-3]):[0-5]\d$~', $t ) ? $t : '';
+}
+
 /** Truthy request/form values for photo flags. */
 function gasf_crm_photo_flag( $raw ) {
 	if ( is_bool( $raw ) ) { return $raw; }
 	$v = strtolower( trim( (string) $raw ) );
 	return in_array( $v, array( '1', 'true', 'yes', 'on' ), true );
+}
+
+/** Build a calendar event from flyer details. */
+function gasf_crm_photo_event_from_flyer( array $in ) {
+	if ( ! function_exists( 'gasf_photo_has_calendar' ) || ! gasf_photo_has_calendar() || ! defined( 'GASF_EVENTS_CPT' ) ) {
+		return new WP_Error( 'gasf_crm_nocal', 'The calendar module is not available here.', array( 'status' => 503 ) );
+	}
+
+	$title = trim( sanitize_text_field( (string) ( $in['title'] ?? '' ) ) );
+	$date  = gasf_crm_photo_clean_date( $in['date'] ?? '' );
+	$from  = gasf_crm_photo_clean_time( $in['start'] ?? '' );
+	$to    = gasf_crm_photo_clean_time( $in['end'] ?? '' );
+
+	if ( '' === $title ) {
+		return new WP_Error( 'gasf_crm_bad', 'Give the event a title first.', array( 'status' => 400 ) );
+	}
+	if ( '' === $date ) {
+		return new WP_Error( 'gasf_crm_bad', 'Pick the event date first.', array( 'status' => 400 ) );
+	}
+	if ( '' === $from || '' === $to ) {
+		return new WP_Error( 'gasf_crm_bad', 'Pick both start and end times.', array( 'status' => 400 ) );
+	}
+
+	try {
+		$start = new DateTimeImmutable( $date . ' ' . $from . ':00', wp_timezone() );
+		$end   = new DateTimeImmutable( $date . ' ' . $to . ':00', wp_timezone() );
+	} catch ( Exception $e ) {
+		return new WP_Error( 'gasf_crm_bad', 'That date/time could not be read.', array( 'status' => 400 ) );
+	}
+	if ( $end <= $start ) {
+		return new WP_Error( 'gasf_crm_bad', 'End time must be after start time.', array( 'status' => 400 ) );
+	}
+
+	global $wpdb;
+	$have = (int) $wpdb->get_var( $wpdb->prepare(
+		"SELECT p.ID
+		   FROM {$wpdb->posts} p
+		   JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_gasf_start_ts'
+		  WHERE p.post_type = %s AND p.post_status = 'publish'
+		    AND p.post_title = %s
+		    AND CAST(m.meta_value AS UNSIGNED) = %d
+		  LIMIT 1",
+		GASF_EVENTS_CPT, $title, $start->getTimestamp()
+	) );
+	if ( $have > 0 ) {
+		return function_exists( 'gasf_photo_event_shape' )
+			? gasf_photo_event_shape( array(
+				'ID' => $have,
+				'post_title' => get_the_title( $have ),
+				'ts' => $start->getTimestamp(),
+			) ) + array( 'created' => false )
+			: array( 'id' => $have, 'title' => get_the_title( $have ), 'date' => $date, 'when' => wp_date( get_option( 'date_format' ) . ' g:ia', $start->getTimestamp() ), 'created' => false );
+	}
+
+	$id = wp_insert_post( array(
+		'post_type'   => GASF_EVENTS_CPT,
+		'post_status' => 'publish',
+		'post_title'  => $title,
+	) );
+	if ( is_wp_error( $id ) || ! $id ) {
+		return new WP_Error( 'gasf_crm_fail', 'Could not create the event in the calendar.', array( 'status' => 500 ) );
+	}
+
+	update_post_meta( $id, '_gasf_start_ts', $start->getTimestamp() );
+	update_post_meta( $id, '_gasf_end_ts', $end->getTimestamp() );
+
+	gasf_crm_log( sprintf( 'CRM photos: created calendar event #%d from flyer details by user %d', (int) $id, get_current_user_id() ) );
+
+	return function_exists( 'gasf_photo_event_shape' )
+		? gasf_photo_event_shape( array(
+			'ID' => (int) $id,
+			'post_title' => $title,
+			'ts' => $start->getTimestamp(),
+		) ) + array( 'created' => true )
+		: array(
+			'id' => (int) $id,
+			'title' => $title,
+			'date' => $date,
+			'when' => wp_date( get_option( 'date_format' ) . ' g:ia', $start->getTimestamp() ),
+			'created' => true,
+		);
 }
 
 /* =====================================================================
@@ -4119,6 +4206,19 @@ add_action( 'rest_api_init', function () {
 					? gasf_photo_events_search( $q )
 					: gasf_photo_events_on_date( (string) $req->get_param( 'date' ) ),
 			);
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/events/create', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			return gasf_crm_photo_event_from_flyer( array(
+				'title' => (string) $req->get_param( 'title' ),
+				'date'  => (string) $req->get_param( 'date' ),
+				'start' => (string) $req->get_param( 'start' ),
+				'end'   => (string) $req->get_param( 'end' ),
+			) );
 		},
 	) );
 

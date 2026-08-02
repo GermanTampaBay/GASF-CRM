@@ -439,6 +439,13 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .evpick.on{background:var(--s-ink);border-color:var(--s-ink);color:#fff}
 .evpick.on em{color:rgba(255,255,255,.75)}
 .p-evsearch{width:100%;padding:5px 8px;border:1px dashed var(--gasf-border);border-radius:4px;font:inherit;font-size:12px}
+.pflyevt{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-2px 0 8px;padding:6px 8px;border:1px dashed var(--gasf-border);
+	border-radius:4px;background:var(--s-tint)}
+.pflyevt-lead{font-size:12px;color:var(--gasf-muted)}
+.pflyevt label{display:flex;gap:5px;align-items:center;font-size:12px;color:var(--gasf-text)}
+.pflyevt input[type=time]{width:92px;padding:4px 6px;border:1px solid var(--gasf-border);border-radius:4px;font:inherit;font-size:12px;
+	background:var(--gasf-surface);color:var(--gasf-text)}
+.pflyevt .p-flymsg{font-size:12px}
 .pdone{font-size:13px;font-weight:600;color:var(--ok)}
 /* Photos screen */
 .tabs.pstates button{font-size:12px}
@@ -2322,6 +2329,13 @@ function gasf_crm_render_inbox() {
 			'<div class="pev"><div class="pevlist muted">…</div>' +
 			'<input type="text" class="p-evsearch" placeholder="…or search the calendar by name">' +
 			'</div>' +
+			'<div class="pflyevt" hidden>' +
+				'<span class="pflyevt-lead">Flyer, and no matching event yet?</span>' +
+				'<label>Start <input type="time" class="p-fly-start" value="18:00"></label>' +
+				'<label>End <input type="time" class="p-fly-end" value="22:00"></label>' +
+				'<button type="button" class="btn sec p-fly-mkevent">Create event</button>' +
+				'<span class="p-flymsg muted"></span>' +
+			'</div>' +
 			// Carries through the event the submitter picked, so a volunteer who
 			// changes nothing does not silently drop the link to it.
 			'<input type="hidden" class="p-evid" value="' + esc(q.event_id || '') + '">';
@@ -2503,7 +2517,28 @@ function gasf_crm_render_inbox() {
 			var name   = card.querySelector('.p-event');
 			var evid   = card.querySelector('.p-evid');
 			var search = box.querySelector('.p-evsearch');
+			var flyer  = card.querySelector('.p-flyer');
+			var mkbox  = card.querySelector('.pflyevt');
+			var mkfrom = card.querySelector('.p-fly-start');
+			var mkto   = card.querySelector('.p-fly-end');
+			var mkbtn  = card.querySelector('.p-fly-mkevent');
+			var mkmsg  = card.querySelector('.p-flymsg');
 			var seq    = 0;
+			var calOn  = true;
+
+			function syncFlyerCreate(){
+				if (!mkbox || !flyer || !name || !evid) { return; }
+				var wants = !!flyer.checked && !!name.value.trim() && !parseInt(evid.value || '0', 10) && calOn;
+				mkbox.hidden = !wants;
+				if (!wants) {
+					if (mkmsg) { mkmsg.textContent = ''; }
+					return;
+				}
+				var ready = !!(date && date.value);
+				if (mkbtn) { mkbtn.disabled = !ready; }
+				if (mkmsg && !ready) { mkmsg.textContent = 'Set the event date first.'; }
+				else if (mkmsg && mkmsg.textContent === 'Set the event date first.') { mkmsg.textContent = ''; }
+			}
 
 			function paint(events, why){
 				if (!events.length) { list.className = 'pevlist muted'; list.textContent = why; return; }
@@ -2518,6 +2553,7 @@ function gasf_crm_render_inbox() {
 						evid.value = b.dataset.id;
 						Array.prototype.forEach.call(list.querySelectorAll('.evpick'), function(x){ x.classList.remove('on'); });
 						b.classList.add('on');
+						syncFlyerCreate();
 					};
 				});
 			}
@@ -2533,14 +2569,16 @@ function gasf_crm_render_inbox() {
 					// Ignore a reply that arrived after a newer request: typing in
 					// the search box fires several and they can land out of order.
 					if (mine !== seq) { return; }
-					if (!r.calendar) { list.remove(); if (search) { search.remove(); } return; }
+					if (!r.calendar) { calOn = false; list.remove(); if (search) { search.remove(); } syncFlyerCreate(); return; }
+					calOn = true;
 					paint(r.events, q ? 'Nothing in the calendar matches that.' : 'Nothing was on at the club that day.');
+					syncFlyerCreate();
 				}).catch(function(){ if (mine === seq) { paint([], 'Could not reach the calendar.'); } });
 			}
 
 			// Typing a name by hand means it is not one of ours any more.
-			if (name) { name.oninput = function(){ evid.value = ''; }; }
-			if (date) { date.onchange = function(){ if (search) { search.value = ''; } load(''); }; }
+			if (name) { name.oninput = function(){ evid.value = ''; syncFlyerCreate(); }; }
+			if (date) { date.onchange = function(){ if (search) { search.value = ''; } load(''); syncFlyerCreate(); }; }
 			if (search) {
 				var timer = null;
 				search.oninput = function(){
@@ -2548,6 +2586,33 @@ function gasf_crm_render_inbox() {
 					timer = setTimeout(function(){ load(search.value.trim()); }, 250);
 				};
 			}
+			if (flyer) { flyer.addEventListener('change', syncFlyerCreate); }
+			if (evid) { evid.addEventListener('change', syncFlyerCreate); }
+			if (mkbtn) {
+				mkbtn.addEventListener('click', function(){
+					if (!mkfrom || !mkto || !name || !date || !mkmsg) { return; }
+					var title = name.value.trim();
+					if (!title) { mkmsg.textContent = 'Type the event title first.'; return; }
+					if (!date.value) { mkmsg.textContent = 'Set the event date first.'; return; }
+					mkbtn.disabled = true;
+					mkmsg.textContent = 'Creating event…';
+					api('/photos/events/create', { method:'POST', body: JSON.stringify({
+						title: title, date: date.value,
+						start: mkfrom.value || '18:00',
+						end: mkto.value || '22:00'
+					}) }).then(function(ev){
+						name.value = ev.title || title;
+						evid.value = String(ev.id || '');
+						mkmsg.textContent = ev.created === false ? 'Matched an existing calendar event.' : 'Created and selected.';
+						load('');
+						syncFlyerCreate();
+					}).catch(function(e){
+						mkmsg.textContent = e.message;
+						syncFlyerCreate();
+					});
+				});
+			}
+			syncFlyerCreate();
 			load('');
 		});
 	}
