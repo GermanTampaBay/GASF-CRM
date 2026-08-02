@@ -90,6 +90,13 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / "faces.db"
 
+# A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
+# which answers the default python-requests agent — and anything with "scanner"
+# in it — with a 406 before WordPress ever sees the request. This UA gets
+# through, and it is what --check must send too, or the doctor reports a healthy
+# server as broken (or a broken one as fine).
+USER_AGENT = "Mozilla/5.0 (compatible; GASF-CRM-FaceClient/1.1; +https://germantampabay.com)"
+
 # How close two faces must be to count as the same person, measured as a
 # distance where LOWER is more alike. The number lives on the backend because
 # the two engines do not share a scale: dlib's euclidean 0.5 and insightface's
@@ -158,7 +165,8 @@ class Api:
         self.base = base + "/wp-json/gasf/v1/crm/photos/faces"
         self.s = requests.Session()
         self.s.headers["Authorization"] = "Bearer " + key
-        self.s.headers["User-Agent"] = "gasf-face-scanner/1.1"
+        self.s.headers["User-Agent"] = USER_AGENT
+        self.s.headers["Accept"] = "application/json"
 
     def get(self, path, **params):
         r = self.s.get(self.base + path, params=params, timeout=60)
@@ -724,12 +732,21 @@ def check(cfg):
         try:
             r = requests.get(
                 url + "/wp-json/gasf/v1/crm/photos/faces/queue",
-                headers={"Authorization": "Bearer " + key}, params={"limit": 1}, timeout=30,
+                headers={
+                    "Authorization": "Bearer " + key,
+                    "User-Agent": USER_AGENT,
+                    "Accept": "application/json",
+                },
+                params={"limit": 1}, timeout=30,
             )
             if r.status_code == 403:
                 line(False, "server accepts the key", "403 — issue a new key in wp-admin and update the config")
             elif r.status_code == 200:
                 line(True, "server accepts the key", f"{r.json().get('remaining', 0)} photo(s) waiting")
+            elif r.status_code == 406:
+                line(False, "server accepts the key",
+                     "406 — the host's WAF (Bluehost mod_security) blocked the request before WordPress saw it; "
+                     "a User-Agent problem, not the key")
             else:
                 line(False, "server accepts the key", f"HTTP {r.status_code}")
         except Exception as e:
