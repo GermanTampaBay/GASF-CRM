@@ -111,12 +111,11 @@ function gasf_crm_render_app() {
 	if ( 'anonymous' === $status ) {
 		gasf_crm_render_signin();
 	} elseif ( 'approved' === $status ) {
-		gasf_crm_render_inboxcolumn}
-	.pbig img{max-height:52vh}
-	.actions{flex-wrap:wrap}
-}
-</style>
-	<?php
+		gasf_crm_render_inbox();
+	} else {
+		gasf_crm_render_pending( $status );
+	}
+	echo '</body></html>';
 }
 
 function gasf_crm_render_signin() {
