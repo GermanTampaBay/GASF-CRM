@@ -1,4 +1,8 @@
 {
   "url": "https://germantampabay.com",
-  "key": "gasf_face_paste_the_key_from_wp_admin_here"
+  "key": "gasf_face_paste_the_key_from_wp_admin_here",
+
+  "_comment": "engine and tolerance are optional. Delete these three lines and the two below to accept the defaults.",
+  "engine": "auto",
+  "tolerance": null
 }

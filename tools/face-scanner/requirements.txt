@@ -1,0 +1,17 @@
+# Core — what scan.py itself imports. Enough to run --selftest anywhere.
+requests>=2.28
+numpy>=1.24
+
+# --------------------------------------------------------------------------
+# A recognition backend is also needed to actually scan (not for --selftest).
+# Pick ONE and install it separately; they are not listed here because each is
+# large and only one is used.
+#
+#   Production (recommended). Installs as plain wheels — no compiler — on
+#   Python 3.13/3.14, which dlib does not:
+#       pip install insightface onnxruntime
+#
+#   Alternative, only if this machine already has dlib working:
+#       pip install face_recognition
+#
+# After installing a backend:  python scan.py --check

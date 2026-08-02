@@ -138,22 +138,36 @@ tag:** it is stored outside `gasf_photo_person`, so it is structurally incapable
 of reaching the grid, search, sidecars or zip filenames. Only a volunteer's
 click writes a name. Two tests pin that negative.
 
-**Still to build:** `tools/face-scanner/scan.py` exists but assumes
-`face_recognition`/dlib, which has **no wheel for Python 3.14** on the target
-Windows machine. The remaining work:
+**Built (client, on the target Windows machine):** the original
+`tools/face-scanner/scan.py` assumed `face_recognition`/dlib, which has **no
+wheel for Python 3.14**. Resolved by proving `insightface` installs as a plain
+binary wheel on 3.14 (buffalo_l / ArcFace, 512-d, CPU) — verified end to end on
+the box. The client now has:
 
-1. A backend abstraction so either `insightface` (onnxruntime, pip wheels — the
-   likely winner; `onnxruntime`, `numpy`, `PIL`, `requests` are already
-   installed there) or `face_recognition` can drive it, with the engine name
-   recorded so switching backends does not silently compare incompatible
-   vectors.
-2. A `--check` doctor: Python version, backend present, config valid, server
-   reachable, key accepted.
-3. A `--selftest` exercising config/DB/API without the ML, runnable anywhere.
-4. `README.md`, `requirements.txt`, and a Windows scheduled-task helper.
-5. Tolerance tuning against real club faces. Current default is deliberately
-   strict: a missed suggestion costs one typed name; a confident wrong one puts
-   a member's name on a stranger's face in the archive.
+1. A **backend abstraction** — `insightface` (production) or `face_recognition`
+   (dlib, kept for machines that have it) behind one interface. Every reference
+   vector in `faces.db` is stamped with its engine and only ever compared within
+   that engine; watermarks are per-engine; a pre-engine DB migrates to the dlib
+   stamp. Switching engines just relearns — it cannot misread the other's
+   numbers. ML is lazily imported so `--status`/`--selftest` need no backend.
+2. A `--check` **doctor**: Python, backend actually loads, config, DB writable,
+   server accepts the key.
+3. A `--selftest` (12 assertions over confidence/identify/box-packing/DB, no ML,
+   no network — CI-able).
+4. `README.md`, `requirements.txt`, updated `config.example.json` (documents
+   `engine`/`tolerance`), and `run.ps1` + `install-task.ps1` (logon-only Windows
+   Scheduled Task, logs to gitignored `scan.log`). PS files are **ASCII-only** —
+   PS 5.1 reads `.ps1` as cp1252 and a Unicode dash breaks parsing.
+
+**Still open on the client:**
+- **Tolerance tuning against real club faces** — now a config knob
+  (`tolerance` / `GASF_FACE_TOLERANCE`), left strict by default: a missed
+  suggestion costs one typed name; a confident wrong one puts a member's name on
+  a stranger's face in the archive.
+- The `face_recognition`/dlib path is written but **unverified** (dlib not
+  installed on 3.14); insightface is the path that is proven.
+- Registering the Scheduled Task needs the user's own session (may need
+  elevation); it could not be exercised in the build environment.
 
 **Not settled, and not an engineering decision:** whether the club wants a face
 matcher pointed at its members, including the children at Nikolaustag. The

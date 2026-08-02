@@ -2,3 +2,10 @@
 # the whole point of this design is that the vectors exist on one machine.
 faces.db
 config.json
+
+# The run log written by run.ps1 / the Scheduled Task. Local noise.
+scan.log
+
+# Python build artifacts.
+__pycache__/
+*.pyc
