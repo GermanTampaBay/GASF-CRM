@@ -1338,7 +1338,7 @@ function gasf_crm_render_inbox() {
 <div class="wrap" id="uploadview" hidden data-stream="photos">
 	<div class="card pad libhead">
 		<h2 style="margin:0 0 4px">Add photos</h2>
-		<p class="muted" style="margin:0">Drag a whole event in at once. Name the event below and the date fills itself in from the club calendar; every photo in the batch gets the day, the event and the place &mdash; then tag who is in them afterwards, in the photo library.</p>
+		<p class="muted" style="margin:0">Drag a whole event in at once. Name the event below and the date fills itself in from the club calendar; every photo in the batch gets the day, the event, and the place &mdash; then tag who is in them afterwards, in the photo library.</p>
 	</div>
 
 	<div class="card pad">
@@ -1361,8 +1361,16 @@ function gasf_crm_render_inbox() {
 				<span class="pwrap"><input type="text" id="upevent" autocomplete="off" spellcheck="false" placeholder="Type part of the name"></span>
 			</label>
 		</div>
+		<label class="cbox" style="margin-top:8px"><input type="checkbox" id="upflyer"> <span>This batch is flyers or ads, and not candid/event photos.</span></label>
 		<input type="hidden" id="upeventid" value="">
 		<p class="evnote" id="upevmsg" hidden></p>
+		<div class="pflyevt" id="upflyevt" hidden>
+			<span class="pflyevt-lead">Flyer, and no matching event yet?</span>
+			<label>Start <input type="time" id="upflystart" value="18:00"></label>
+			<label>End <input type="time" id="upflyend" value="22:00"></label>
+			<button type="button" class="btn sec" id="upflymkevent">Create event</button>
+			<span class="p-flymsg muted" id="upflymsg"></span>
+		</div>
 		<p class="muted" style="margin:10px 0 0">A photo that carries its own date from the camera keeps it &mdash; the date here fills in the ones that do not.</p>
 	</div>
 
@@ -2893,7 +2901,7 @@ function gasf_crm_render_inbox() {
 	 * thing to have photographed, and a picker that refuses to accept one is a
 	 * picker people route around.
 	 */
-	var upSeq = 0, upTimer = null;
+	var upSeq = 0, upTimer = null, upCalOn = true;
 
 	function upEvSay(msg, kind){
 		var el = upEl('upevmsg');
@@ -2919,7 +2927,51 @@ function gasf_crm_render_inbox() {
 			upEvSay('');
 		}
 		upEvClose();
+		upFlySync();
 		upEl('upevent').focus();
+	}
+
+	function upFlySync(){
+		var box = upEl('upflyevt');
+		var on  = !!(upEl('upflyer') && upEl('upflyer').checked);
+		var t   = (upEl('upevent').value || '').trim();
+		var id  = upEventId();
+		var msg = upEl('upflymsg');
+		var mk  = upEl('upflymkevent');
+		var hasDate = !!(upEl('update') && upEl('update').value);
+		var show = on && !!t && !id && upCalOn;
+		if (box) { box.hidden = !show; }
+		if (!show) {
+			if (msg) { msg.textContent = ''; }
+			return;
+		}
+		if (mk) { mk.disabled = !hasDate; }
+		if (msg && !hasDate) { msg.textContent = 'Set the event date first.'; }
+		else if (msg && msg.textContent === 'Set the event date first.') { msg.textContent = ''; }
+	}
+
+	function upFlyCreateEvent(){
+		var title = (upEl('upevent').value || '').trim();
+		var date  = upEl('update').value;
+		var start = upEl('upflystart').value || '18:00';
+		var end   = upEl('upflyend').value || '22:00';
+		var msg   = upEl('upflymsg');
+		var btn   = upEl('upflymkevent');
+		if (!title) { msg.textContent = 'Type the event title first.'; return; }
+		if (!date)  { msg.textContent = 'Set the event date first.'; return; }
+		btn.disabled = true;
+		msg.textContent = 'Creating event…';
+		api('/photos/events/create', { method: 'POST', body: JSON.stringify({
+			title: title, date: date, start: start, end: end
+		}) }).then(function(ev){
+			upEl('upevent').value = ev.title || title;
+			upEl('upeventid').value = String(ev.id || '');
+			msg.textContent = ev.created === false ? 'Matched an existing calendar event.' : 'Created and selected.';
+			upFlySync();
+		}).catch(function(e){
+			msg.textContent = e.message;
+			upFlySync();
+		});
 	}
 
 	function upEvPaint(list, q){
@@ -2956,6 +3008,7 @@ function gasf_crm_render_inbox() {
 
 		// Typing a name by hand means it is no longer one of the calendar's.
 		upEl('upeventid').value = '';
+		upFlySync();
 
 		// Nothing typed: offer whatever is on the chosen day, if there is one.
 		var url = q.length >= 2
@@ -2969,10 +3022,16 @@ function gasf_crm_render_inbox() {
 			// Ignore a reply overtaken by a newer one — typing fires several and
 			// they do not always land in order.
 			if (mine !== upSeq) { return; }
-			if (!r.calendar) { upEvSay(''); return; }
+			if (!r.calendar) { upCalOn = false; upEvSay(''); upFlySync(); return; }
+			upCalOn = true;
 			upEvPaint((r.events || []), q.length >= 2 ? q : '');
+			upFlySync();
 		}).catch(function(){
-			if (mine === upSeq) { upEvSay('Could not reach the calendar — the event will be saved as typed.'); }
+			if (mine === upSeq) {
+				upCalOn = false;
+				upEvSay('Could not reach the calendar — the event will be saved as typed.');
+				upFlySync();
+			}
 		});
 	}
 
@@ -3057,6 +3116,7 @@ function gasf_crm_render_inbox() {
 		fd.append('place', upEl('upplace').value);
 		fd.append('event', upEl('upevent').value);
 		fd.append('event_id', String(upEventId()));
+		fd.append('flyer', upEl('upflyer').checked ? '1' : '0');
 
 		return new Promise(function(resolve, reject){
 			var xhr = new XMLHttpRequest();
@@ -3220,13 +3280,18 @@ function gasf_crm_render_inbox() {
 			var going = upQueue.filter(function(u){ return u.xhr; })[0];
 			if (going) { going.xhr.abort(); }
 		};
-		upEl('update').onchange = function(){ if (!upEl('upevent').value.trim()) { upEvSearch(); } };
+		upEl('update').onchange = function(){ if (!upEl('upevent').value.trim()) { upEvSearch(); } upFlySync(); };
 
 		var evbox = upEl('upevent');
-		evbox.oninput = function(){ clearTimeout(upTimer); upTimer = setTimeout(upEvSearch, 220); };
-		evbox.onfocus = function(){ if (!evbox.value.trim()) { upEvSearch(); } };
+		evbox.oninput = function(){ clearTimeout(upTimer); upTimer = setTimeout(upEvSearch, 220); upFlySync(); };
+		evbox.onfocus = function(){ if (!evbox.value.trim()) { upEvSearch(); } upFlySync(); };
 		// A moment, so a click on a suggestion lands before the list goes.
 		evbox.onblur  = function(){ setTimeout(upEvClose, 150); };
+		var fly = upEl('upflyer');
+		if (fly) { fly.onchange = upFlySync; }
+		var mk = upEl('upflymkevent');
+		if (mk) { mk.onclick = upFlyCreateEvent; }
+		upFlySync();
 
 		// Leaving mid-upload loses the rest of the batch, so say so.
 		window.addEventListener('beforeunload', function(e){

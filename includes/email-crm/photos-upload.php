@@ -532,6 +532,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 	$place = trim( (string) ( $in['place'] ?? '' ) );
 	if ( '' === $place && $own_place && ! is_wp_error( $own_place ) ) { $place = $own_place->name; }
+	$flyer = in_array( strtolower( trim( (string) ( $in['flyer'] ?? '' ) ) ), array( '1', 'true', 'yes', 'on' ), true );
 
 	$people = array_values( array_filter( array_map(
 		'strval', (array) ( $in['people'] ?? array() )
@@ -588,6 +589,8 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			}
 		}
 		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
+		if ( $flyer ) { update_post_meta( $id, '_gasf_photo_flyer', 1 ); }
+		else { delete_post_meta( $id, '_gasf_photo_flyer' ); }
 		update_post_meta( $id, '_gasf_photo_guest', array(
 			'event'    => $event,
 			// Which calendar entry they picked, if they picked one. The volunteer
@@ -646,6 +649,8 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			}
 		}
 		if ( '' !== $taken ) { update_post_meta( $id, '_gasf_photo_taken', $taken ); }
+		if ( $flyer ) { update_post_meta( $id, '_gasf_photo_flyer', 1 ); }
+		else { delete_post_meta( $id, '_gasf_photo_flyer' ); }
 		if ( '' !== $caption ) {
 			wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
 		}
@@ -656,6 +661,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			'event'    => $event,
 			'event_id' => (int) ( $in['event_id'] ?? 0 ),
 			'taken'    => $taken,
+			'flyer'    => $flyer,
 			'caption'  => $caption,
 		) );
 		// A tagging failure here is recoverable by editing the photo, and the
@@ -713,6 +719,7 @@ add_action( 'rest_api_init', function () {
 				'place'    => (string) $req->get_param( 'place' ),
 				'event'    => (string) $req->get_param( 'event' ),
 				'event_id' => (int) $req->get_param( 'event_id' ),
+				'flyer'    => (string) $req->get_param( 'flyer' ),
 				'note'     => (string) $req->get_param( 'note' ),
 			) );
 
