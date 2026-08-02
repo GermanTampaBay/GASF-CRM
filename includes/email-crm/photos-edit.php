@@ -2,7 +2,7 @@
 /**
  * Image editing — includes/email-crm/photos-edit.php
  *
- * Crop, brightness, contrast. Deliberately nothing else: this exists so a
+ * Crop, rotate, brightness, contrast. Deliberately nothing else: this exists so a
  * volunteer can straighten up a usable photo for the newsletter without a trip
  * through wp-admin they are not allowed to make, not to be a darkroom.
  *
@@ -44,11 +44,13 @@ function gasf_crm_photo_edit_sidecar( $path ) {
  * refused: a crop to nothing is always a slipped finger, and applying it
  * would "succeed" into a 3-pixel photo.
  *
- * @return array|WP_Error {crop:{x,y,w,h}|null, b:int, c:int, identity:bool}
+ * @return array|WP_Error {crop:{x,y,w,h}|null, rot:int, b:int, c:int, identity:bool}
  */
 function gasf_crm_photo_edit_params( $in ) {
 	$b = max( -100, min( 100, (int) ( $in['brightness'] ?? 0 ) ) );
 	$c = max( -100, min( 100, (int) ( $in['contrast'] ?? 0 ) ) );
+	$rot = ( (int) ( $in['rotate'] ?? 0 ) % 360 + 360 ) % 360;
+	$rot = in_array( $rot, array( 0, 90, 180, 270 ), true ) ? $rot : 0;
 
 	$crop = null;
 	if ( is_array( $in['crop'] ?? null ) ) {
@@ -68,9 +70,10 @@ function gasf_crm_photo_edit_params( $in ) {
 
 	return array(
 		'crop'     => $crop,
+		'rot'      => $rot,
 		'b'        => $b,
 		'c'        => $c,
-		'identity' => ( null === $crop && 0 === $b && 0 === $c ),
+		'identity' => ( null === $crop && 0 === $rot && 0 === $b && 0 === $c ),
 	);
 }
 
@@ -116,6 +119,10 @@ function gasf_crm_photo_edit_render( $id, array $p ) {
 			);
 			// A cropped JPEG keeps its canvas geometry unless told otherwise;
 			// without this, some readers show the crop floating on the old page.
+			$im->setImagePage( 0, 0, 0, 0 );
+		}
+		if ( $p['rot'] ) {
+			$im->rotateImage( new ImagickPixel( 'none' ), (float) $p['rot'] );
 			$im->setImagePage( 0, 0, 0, 0 );
 		}
 
@@ -239,14 +246,15 @@ add_action( 'rest_api_init', function () {
 
 			update_post_meta( $id, '_gasf_photo_edit', array(
 				'crop' => $p['crop'],
+				'rot'  => $p['rot'],
 				'b'    => $p['b'],
 				'c'    => $p['c'],
 				'at'   => current_time( 'mysql', true ),
 				'by'   => get_current_user_id(),
 			) );
 
-			gasf_crm_log( sprintf( 'CRM photos: media #%d edited (%s b=%+d c=%+d) by %s', $id,
-				$p['crop'] ? 'cropped' : 'full frame', $p['b'], $p['c'],
+			gasf_crm_log( sprintf( 'CRM photos: media #%d edited (%s rot=%d b=%+d c=%+d) by %s', $id,
+				$p['crop'] ? 'cropped' : 'full frame', $p['rot'], $p['b'], $p['c'],
 				gasf_crm_display_name( get_current_user_id() ) ) );
 			gasf_crm_log_event( 0, 'photo_edit', 'media #' . $id . ' image adjusted' );
 

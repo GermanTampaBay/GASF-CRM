@@ -519,6 +519,9 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .ieslide>span{flex:0 0 88px;font:700 10px/1.4 var(--slug);text-transform:uppercase;letter-spacing:.13em;color:var(--gasf-muted)}
 .ieslide input[type=range]{flex:1 1 auto;accent-color:var(--s-accent)}
 .ieslide b{flex:0 0 34px;text-align:right;font:700 12px/1 var(--slug)}
+.ierow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 10px}
+.ierow .ietxt{font:700 10px/1.4 var(--slug);text-transform:uppercase;letter-spacing:.13em;color:var(--gasf-muted)}
+.ierow .ierotv{font:700 12px/1 var(--slug);min-width:44px;text-align:right}
 @media(max-width:640px){.lf input,.lf select,.lf input[type=search]{min-width:0;width:100%}.lf{flex:1 1 100%}}
 
 .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;padding:10px}
@@ -4269,7 +4272,7 @@ function gasf_crm_render_inbox() {
 
 	/* ===================== the image editor =====================
 	 *
-	 * Crop, brightness, contrast — and that is the whole tool. The volunteer
+	 * Crop, rotate, brightness, contrast — and that is the whole tool. The volunteer
 	 * drags a box and two sliders; only the NUMBERS go to the server, which
 	 * renders them onto the kept original. Nothing pixel-shaped is uploaded,
 	 * so a phone is not pushing a canvas export back up its slow link, and
@@ -4291,6 +4294,10 @@ function gasf_crm_render_inbox() {
 					'<span class="ch" data-h="sw"></span><span class="ch" data-h="se"></span>' +
 				'</div>' +
 			'</div></div>' +
+			'<div class="ierow"><span class="ietxt">Rotate</span>' +
+				'<button class="btn sec" id="ierotl" type="button" aria-label="Rotate left">↺ 90°</button>' +
+				'<button class="btn sec" id="ierotr" type="button" aria-label="Rotate right">↻ 90°</button>' +
+				'<b class="ierotv" id="ierotv">0°</b></div>' +
 			'<label class="ieslide"><span>Brightness</span><input type="range" id="iebri" min="-100" max="100" value="0"><b id="iebriv">0</b></label>' +
 			'<label class="ieslide"><span>Contrast</span><input type="range" id="iecon" min="-100" max="100" value="0"><b id="ieconv">0</b></label>' +
 			'<div class="actions" style="margin-top:12px">' +
@@ -4307,6 +4314,7 @@ function gasf_crm_render_inbox() {
 		var img  = document.getElementById('ieimg');
 		var crop = document.getElementById('iecrop');
 		var st   = { x: 0, y: 0, w: 0, h: 0 };   // css px within the displayed image
+		var rot  = 0;
 
 		function paint(){
 			crop.style.left   = st.x + 'px';
@@ -4365,6 +4373,13 @@ function gasf_crm_render_inbox() {
 		edit.querySelector('.iewrap').addEventListener('pointerup', function(){ drag = null; });
 
 		var bri = document.getElementById('iebri'), con = document.getElementById('iecon');
+		var rotv = document.getElementById('ierotv');
+		function rotset(v){
+			rot = ((v % 360) + 360) % 360;
+			rotv.textContent = rot + '\u00B0';
+		}
+		document.getElementById('ierotl').onclick = function(){ rotset(rot - 90); };
+		document.getElementById('ierotr').onclick = function(){ rotset(rot + 90); };
 		function tune(){
 			document.getElementById('iebriv').textContent = bri.value;
 			document.getElementById('ieconv').textContent = con.value;
@@ -4392,6 +4407,7 @@ function gasf_crm_render_inbox() {
 			api('/photos/edit-image', { method: 'POST', body: JSON.stringify({
 				id: p.id, revision: p.revision,
 				crop: { x: st.x / W, y: st.y / H, w: st.w / W, h: st.h / H },
+				rotate: rot,
 				brightness: parseInt(bri.value, 10),
 				contrast:   parseInt(con.value, 10)
 			}) }).then(done).catch(function(e){ document.getElementById('ieapply').disabled = false; fail(e); });
