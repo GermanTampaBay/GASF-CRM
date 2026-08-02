@@ -429,6 +429,8 @@ function gasf_crm_faces_admin_section() {
 	}
 
 	echo '<p class="description" style="max-width:820px;margin-top:10px">The scanner script lives in the repository at '
-		. '<code>tools/face-scanner/scan.py</code>. It needs the key above, the site URL, and Python with '
-		. '<code>face_recognition</code> installed. Run it whenever you like &mdash; it picks up where it left off.</p>';
+		. '<code>tools/face-scanner/scan.py</code>. It needs the key above, the site URL, and Python with the '
+		. '<code>insightface</code> backend installed (<code>pip install insightface onnxruntime</code>). Run '
+		. '<code>python scan.py --check</code> to confirm it is wired up, then run it whenever you like &mdash; '
+		. 'it picks up where it left off. See <code>tools/face-scanner/README.md</code> for setup.</p>';
 }
