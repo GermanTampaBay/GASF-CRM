@@ -2816,8 +2816,7 @@ function gasf_crm_render_inbox() {
 	 *
 	 * This used to be a datalist that only filled once a date was set, which had
 	 * it backwards: somebody uploading an evening's photos remembers the match
-	 * they watched, not the Tuesday it fell on. Now typing enough of a name to
-	 * land on exactly one event sets the day from the calendar.
+	 * they watched, not the Tuesday it fell on.
 	 *
 	 * Free text still works. An event the calendar never knew about is a real
 	 * thing to have photographed, and a picker that refuses to accept one is a
@@ -2839,7 +2838,7 @@ function gasf_crm_render_inbox() {
 
 	// Adopt an event wholesale: its title, its id, and — the point of all this —
 	// its date.
-	function upEvChoose(ev, quiet){
+	function upEvChoose(ev){
 		upEl('upevent').value = ev.title;
 		upEl('upeventid').value = ev.id;
 		if (ev.date) {
@@ -2849,7 +2848,7 @@ function gasf_crm_render_inbox() {
 			upEvSay('');
 		}
 		upEvClose();
-		if (!quiet) { upEl('upevent').focus(); }
+		upEl('upevent').focus();
 	}
 
 	function upEvPaint(list, q){
@@ -2859,14 +2858,9 @@ function gasf_crm_render_inbox() {
 			return;
 		}
 
-		/*
-		 * Exactly one match is the whole feature: that is an unambiguous answer,
-		 * so take it. Several is a question only the person uploading can settle,
-		 * and guessing at one of three would be worse than asking.
-		 */
-		if (list.length === 1 && q) { upEvChoose(list[0], true); return; }
-
-		upEvSay(list.length + ' events match — pick one to set the date.');
+		upEvSay(list.length === 1
+			? '1 event matches — click it to set the date.'
+			: (list.length + ' events match — pick one to set the date.'));
 
 		var d = document.createElement('div');
 		d.className = 'psug';
