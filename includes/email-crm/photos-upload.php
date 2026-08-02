@@ -71,6 +71,62 @@ function gasf_crm_upload_convert_ok() {
 	return $ok;
 }
 
+/**
+ * Finish heavy derivative generation outside the upload request.
+ *
+ * The upload call now stores the original quickly, and this worker generates
+ * WordPress's resized derivatives afterwards.
+ */
+function gasf_crm_photo_upload_build_derivatives( $attachment_id ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || 'attachment' !== get_post_type( $id ) ) { return; }
+
+	$path = (string) get_attached_file( $id );
+	if ( '' === $path || ! is_file( $path ) ) { return; }
+	if ( preg_match( '~\.(mp4|m4v|mov)$~i', $path ) ) { return; }
+
+	$have = (array) wp_get_attachment_metadata( $id );
+	if ( ! empty( $have['sizes'] ) ) { return; }
+
+	require_once ABSPATH . 'wp-admin/includes/image.php';
+	$meta = wp_generate_attachment_metadata( $id, $path );
+	if ( ! is_array( $meta ) || empty( $meta ) ) {
+		gasf_crm_log( sprintf( 'CRM upload: media #%d derivative generation returned no metadata', $id ) );
+		return;
+	}
+
+	// If the photo is already public, scrub newly-made derivatives now as well.
+	if ( ! gasf_crm_photo_is_private( $id ) && ! empty( $meta['sizes'] ) ) {
+		$base = trailingslashit( dirname( $path ) );
+		foreach ( (array) $meta['sizes'] as $k => $s ) {
+			$f = $base . (string) ( $s['file'] ?? '' );
+			if ( ! is_file( $f ) ) {
+				unset( $meta['sizes'][ $k ] );
+				continue;
+			}
+			$clean = gasf_crm_photo_scrub( $f );
+			if ( is_wp_error( $clean ) ) {
+				gasf_crm_log( sprintf( 'CRM upload: media #%d derivative %s removed after scrub failure: %s',
+					$id, basename( $f ), $clean->get_error_message() ) );
+				@unlink( $f ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				unset( $meta['sizes'][ $k ] );
+			}
+		}
+	}
+
+	wp_update_attachment_metadata( $id, $meta );
+	gasf_crm_log( sprintf( 'CRM upload: media #%d derivatives built in background (%d size(s))',
+		$id, count( (array) ( $meta['sizes'] ?? array() ) ) ) );
+}
+add_action( 'gasf_crm_photo_upload_derivatives_event', 'gasf_crm_photo_upload_build_derivatives' );
+
+function gasf_crm_photo_upload_schedule_derivatives( $attachment_id ) {
+	$id = (int) $attachment_id;
+	if ( ! $id ) { return; }
+	wp_schedule_single_event( time() + 2, 'gasf_crm_photo_upload_derivatives_event', array( $id ) );
+	if ( function_exists( 'spawn_cron' ) ) { spawn_cron(); }
+}
+
 /*
  * A minute of phone video, near enough.
  *
@@ -399,10 +455,26 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	add_filter( 'upload_dir', $to_review, 99 );
 	add_filter( 'wp_insert_attachment_data', $hide, 99 );
 	add_action( 'add_attachment', $stamp, 1 );
+	/*
+	 * Derivatives are generated in background after this request returns.
+	 *
+	 * That keeps the upload endpoint responsive instead of making each request
+	 * block on all registered image sizes.
+	 */
+	$defer_sizes = static function ( $threshold, $imagesize, $file, $attachment_id ) { return false; };
+	$no_sizes    = static function ( $sizes, $metadata ) { return array(); };
+	if ( ! $isVideo ) {
+		add_filter( 'big_image_size_threshold', $defer_sizes, 99 );
+		add_filter( 'intermediate_image_sizes_advanced', $no_sizes, 99 );
+	}
 	// EXIF is read on the way in by the catalogue module's add_attachment hook,
 	// which is what puts the date, the time and the geofence guess on the photo
 	// before the scrub below takes them out of the file.
 	$id = media_handle_upload( 'file', 0, array(), array( 'test_form' => false ) );
+	if ( ! $isVideo ) {
+		remove_filter( 'intermediate_image_sizes_advanced', $no_sizes, 99 );
+		remove_filter( 'big_image_size_threshold', $defer_sizes, 99 );
+	}
 	remove_action( 'add_attachment', $stamp, 1 );
 	remove_filter( 'wp_insert_attachment_data', $hide, 99 );
 	remove_filter( 'upload_dir', $to_review, 99 );
@@ -609,6 +681,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 		gasf_crm_log( sprintf( 'CRM upload: media #%d held for a volunteer (%s)', $id,
 			'' !== $meta['event'] ? 'said to be ' . $meta['event'] : 'no occasion given' ) );
+		if ( ! $isVideo ) { gasf_crm_photo_upload_schedule_derivatives( $id ); }
 
 		return array( 'id' => $id, 'held' => true, 'name' => $name );
 	}
@@ -671,6 +744,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 	gasf_crm_log( sprintf( 'CRM upload: media #%d (%s) added by %s',
 		$id, $name, gasf_crm_display_name( get_current_user_id() ) ) );
+	if ( ! $isVideo ) { gasf_crm_photo_upload_schedule_derivatives( $id ); }
 
 	return gasf_crm_photo_library_card( $id );
 }

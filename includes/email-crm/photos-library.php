@@ -557,6 +557,45 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	return gasf_crm_photo_library_card( $id );
 }
 
+/**
+ * Delete a photo from the library with the same stale-screen guard as edits.
+ *
+ * @return array|WP_Error
+ */
+function gasf_crm_photo_library_delete( $attachment_id, $revision = null ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+		return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+	}
+	if ( ! gasf_crm_user_can_stream( 'photos' ) ) {
+		return new WP_Error( 'gasf_crm_403', 'You do not have access to the photo library.', array( 'status' => 403 ) );
+	}
+	if ( ! gasf_crm_photo_in_library( $id ) ) {
+		return new WP_Error(
+			'gasf_crm_403',
+			'That is not a photo in the club collection, so it cannot be deleted here.',
+			array( 'status' => 403 )
+		);
+	}
+
+	$have = gasf_crm_photo_revision( $id );
+	$want = $revision;
+	if ( null !== $want && '' !== $want && (int) $want !== $have ) {
+		return new WP_Error( 'gasf_crm_stale', 'Somebody else has edited this photo since you opened it. Reload to see their version.', array( 'status' => 409 ) );
+	}
+	if ( ! update_post_meta( $id, '_gasf_photo_rev', $have + 1, $have ) ) {
+		return new WP_Error( 'gasf_crm_stale', 'Somebody else was editing this at the same moment. Reload to see where it got to.', array( 'status' => 409 ) );
+	}
+
+	$name = gasf_crm_photo_display_title( $id );
+	if ( ! wp_delete_attachment( $id, true ) ) {
+		return new WP_Error( 'gasf_crm_delete', 'Could not delete that photo from the library.', array( 'status' => 500 ) );
+	}
+
+	gasf_crm_log_event( 0, 'photo_deleted', 'media #' . $id . ' deleted from the library by user ' . get_current_user_id() );
+	return array( 'ok' => true, 'id' => $id, 'title' => $name );
+}
+
 /* =====================================================================
  * Bulk download
  * ================================================================== */
@@ -1194,6 +1233,17 @@ add_action( 'rest_api_init', function () {
 				'flyer'    => $req->get_param( 'flyer' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/delete', array(
+		'methods'             => 'POST',
+		'permission_callback' => $lib_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			return gasf_crm_photo_library_delete(
+				(int) $req->get_param( 'photo' ),
+				$req->get_param( 'revision' )
+			);
 		},
 	) );
 

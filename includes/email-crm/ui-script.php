@@ -217,7 +217,8 @@ function gasf_crm_render_inbox_script() {
 				html += '<h3 class="mailhead">The email it arrived with</h3>';
 			}
 
-			t.messages.forEach(function(m){
+			// Newest first in the visible thread, so the latest reply is at the top.
+			(t.messages || []).slice().reverse().forEach(function(m){
 				// A cloud link or an attached email has nothing to download, so it
 				// is labelled rather than dressed up as a file — clicking still
 				// explains why, but the chip says it first.
@@ -1480,10 +1481,11 @@ function gasf_crm_render_inbox_script() {
 	 * whole evening's, and gives the person watching a line per file rather than
 	 * a spinner that might mean anything.
 	 *
-	 * Sequential rather than parallel on purpose: these are phone photos over a
-	 * club's broadband, and six at once is how a browser starts timing them out.
+	 * Parallel, but capped: two at once cuts batch wall-clock time heavily
+	 * without kicking the uplink hard enough to make every request flaky.
 	 */
 	var upQueue = [], upBusy = false, upStop = false;
+	var upConcurrency = 2, upRetryMax = 2;
 
 	function upEl(id){ return document.getElementById(id); }
 
@@ -1580,6 +1582,10 @@ function gasf_crm_render_inbox_script() {
 		return m + ' minute' + (m === 1 ? '' : 's') + ' left';
 	}
 
+	function upSleep(ms){
+		return new Promise(function(resolve){ setTimeout(resolve, ms); });
+	}
+
 	function upPaint(){
 		var box = upEl('uplist');
 		box.innerHTML = upQueue.map(function(u, i){
@@ -1614,6 +1620,7 @@ function gasf_crm_render_inbox_script() {
 
 		var pending = upQueue.filter(function(u){ return u.state === 'waiting'; }).length;
 		var done    = upQueue.filter(function(u){ return u.state === 'done'; }).length;
+		var active  = upQueue.filter(function(u){ return u.state === 'going' || u.state === 'sending'; }).length;
 
 		upEl('upgo').disabled = upBusy || !pending;
 		upEl('upgo').textContent = pending ? 'Upload ' + pending + ' file' + (pending === 1 ? '' : 's') : 'Upload';
@@ -1623,7 +1630,7 @@ function gasf_crm_render_inbox_script() {
 		// Where the batch as a whole has got to, which is the number somebody
 		// glancing over actually wants.
 		if (upBusy) {
-			upEl('upstatus').textContent = (done + 1) + ' of ' + upQueue.length + '…';
+			upEl('upstatus').textContent = done + ' of ' + upQueue.length + ' done' + (active ? ' — ' + active + ' in flight…' : '…');
 		}
 	}
 
@@ -1644,6 +1651,14 @@ function gasf_crm_render_inbox_script() {
 			xhr.open('POST', API + '/photos/upload', true);
 			xhr.setRequestHeader('X-WP-Nonce', NONCE);
 			xhr.withCredentials = true;
+			xhr.timeout = 180000;
+
+			function rejectWith(msg, transient, status){
+				var e = new Error(msg);
+				e.transient = !!transient;
+				if (status) { e.status = status; }
+				reject(e);
+			}
 
 			xhr.upload.onprogress = function(e){
 				if (e.lengthComputable) { onProgress(e.loaded, e.total); }
@@ -1658,22 +1673,49 @@ function gasf_crm_render_inbox_script() {
 				try { b = JSON.parse(xhr.responseText); } catch (e) { /* see below */ }
 				if (b) {
 					if (xhr.status >= 200 && xhr.status < 300) { return resolve(b); }
-					return reject(new Error(b.message || ('Error ' + xhr.status)));
+					return rejectWith(
+						b.message || ('Error ' + xhr.status),
+						xhr.status >= 500 || xhr.status === 408 || xhr.status === 502 || xhr.status === 503 || xhr.status === 504 || xhr.status === 522 || xhr.status === 524,
+						xhr.status
+					);
 				}
 				// The server answered with something that is not JSON — an error
 				// page from a timeout, a gateway, or a firewall.
-				if (xhr.status === 413) { return reject(new Error('is too large for the server to accept.')); }
+				if (xhr.status === 413) { return rejectWith('is too large for the server to accept.', false, xhr.status); }
 				if (xhr.status === 408 || xhr.status === 504 || xhr.status === 524) {
-					return reject(new Error('took too long to process and the server gave up. Nothing was saved.'));
+					return rejectWith('took too long to process and the server gave up. Nothing was saved.', true, xhr.status);
 				}
-				reject(new Error('the server sent an error page instead of a result (HTTP ' + xhr.status + '). Nothing was saved.'));
+				rejectWith(
+					'the server sent an error page instead of a result (HTTP ' + xhr.status + '). Nothing was saved.',
+					xhr.status >= 500 || xhr.status === 502 || xhr.status === 503 || xhr.status === 522,
+					xhr.status
+				);
 			};
-			xhr.onerror   = function(){ reject(new Error('could not reach the server — the connection dropped.')); };
-			xhr.ontimeout = function(){ reject(new Error('timed out on the way up.')); };
-			xhr.onabort   = function(){ reject(new Error('was stopped.')); };
+			xhr.onerror   = function(){ rejectWith('could not reach the server — the connection dropped.', true); };
+			xhr.ontimeout = function(){ rejectWith('timed out on the way up.', true); };
+			xhr.onabort   = function(){ rejectWith('was stopped.', false); };
 
 			xhr.send(fd);
 		});
+	}
+
+	function upSendWithRetry(u, onProgress){
+		var tries = 0;
+		var run = function(){
+			tries++;
+			return upSend(u, onProgress).catch(function(e){
+				if (!e || !e.transient || tries > upRetryMax || upStop) { throw e; }
+				var wait = Math.min(8000, 1000 * Math.pow(2, tries - 1)) + Math.floor(Math.random() * 300);
+				u.state = 'going';
+				u.msg = 'Temporary server/network issue, retrying in ' + (wait / 1000).toFixed(1) + 's…';
+				upPaint();
+				return upSleep(wait).then(function(){
+					if (upStop) { throw new Error('was stopped.'); }
+					return run();
+				});
+			});
+		};
+		return run();
 	}
 
 	function upRun(){
@@ -1749,6 +1791,92 @@ function gasf_crm_render_inbox_script() {
 		next();
 	}
 
+	function upRunFast(){
+		if (upBusy) { return; }
+
+		if (!upEl('upconsent').checked) {
+			upEl('upstatus').textContent = 'Tick the permission box first.';
+			upEl('upconsent').focus();
+			return;
+		}
+		if (!upEl('upnote').value.trim()) {
+			upEl('upstatus').textContent = 'Say how permission was given.';
+			upEl('upnote').focus();
+			return;
+		}
+
+		upBusy = true;
+		upStop = false;
+		upEl('upstatus').textContent = '';
+		upPaint();
+
+		var added = 0, failed = 0, active = 0;
+
+		function hasWaiting(){
+			return upQueue.some(function(x){ return x.state === 'waiting'; });
+		}
+
+		function finish(){
+			upBusy = false;
+			upPaint();
+			var stopped = upStop && upQueue.some(function(x){ return x.state === 'waiting'; });
+			upEl('upstatus').textContent = added
+				? added + ' file' + (added === 1 ? '' : 's') + ' added' +
+				  (failed ? ', ' + failed + ' failed' : '') +
+				  (stopped ? ', the rest left in the list' : '') +
+				  '. Tag who is in them in the photo library.'
+				: (failed ? 'Nothing was added.' : (stopped ? 'Stopped. Nothing else was sent.' : ''));
+			if (added) { loadLib(); }
+		}
+
+		function pump(){
+			if ((upStop || !hasWaiting()) && active === 0) {
+				finish();
+				return;
+			}
+			while (!upStop && active < upConcurrency) {
+				var u = upQueue.filter(function(x){ return x.state === 'waiting'; })[0];
+				if (!u) { break; }
+				active++;
+				u.state = 'going';
+				u.msg = '';
+				u.sent = 0;
+				u.total = u.file.size;
+				u.rate = 0;
+				u.eta = 0;
+				(function(u){
+					var t0 = Date.now(), lastPaint = 0;
+					upPaint();
+					upSendWithRetry(u, function(sent, total, finished){
+						u.sent = sent; u.total = total;
+						var secs = (Date.now() - t0) / 1000;
+						if (secs > 0.5) {
+							u.rate = sent / secs;
+							u.eta  = u.rate ? (total - sent) / u.rate : 0;
+						}
+						if (finished) { u.state = 'sending'; }
+						var now = Date.now();
+						if (finished || now - lastPaint > 200) { lastPaint = now; upPaint(); }
+					}).then(function(){
+						u.state = 'done';
+						added++;
+					}).catch(function(e){
+						u.state = 'failed';
+						u.msg = u.file.name + ' ' + (e && e.message ? e.message : 'failed.');
+						failed++;
+					}).then(function(){
+						u.xhr = null;
+						active--;
+						upPaint();
+						pump();
+					});
+				}(u));
+			}
+		}
+
+		pump();
+	}
+
 	(function upWire(){
 		var drop = upEl('updrop'), input = upEl('upinput');
 		if (!drop || !input) { return; }
@@ -1787,18 +1915,19 @@ function gasf_crm_render_inbox_script() {
 			upPaint();
 		});
 
-		upEl('upgo').onclick = upRun;
+		upEl('upgo').onclick = upRunFast;
 		upEl('upclear').onclick = function(){ upQueue = []; upEl('upstatus').textContent = ''; upPaint(); };
 
-		/* Stop means stop after this one, and abort the one in flight.
+		/* Stop means stop after this one, and abort anything in flight.
 		   Anything still waiting stays in the list rather than being thrown away —
 		   somebody stopping a long batch usually wants to finish it later, not
 		   drag twenty files in again. */
 		upEl('upstop').onclick = function(){
 			upStop = true;
 			upEl('upstatus').textContent = 'Stopping…';
-			var going = upQueue.filter(function(u){ return u.xhr; })[0];
-			if (going) { going.xhr.abort(); }
+			upQueue.forEach(function(u){
+				if (u.xhr) { u.xhr.abort(); }
+			});
 		};
 		window._upEventPicker = bindEventPicker({
 			input: upEl('upevent'),
@@ -2645,6 +2774,31 @@ function gasf_crm_render_inbox_script() {
 	/* The lightbox. Escape and a click on the backdrop both close it — a
 	   full-screen overlay with only a small × is a trap on a phone. */
 	var lbReturn = null;   // where focus came from, so it can go back
+	var lbCurrent = 0;
+
+	function lbPageIds(){
+		if (!lgrid) { return []; }
+		return Array.prototype.map.call(lgrid.querySelectorAll('.lcard[data-id]'), function(el){
+			return parseInt(el.dataset.id, 10) || 0;
+		}).filter(function(id){ return !!id; });
+	}
+
+	function lbNeighbor(id, dir){
+		var ids = lbPageIds();
+		var i = ids.indexOf(parseInt(id, 10) || 0);
+		if (i < 0) { return 0; }
+		var at = i + (dir < 0 ? -1 : 1);
+		return (at >= 0 && at < ids.length) ? ids[at] : 0;
+	}
+
+	function lbNavMarkup(id){
+		var prev = lbNeighbor(id, -1), next = lbNeighbor(id, 1);
+		if (!prev && !next) { return ''; }
+		return '<div class="lbnav">' +
+			'<button class="btn sec lbnav-prev" type="button"' + (prev ? '' : ' disabled') + '>← Previous</button>' +
+			'<button class="btn sec lbnav-next" type="button"' + (next ? '' : ' disabled') + '>Next →</button>' +
+		'</div>';
+	}
 
 	function lbOpen(id, fromCard, card){
 		// card wins when given: the review screens hold their own photo objects
@@ -2652,6 +2806,7 @@ function gasf_crm_render_inbox_script() {
 		// rather than a second lightbox that drifts.
 		var p = card || (lgrid && lgrid._photos ? lgrid._photos[id] : null);
 		if (!p) { return; }
+		lbCurrent = p.id;
 		var box = document.getElementById('lbox');
 		// A video has no full-size still to show, so the viewer swaps element.
 		var lbi = document.getElementById('lbimg'), lbv = document.getElementById('lbvid');
@@ -2735,6 +2890,7 @@ function gasf_crm_render_inbox_script() {
 			// remember — and so it cannot stretch the row it used to sit in.
 			if (p.edited) { bits.push('<em class="muted">Edited &mdash; the original is kept and can be restored.</em>'); }
 		}
+		if (p.lib) { acts.push('<button class="btn warn" id="lbdelbtn" type="button">Delete photo</button>'); }
 
 		// The library passes the CARD (whose .lopen is the button); the review
 		// screens pass the button itself. Either way, focus has somewhere to
@@ -2756,6 +2912,8 @@ function gasf_crm_render_inbox_script() {
 
 		var cb = document.getElementById('lbconsent');
 		if (cb) { cb.onclick = function(){ lbConsent(p); }; }
+		var db = document.getElementById('lbdelbtn');
+		if (db) { db.onclick = function(){ lbDelete(p); }; }
 
 		box.hidden = false;
 
@@ -2765,6 +2923,41 @@ function gasf_crm_render_inbox_script() {
 		// longer reachable.
 		var first = box.querySelector('#lbclose');
 		if (first) { first.focus(); }
+	}
+
+	function lbDelete(p){
+		if (!p || !p.lib) { return; }
+		if (!confirm('Delete this photo for good?\n\nIt is removed from the library and cannot be recovered.')) { return; }
+		api('/photos/delete', { method:'POST', body: JSON.stringify({
+			photo: p.id,
+			revision: p.revision
+		}) }).then(function(){
+			if (lgrid && lgrid._photos) { delete lgrid._photos[p.id]; }
+			if (lsel && lsel[p.id]) { delete lsel[p.id]; lsyncBar(); }
+			lbClose();
+			loadLib();
+		}).catch(function(e){
+			alert(e.message);
+		});
+	}
+
+	function lbWireEditNav(edit, p, reopen){
+		var prevBtn = edit.querySelector('.lbnav-prev');
+		var nextBtn = edit.querySelector('.lbnav-next');
+		if (prevBtn) {
+			prevBtn.onclick = function(){
+				var id = lbNeighbor(p.id, -1);
+				if (!id || !lgrid || !lgrid._photos || !lgrid._photos[id]) { return; }
+				reopen(lgrid._photos[id]);
+			};
+		}
+		if (nextBtn) {
+			nextBtn.onclick = function(){
+				var id = lbNeighbor(p.id, 1);
+				if (!id || !lgrid || !lgrid._photos || !lgrid._photos[id]) { return; }
+				reopen(lgrid._photos[id]);
+			};
+		}
 	}
 
 	/* ===================== the image editor =====================
@@ -2784,6 +2977,7 @@ function gasf_crm_render_inbox_script() {
 
 		edit.dataset.photo = p.id;
 		edit.innerHTML = '<h3>Crop &amp; light</h3>' +
+			lbNavMarkup(p.id) +
 			'<div class="imged"><div class="iewrap">' +
 				'<img id="ieimg" src="' + esc(p.full || p.url) + '" alt="" draggable="false">' +
 				'<div class="cropbox" id="iecrop">' +
@@ -2871,6 +3065,7 @@ function gasf_crm_render_inbox_script() {
 
 		var bri = document.getElementById('iebri'), con = document.getElementById('iecon');
 		var rotv = document.getElementById('ierotv');
+		lbWireEditNav(edit, p, function(np){ lbImage(np); });
 		function drawPreview(){
 			// Fast visual aim. The server render on Apply is still the source of truth.
 			img.style.filter = 'brightness(' + (1 + bri.value / 100) + ') contrast(' + (1 + con.value / 100) + ')';
@@ -2939,6 +3134,7 @@ function gasf_crm_render_inbox_script() {
 
 		edit.dataset.photo = p.id; // so Escape knows which photo to step back to
 		edit.innerHTML = '<h3>' + esc(p.title || 'This photo') + '</h3>' +
+			lbNavMarkup(p.id) +
 			photoForm(p, p.saved || {}, { big: true, okLabel: 'Save' });
 		document.getElementById('lbinfo').hidden = true;
 		edit.hidden = false;
@@ -2947,6 +3143,7 @@ function gasf_crm_render_inbox_script() {
 		wireEventPickers(edit);
 		wirePlaceSelects(edit);
 		wirePeople(edit);
+		lbWireEditNav(edit, p, function(np){ lbEdit(np); });
 
 		var cancel = edit.querySelector('.p-cancel');
 		if (cancel) { cancel.onclick = function(){ lbOpen(p.id); }; }
