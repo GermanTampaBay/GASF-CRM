@@ -1394,10 +1394,16 @@ function gasf_crm_door_window_for( array $ev ) {
 add_action( 'admin_init', function () {
 	if ( ! isset( $_POST['gasf_crm_action'], $_GET['page'] ) || 'gasf-crm' !== $_GET['page'] ) { return; } // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 	$act = sanitize_text_field( wp_unslash( $_POST['gasf_crm_action'] ) ); // phpcs:ignore WordPress.Security.NonceVerification.Missing
-	if ( 0 !== strpos( $act, 'door_' ) ) { return; }
+	// Face-suggestion actions ride the same redirect: they have the same
+	// refresh hazard (issuing a key twice, clearing every scan stamp twice)
+	// and there is no reason for two of these handlers.
+	$mine = 0 === strpos( $act, 'door_' ) || 0 === strpos( $act, 'faces_' );
+	if ( ! $mine ) { return; }
 	check_admin_referer( 'gasf_crm' );
 
-	$notice = gasf_crm_admin_doors_handle( $act );
+	$notice = 0 === strpos( $act, 'faces_' ) && function_exists( 'gasf_crm_faces_admin_handle' )
+		? gasf_crm_faces_admin_handle( $act )
+		: gasf_crm_admin_doors_handle( $act );
 	if ( '' !== $notice ) {
 		set_transient( 'gasf_crm_door_notice_' . get_current_user_id(), $notice, MINUTE_IN_SECONDS );
 	}

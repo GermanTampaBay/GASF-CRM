@@ -1,0 +1,4 @@
+# The biometric data and the credential. Neither belongs in a repository —
+# the whole point of this design is that the vectors exist on one machine.
+faces.db
+config.json

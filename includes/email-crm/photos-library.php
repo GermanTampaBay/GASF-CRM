@@ -391,6 +391,14 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 			// value is that nobody has touched it.
 			'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
 		),
+		/*
+		 * What the home scanner thinks it saw, minus anyone already named.
+		 * Carried on the card so the editor can offer them; kept out of
+		 * 'saved' and out of the taxonomy so nothing can mistake a guess for
+		 * a fact. Empty array when the feature is off, which is what the
+		 * client's own code path expects.
+		 */
+		'faces'     => function_exists( 'gasf_crm_faces_for' ) ? gasf_crm_faces_for( $id ) : array(),
 	);
 }
 

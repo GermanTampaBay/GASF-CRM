@@ -400,6 +400,66 @@ final class GASF_CRM_Selftest {
 		$this->ok( ! in_array( 'England Brothers Park', $on, true ), 'places: England Brothers Park is not' );
 	}
 
+	/**
+	 * Face suggestions are suggestions: stored, offered, never tagged.
+	 *
+	 * The promise worth pinning is the negative one. Everything else about
+	 * this feature is a convenience; the thing that must never drift is that
+	 * a machine's guess cannot become a name on a member's photo without a
+	 * volunteer clicking.
+	 */
+	public function test_face_suggestions() {
+		$id = $this->library_photo( 'st-faces' );
+
+		gasf_crm_faces_store( $id, array(
+			array( 'box' => array( 10, 10, 40, 40 ), 'name' => 'Selftest Face', 'confidence' => 0.91 ),
+			array( 'box' => array( 60, 10, 40, 40 ), 'name' => 'Too Unsure',    'confidence' => 0.10 ),
+		), 2 );
+
+		$got = gasf_crm_faces_for( $id );
+		$this->ok( 1 === count( $got ), 'faces: a confident suggestion is kept, an unsure one dropped' );
+		$this->ok( 'Selftest Face' === ( $got[0]['name'] ?? '' ), 'faces: the kept suggestion is the confident one' );
+		$this->ok( (bool) get_post_meta( $id, '_gasf_face_scanned', true ), 'faces: the photo is stamped as looked at' );
+
+		// THE promise: nothing reached the taxonomy.
+		$this->ok( ! wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) ),
+			'faces: a suggestion writes NO person term' );
+		$this->ok( ! gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
+			'faces: the library sees no people on a merely-suggested photo' );
+
+		// Once a volunteer really tags that person, the suggestion stops being one.
+		wp_set_object_terms( $id, array( 'Selftest Face' ), 'gasf_photo_person', false );
+		$this->ok( ! gasf_crm_faces_for( $id ), 'faces: a suggestion disappears once the name is really applied' );
+		$t = get_term_by( 'name', 'Selftest Face', 'gasf_photo_person' );
+		if ( $t ) { wp_delete_term( (int) $t->term_id, 'gasf_photo_person' ); }
+
+		// A photo with no faces is still marked looked-at, or the queue loops.
+		$blank = $this->library_photo( 'st-faces-none' );
+		gasf_crm_faces_store( $blank, array(), 0 );
+		$this->ok( (bool) get_post_meta( $blank, '_gasf_face_scanned', true ), 'faces: a photo with no faces is still stamped' );
+		$this->ok( ! get_post_meta( $blank, '_gasf_face_suggestions', true ), 'faces: no suggestions stored for a blank photo' );
+	}
+
+	/** The scanner key: hashed at rest, and the only way through the guard. */
+	public function test_face_key() {
+		$this->snapshot_option( 'gasf_crm_faces_key' );
+		$this->snapshot_option( 'gasf_crm_faces_key_made' );
+
+		$key = gasf_crm_faces_key_make();
+		$this->ok( 0 === strpos( $key, 'gasf_face_' ), 'faces: the key is recognisably ours' );
+		$this->ok( strlen( $key ) > 40, 'faces: the key is long enough to be unguessable' );
+
+		$stored = get_option( 'gasf_crm_faces_key', '' );
+		$this->ok( '' !== $stored && false === strpos( $stored, $key ),
+			'faces: the key is stored hashed, never in the clear' );
+		$this->ok( wp_check_password( $key, $stored ), 'faces: the stored hash verifies the real key' );
+		$this->ok( ! wp_check_password( $key . 'x', $stored ), 'faces: a doctored key does not verify' );
+
+		gasf_crm_faces_key_revoke();
+		$this->ok( '' === gasf_crm_faces_key_hash(), 'faces: revoking really removes the key' );
+		$this->ok( is_wp_error( gasf_crm_faces_guard() ), 'faces: with no key issued, the guard refuses' );
+	}
+
 	/** Origin telemetry expires; fresh records and the latch survive. */
 	public function test_origin_prune() {
 		$old = $this->library_photo( 'st-origin-old' );

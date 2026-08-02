@@ -410,6 +410,13 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .prow2 .pdel{color:#b02d2e}
 .pnew{border-top:1px solid var(--gasf-border);margin-top:12px;padding-top:12px}
 .phome{background:var(--s-tint);font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600}
+.fchips{margin:0 0 6px;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.fchips-lead{font:12px/1.5 var(--slug);letter-spacing:.04em;text-transform:uppercase;opacity:.7}
+.fchip{font:inherit;font-size:12px;line-height:1.5;padding:3px 9px;cursor:pointer;
+	background:var(--card);border:1px solid var(--s-accent);color:var(--s-accent);border-radius:11px}
+.fchip:hover{background:var(--s-accent);color:var(--card)}
+.fchip.used{opacity:.45}
+.fchip .fpct{opacity:.65;font-size:11px}
 .addp{background:none;border:0;padding:2px 0;margin:4px 0 0;font:inherit;font-size:12px;color:var(--s-accent);cursor:pointer}
 .addp:hover{text-decoration:underline}
 .prow{display:flex;gap:8px;flex-wrap:wrap}
@@ -2004,6 +2011,29 @@ function gasf_crm_render_inbox() {
 			'" placeholder="Name" autocomplete="off" spellcheck="false"></span>';
 	}
 
+	/* ============ face suggestions ============
+	 *
+	 * What the home scanner thinks it saw, offered as chips above the name
+	 * boxes. Clicking one FILLS A BOX — it does not save, it does not tag, and
+	 * nothing has happened to the photo until the volunteer presses the same
+	 * button they always press. The confidence is shown because "probably
+	 * Erna" and "almost certainly Erna" deserve different amounts of trust,
+	 * and hiding the number would be pretending the machine is surer than it
+	 * is.
+	 */
+	function faceChips(faces){
+		if (!faces || !faces.length) { return ''; }
+		return '<div class="fchips">' +
+			'<span class="fchips-lead">The scanner suggests:</span> ' +
+			faces.map(function(f){
+				var pct = Math.round((f.confidence || 0) * 100);
+				return '<button type="button" class="fchip" data-name="' + esc(f.name) + '" ' +
+					'title="Click to put this name in a box. Nothing is saved until you press the save button.">' +
+					esc(f.name) + ' <span class="fpct">' + pct + '%</span></button>';
+			}).join('') +
+			'</div>';
+	}
+
 	/* ============ name suggestions ============
 	 *
 	 * Everyone already named in a photo, matched as you type. The point is not
@@ -2060,6 +2090,33 @@ function gasf_crm_render_inbox() {
 	// Clones a box onto the end and puts the cursor in it, so adding three
 	// people is three clicks and three names rather than a guess about commas.
 	function wirePeople(root){
+		/*
+		 * A chip fills the first EMPTY name box, or adds one if every box is
+		 * taken — so clicking three suggestions in a row names three people
+		 * rather than overwriting the same box twice. Used chips grey out, but
+		 * stay clickable: a volunteer who clears a box by hand should be able
+		 * to put the name back.
+		 */
+		root.addEventListener('click', function(ev){
+			var chip = ev.target.closest ? ev.target.closest('.fchip') : null;
+			if (!chip || !root.contains(chip)) { return; }
+			ev.preventDefault();
+			var box = chip.closest('.pf').querySelector('.p-people');
+			if (!box) { return; }
+			var empty = null;
+			Array.prototype.forEach.call(box.querySelectorAll('.p-person'), function(i){
+				if (!empty && !i.value.trim()) { empty = i; }
+			});
+			if (!empty) {
+				box.insertAdjacentHTML('beforeend', personBox(''));
+				empty = box.lastElementChild.querySelector('.p-person');
+			}
+			empty.value = chip.dataset.name;
+			empty.dispatchEvent(new Event('input', { bubbles: true }));
+			chip.classList.add('used');
+			empty.focus();
+		});
+
 		Array.prototype.forEach.call(root.querySelectorAll('.addp'), function(b){
 			b.onclick = function(){
 				var box = b.previousElementSibling;
@@ -2192,7 +2249,7 @@ function gasf_crm_render_inbox() {
 			? '<textarea class="p-caption" rows="3" maxlength="600">' + esc(q.caption||'') + '</textarea>'
 			: '<input type="text" class="p-caption" maxlength="150" value="' + esc(q.caption||'') + '">';
 
-		var s = '<div class="pf"><span>Who is in it</span>' + peopleField(q.people || []) + '</div>' +
+		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces) + peopleField(q.people || []) + '</div>' +
 			'<label class="pf"><span>' + (opts.big ? 'Notes — what is happening, anything worth remembering' : 'What is happening') + '</span>' +
 			note + '</label>' +
 			'<div class="prow">' +

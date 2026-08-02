@@ -662,6 +662,7 @@ function gasf_crm_admin_tab() {
 
 	<?php
 	if ( function_exists( 'gasf_crm_admin_doors_section' ) ) { gasf_crm_admin_doors_section(); }
+	if ( function_exists( 'gasf_crm_faces_admin_section' ) ) { gasf_crm_faces_admin_section(); }
 	endif;
 	?>
 

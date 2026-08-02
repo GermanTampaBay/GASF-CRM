@@ -87,6 +87,9 @@ if ( true ) {
 	// After photos-upload.php: the public doors hand guests' photos to
 	// gasf_crm_photo_upload_one() rather than importing anything themselves.
 	require_once GASF_CRM_DIR . '/photos-public.php';
+	// After photos-library.php: face suggestions read library membership and
+	// term names, and store nothing the library itself reads.
+	require_once GASF_CRM_DIR . '/photos-faces.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
 
