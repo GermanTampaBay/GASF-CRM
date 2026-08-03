@@ -255,7 +255,7 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .pthumb img{width:100%;height:100%;object-fit:cover;display:block}
 .pbody{flex:1 1 auto;min-width:0}
 .pfrom{font-size:12px;font-weight:600;color:var(--s-ink);margin-bottom:8px}
-.pf{display:block;margin:0 0 8px}
+.pf{display:block;position:relative;margin:0 0 8px}
 .pf>span{display:block;font-size:11px;color:var(--gasf-muted);margin-bottom:2px}
 .pf input,.pf select{width:100%;padding:6px 8px;border:1px solid var(--gasf-border);border-radius:4px;font:inherit;font-size:13px;background:var(--gasf-surface);color:var(--gasf-text)}
 .pf .p-placeother{margin-top:5px}
