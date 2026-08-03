@@ -2155,9 +2155,9 @@ function gasf_crm_render_inbox_script() {
 	 * for the browser to evict the page, and you came back to a clean slate
 	 * having lost the thread you were part-way through approving.
 	 *
-	 * The current view and what is open now live in the URL fragment, so the
-	 * browser's own restore lands you back where you were — and Back does
-	 * something sensible instead of leaving the CRM entirely.
+	 * The current view lives in the path (/email/photos, /email/library, ...)
+	 * and the open item lives in query params (?thread=123 / ?photo=456), so a
+	 * reload lands you back where you were without hash-only routing.
 	 */
 	var routing = false;
 
@@ -2194,22 +2194,25 @@ function gasf_crm_render_inbox_script() {
 		 * break the primary action is not a nicety.
 		 */
 		try {
-			var h = '';
 			var path = routePathForView('mail');
+			var q = new URLSearchParams(window.location.search || '');
+			q.delete('thread');
+			q.delete('photo');
 			var uv = document.getElementById('uploadview');
 			if (!document.getElementById('photoview').hidden) {
 				path = routePathForView('photos');
-				h = pcur ? '#photo/' + pcur : '';
+				if (pcur) { q.set('photo', String(pcur)); }
 			} else if (!document.getElementById('libview').hidden) {
 				path = routePathForView('library');
 			} else if (uv && !uv.hidden) {
 				path = routePathForView('upload');
 			} else if (current) {
-				h = '#thread/' + current;
+				q.set('thread', String(current));
 			}
 
-			var target = path + h;
-			var now = (location.pathname || '') + (location.hash || '');
+			var qs = q.toString();
+			var target = path + (qs ? ('?' + qs) : '');
+			var now = (location.pathname || '') + (location.search || '') + (location.hash || '');
 			if (target !== now && window.history && window.history.replaceState) {
 				window.history.replaceState(null, '', target);
 			}
@@ -2218,26 +2221,30 @@ function gasf_crm_render_inbox_script() {
 
 	function restore(){
 		var pathView = routeViewFromPath();
-		var h = (location.hash || '').replace(/^#/, '');
-		if (!h && !pathView) { return false; }
+		var q = new URLSearchParams(window.location.search || '');
+		var threadId = parseInt(q.get('thread') || '0', 10) || 0;
+		var photoId = parseInt(q.get('photo') || '0', 10) || 0;
+		if (!pathView && !threadId && !photoId) { return false; }
 		routing = true;
-		// Same reasoning: a bad fragment must not stop the app starting.
+		// Same reasoning: a bad URL state must not stop the app starting.
 		try {
-			var m;
-			if ((m = h.match(/^thread\/(\d+)$/))) { showView('mail');    open(parseInt(m[1], 10)); }
-			else if ((m = h.match(/^photo\/(\d+)$/))) { showView('photos'); openPhoto(parseInt(m[1], 10)); }
-			else if (h === 'photos')  { showView('photos'); }
-			else if (h === 'library') { showView('library'); }
-			else if (h === 'upload')  { showView('upload'); }
-			else if (h === 'mail')    { showView('mail'); }
-			else if (pathView)        { showView(pathView); }
-			else { return false; }
+			if (photoId) {
+				showView('photos');
+				openPhoto(photoId);
+			} else if (threadId) {
+				showView('mail');
+				open(threadId);
+			} else if (pathView) {
+				showView(pathView);
+			} else {
+				return false;
+			}
 		} catch (e) { return false; }
 		finally { routing = false; }
 		return true;
 	}
 
-	window.addEventListener('hashchange', function(){ if (!routing) { restore(); } });
+	window.addEventListener('popstate', function(){ if (!routing) { restore(); } });
 
 	/* Photos on the REVIEW screens open in the same viewer as the library.
 	   Delegated, because those cards are rebuilt every time a thread is opened
