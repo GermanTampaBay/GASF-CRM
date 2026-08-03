@@ -531,10 +531,27 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 				: gasf_crm_photo_consent_text(),
 		) );
 	} else {
-		$rec = gasf_crm_photo_consent_record( $id, 'grant', (string) ( $in['note'] ?? '' ) );
-		if ( is_wp_error( $rec ) ) {
-			wp_delete_attachment( $id, true );
-			return $rec;
+		$scope = 'limited' === (string) ( $in['consent_scope'] ?? 'full' ) ? 'limited' : 'full';
+		if ( 'limited' === $scope ) {
+			$user = wp_get_current_user();
+			update_post_meta( $id, '_gasf_photo_consent', array(
+				'granted'          => true,
+				'scope'            => 'limited',
+				'at'               => current_time( 'mysql', true ),
+				'note'             => (string) ( $in['note'] ?? '' ),
+				'recorded_by'      => get_current_user_id(),
+				'recorded_by_name' => gasf_crm_display_name( get_current_user_id() ),
+				'email'            => is_object( $user ) ? (string) $user->user_email : '',
+				'version'          => GASF_CRM_PHOTO_CONSENT_VERSION,
+				'text'             => gasf_crm_photo_consent_text_limited(),
+			) );
+			gasf_crm_log_event( 0, 'photo_consent', sprintf( 'media #%d marked limited use on upload', $id ) );
+		} else {
+			$rec = gasf_crm_photo_consent_record( $id, 'grant', (string) ( $in['note'] ?? '' ) );
+			if ( is_wp_error( $rec ) ) {
+				wp_delete_attachment( $id, true );
+				return $rec;
+			}
 		}
 	}
 
@@ -762,22 +779,6 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 
-			/*
-			 * The tickbox is a gate, not a field.
-			 *
-			 * Checked here rather than trusted from the form, because the form is
-			 * the one place it cannot be enforced: a request that never went
-			 * through the page would simply omit it. The club cannot publish a
-			 * photograph of somebody without an answer to "may we", and an upload
-			 * with no answer is not a faster route to the same place — it is a
-			 * photo that should not have been taken in.
-			 */
-			if ( '1' !== (string) $req->get_param( 'consent' ) ) {
-				return new WP_Error( 'gasf_crm_consent',
-					'Please tick the permission box — we cannot take photos in without it.',
-					array( 'status' => 400 ) );
-			}
-
 			$files = $req->get_file_params();
 			if ( empty( $files['file'] ) ) {
 				return new WP_Error( 'gasf_crm_nofile', 'No file arrived with that request.', array( 'status' => 400 ) );
@@ -789,6 +790,7 @@ add_action( 'rest_api_init', function () {
 				'event'    => (string) $req->get_param( 'event' ),
 				'event_id' => (int) $req->get_param( 'event_id' ),
 				'flyer'    => (string) $req->get_param( 'flyer' ),
+				'consent_scope' => ( '1' === (string) $req->get_param( 'consent' ) ) ? 'full' : 'limited',
 				'note'     => (string) $req->get_param( 'note' ),
 			) );
 

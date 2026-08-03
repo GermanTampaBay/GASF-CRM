@@ -1766,17 +1766,6 @@ function gasf_crm_render_inbox_script() {
 	function upRun(){
 		if (upBusy) { return; }
 
-		if (!upEl('upconsent').checked) {
-			upEl('upstatus').textContent = 'Tick the permission box first.';
-			upEl('upconsent').focus();
-			return;
-		}
-		if (!upEl('upnote').value.trim()) {
-			upEl('upstatus').textContent = 'Say how permission was given.';
-			upEl('upnote').focus();
-			return;
-		}
-
 		upBusy = true;
 		upStop = false;
 		upEl('upstatus').textContent = '';
@@ -1838,17 +1827,6 @@ function gasf_crm_render_inbox_script() {
 
 	function upRunFast(){
 		if (upBusy) { return; }
-
-		if (!upEl('upconsent').checked) {
-			upEl('upstatus').textContent = 'Tick the permission box first.';
-			upEl('upconsent').focus();
-			return;
-		}
-		if (!upEl('upnote').value.trim()) {
-			upEl('upstatus').textContent = 'Say how permission was given.';
-			upEl('upnote').focus();
-			return;
-		}
 
 		upBusy = true;
 		upStop = false;
