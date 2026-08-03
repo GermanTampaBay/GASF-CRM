@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.17.0' );
+	define( 'GASF_CRM_SCHEMA', '1.18.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -219,6 +219,7 @@ if ( true ) {
 		add_rewrite_rule( '^email/auth/([a-z]+)/?$', 'index.php?gasf_crm=start&gasf_crm_provider=$matches[1]', 'top' );
 		add_rewrite_rule( '^email/auth/([a-z]+)/callback/?$', 'index.php?gasf_crm=callback&gasf_crm_provider=$matches[1]', 'top' );
 		add_rewrite_rule( '^email/logout/?$', 'index.php?gasf_crm=logout', 'top' );
+		add_rewrite_rule( '^email/(mail|photos|library|upload)/?$', 'index.php?gasf_crm=app', 'top' );
 	} );
 
 	add_filter( 'query_vars', function ( $vars ) {

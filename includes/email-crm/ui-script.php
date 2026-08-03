@@ -8,6 +8,7 @@ function gasf_crm_render_inbox_script() {
 (function(){
 	var API   = <?php echo wp_json_encode( rest_url( 'gasf/v1/crm' ) ); ?>;
 	var NONCE = <?php echo wp_json_encode( wp_create_nonce( 'wp_rest' ) ); ?>;
+	var APP_BASE = <?php echo wp_json_encode( home_url( '/email' ) ); ?>;
 	var BOARD = <?php echo wp_json_encode( (string) gasf_crm_cfg()['board_address'] ); ?>;
 	var IGNORE_REASONS = <?php echo wp_json_encode( array_values( gasf_crm_ignore_reasons() ) ); ?>;
 	// Only the streams THIS user may see. The server intersects anyway, so this
@@ -44,6 +45,14 @@ function gasf_crm_render_inbox_script() {
 	var stream = ''; // '' = every stream this user can see
 	var list = document.getElementById('list'), pane = document.getElementById('pane');
 	var status = 'open', current = null, currentStamp = null;
+	var APP_BASE_PATH = (function(){
+		try {
+			var u = new URL(APP_BASE, window.location.origin);
+			return u.pathname.replace(/\/+$/, '') || '/';
+		} catch (e) {
+			return '/email';
+		}
+	}());
 
 	function api(path, opts){
 		opts = opts || {};
@@ -2152,6 +2161,22 @@ function gasf_crm_render_inbox_script() {
 	 */
 	var routing = false;
 
+	function routeViewFromPath(){
+		var p = (window.location.pathname || '').replace(/\/+$/, '') || '/';
+		if (p === APP_BASE_PATH || p === APP_BASE_PATH + '/mail') { return 'mail'; }
+		if (p === APP_BASE_PATH + '/photos') { return 'photos'; }
+		if (p === APP_BASE_PATH + '/library') { return 'library'; }
+		if (p === APP_BASE_PATH + '/upload') { return 'upload'; }
+		return '';
+	}
+
+	function routePathForView(view){
+		if (view === 'photos' || view === 'library' || view === 'upload') {
+			return APP_BASE_PATH + '/' + view;
+		}
+		return APP_BASE_PATH;
+	}
+
 	function remember(){
 		if (routing) { return; }
 
@@ -2169,22 +2194,32 @@ function gasf_crm_render_inbox_script() {
 		 * break the primary action is not a nicety.
 		 */
 		try {
-			var h = '#mail';
+			var h = '';
+			var path = routePathForView('mail');
 			var uv = document.getElementById('uploadview');
-			if (!document.getElementById('photoview').hidden) { h = pcur ? '#photo/' + pcur : '#photos'; }
-			else if (!document.getElementById('libview').hidden) { h = '#library'; }
-			else if (uv && !uv.hidden) { h = '#upload'; }
-			else if (current) { h = '#thread/' + current; }
+			if (!document.getElementById('photoview').hidden) {
+				path = routePathForView('photos');
+				h = pcur ? '#photo/' + pcur : '';
+			} else if (!document.getElementById('libview').hidden) {
+				path = routePathForView('library');
+			} else if (uv && !uv.hidden) {
+				path = routePathForView('upload');
+			} else if (current) {
+				h = '#thread/' + current;
+			}
 
-			if (h !== location.hash && window.history && window.history.replaceState) {
-				window.history.replaceState(null, '', h);
+			var target = path + h;
+			var now = (location.pathname || '') + (location.hash || '');
+			if (target !== now && window.history && window.history.replaceState) {
+				window.history.replaceState(null, '', target);
 			}
 		} catch (e) { /* never fatal */ }
 	}
 
 	function restore(){
+		var pathView = routeViewFromPath();
 		var h = (location.hash || '').replace(/^#/, '');
-		if (!h) { return false; }
+		if (!h && !pathView) { return false; }
 		routing = true;
 		// Same reasoning: a bad fragment must not stop the app starting.
 		try {
@@ -2194,6 +2229,8 @@ function gasf_crm_render_inbox_script() {
 			else if (h === 'photos')  { showView('photos'); }
 			else if (h === 'library') { showView('library'); }
 			else if (h === 'upload')  { showView('upload'); }
+			else if (h === 'mail')    { showView('mail'); }
+			else if (pathView)        { showView(pathView); }
 			else { return false; }
 		} catch (e) { return false; }
 		finally { routing = false; }
