@@ -2192,7 +2192,7 @@ function gasf_crm_photo_save_pending( array $invite ) {
 		update_post_meta( $aid, '_gasf_photo_pending', array(
 			'people'   => array_values( array_unique( $people ) ),
 			'caption'  => $caption,
-			'taken'    => gasf_crm_photo_clean_date( $row['taken'] ?? '' ),
+			'taken'    => gasf_crm_photo_clean_taken( $row['taken'] ?? '' ),
 			'place'    => $place,
 			'event'    => $event,
 			'event_id' => $event_id,
@@ -3679,6 +3679,14 @@ function gasf_crm_photo_clean_date( $raw ) {
 	return $d;
 }
 
+/** Photo date as YYYY-MM-DD, YYYY, or ''. */
+function gasf_crm_photo_clean_taken( $raw ) {
+	$d = trim( sanitize_text_field( (string) $raw ) );
+	if ( '' === $d ) { return ''; }
+	if ( preg_match( '~^\d{4}$~', $d ) ) { return $d; }
+	return gasf_crm_photo_clean_date( $d );
+}
+
 /** HH:MM in 24h or ''. */
 function gasf_crm_photo_clean_time( $raw ) {
 	$t = trim( sanitize_text_field( (string) $raw ) );
@@ -3764,7 +3772,7 @@ function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts =
 		$event_id = 0;
 	}
 
-	$taken = gasf_crm_photo_clean_date( $in['taken'] ?? '' );
+	$taken = gasf_crm_photo_clean_taken( $in['taken'] ?? '' );
 	if ( $taken ) {
 		update_post_meta( $id, '_gasf_photo_taken', $taken );
 	} elseif ( $opts['clear_taken_when_empty'] ) {

@@ -492,7 +492,7 @@ function gasf_crm_render_inbox() {
 			<label class="lf lf-ev"><span>Set event</span>
 				<span class="pwrap"><input type="text" id="btevent" autocomplete="off" spellcheck="false" placeholder="Leave blank to keep"></span>
 			</label>
-			<label class="lf"><span>Set date</span><input type="date" id="bttaken"></label>
+			<label class="lf"><span>Set date or year</span><input type="text" id="bttaken" inputmode="numeric" placeholder="YYYY or YYYY-MM-DD"></label>
 		</div>
 		<input type="hidden" id="bteventid" value="">
 		<div class="actions" style="margin-top:12px">
@@ -588,7 +588,7 @@ function gasf_crm_render_inbox() {
 	<div class="card pad">
 		<h3>What they all have in common</h3>
 		<div class="lfrow">
-			<label class="lf"><span>Date</span><input type="date" id="update"></label>
+			<label class="lf"><span>Date or year</span><input type="text" id="update" inputmode="numeric" placeholder="YYYY or YYYY-MM-DD"></label>
 			<label class="lf"><span>Where</span><select id="upplace"><option value="">&mdash; not sure &mdash;</option></select></label>
 			<?php
 			/*

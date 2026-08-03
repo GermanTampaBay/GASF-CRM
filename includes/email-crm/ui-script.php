@@ -863,6 +863,10 @@ function gasf_crm_render_inbox_script() {
 		return v === true || v === 1 || v === '1';
 	}
 
+	function isFullDate(v){
+		return /^\d{4}-\d{2}-\d{2}$/.test((v || '').trim());
+	}
+
 	function photoForm(p, q, opts){
 		opts = opts || {};
 		var flyer = isFlyer((q && q.flyer) || (p && p.flyer));
@@ -885,7 +889,7 @@ function gasf_crm_render_inbox_script() {
 			// corrected because a human can know better than a camera about the
 			// day, but the time is evidence, and its only value is that nobody
 			// has touched it.
-			'<label class="pf"><span>Date</span><input type="date" class="p-taken" value="' + esc(q.taken||p.taken||'') + '">' +
+			'<label class="pf"><span>Date or year</span><input type="text" class="p-taken" inputmode="numeric" placeholder="YYYY or YYYY-MM-DD" value="' + esc(q.taken||p.taken||'') + '">' +
 				(timeOf(p, q) ? '<em class="ptime">Camera clock <b>' + esc(timeOf(p, q)) + '</b></em>' : '') +
 			'</label>' +
 			'</div>' +
@@ -1128,7 +1132,7 @@ function gasf_crm_render_inbox_script() {
 			if (cfg.onTyped) { cfg.onTyped(q); }
 			var url = q.length >= 2
 				? '/photos/events?_=1&q=' + encodeURIComponent(q)
-				: (date && date.value ? '/photos/events?_=1&date=' + encodeURIComponent(date.value) : '');
+				: (date && isFullDate(date.value) ? '/photos/events?_=1&date=' + encodeURIComponent(date.value) : '');
 			if (!url) {
 				close();
 				say('');
@@ -1204,10 +1208,10 @@ function gasf_crm_render_inbox_script() {
 					if (mkmsg) { mkmsg.textContent = ''; }
 					return;
 				}
-				var ready = !!(date && date.value);
+				var ready = !!(date && isFullDate(date.value));
 				if (mkbtn) { mkbtn.disabled = !ready; }
-				if (mkmsg && !ready) { mkmsg.textContent = 'Set the event date first.'; }
-				else if (mkmsg && mkmsg.textContent === 'Set the event date first.') { mkmsg.textContent = ''; }
+				if (mkmsg && !ready) { mkmsg.textContent = 'Set a full date first (YYYY-MM-DD).'; }
+				else if (mkmsg && (mkmsg.textContent === 'Set the event date first.' || mkmsg.textContent === 'Set a full date first (YYYY-MM-DD).')) { mkmsg.textContent = ''; }
 			}
 
 			picker = bindEventPicker({
@@ -1229,7 +1233,7 @@ function gasf_crm_render_inbox_script() {
 					if (!mkfrom || !mkto || !date || !mkmsg) { return; }
 					var title = name.value.trim();
 					if (!title) { mkmsg.textContent = 'Type the event title first.'; return; }
-					if (!date.value) { mkmsg.textContent = 'Set the event date first.'; return; }
+					if (!isFullDate(date.value)) { mkmsg.textContent = 'Set a full date first (YYYY-MM-DD).'; return; }
 					mkbtn.disabled = true;
 					mkmsg.textContent = 'Creating event…';
 					api('/photos/events/create', { method:'POST', body: JSON.stringify({
@@ -1564,7 +1568,7 @@ function gasf_crm_render_inbox_script() {
 		var id  = upEventId();
 		var msg = upEl('upflymsg');
 		var mk  = upEl('upflymkevent');
-		var hasDate = !!(upEl('update') && upEl('update').value);
+		var hasDate = !!(upEl('update') && isFullDate(upEl('update').value));
 		var calOn = !window._upEventPicker || window._upEventPicker.isCalendarOn();
 		var show = on && !!t && !id && calOn;
 		if (box) { box.hidden = !show; }
@@ -1573,8 +1577,8 @@ function gasf_crm_render_inbox_script() {
 			return;
 		}
 		if (mk) { mk.disabled = !hasDate; }
-		if (msg && !hasDate) { msg.textContent = 'Set the event date first.'; }
-		else if (msg && msg.textContent === 'Set the event date first.') { msg.textContent = ''; }
+		if (msg && !hasDate) { msg.textContent = 'Set a full date first (YYYY-MM-DD).'; }
+		else if (msg && (msg.textContent === 'Set the event date first.' || msg.textContent === 'Set a full date first (YYYY-MM-DD).')) { msg.textContent = ''; }
 	}
 
 	function upFlyCreateEvent(){
@@ -1585,7 +1589,7 @@ function gasf_crm_render_inbox_script() {
 		var msg   = upEl('upflymsg');
 		var btn   = upEl('upflymkevent');
 		if (!title) { msg.textContent = 'Type the event title first.'; return; }
-		if (!date)  { msg.textContent = 'Set the event date first.'; return; }
+		if (!isFullDate(date))  { msg.textContent = 'Set a full date first (YYYY-MM-DD).'; return; }
 		btn.disabled = true;
 		msg.textContent = 'Creating event…';
 		api('/photos/events/create', { method: 'POST', body: JSON.stringify({
