@@ -675,7 +675,10 @@ function gasf_crm_render_inbox() {
 
 <div class="lightbox" id="lbox" role="dialog" aria-modal="true" aria-label="Photo" hidden>
 	<button class="lbclose" id="lbclose" type="button" aria-label="Close">&times;</button>
-	<img id="lbimg" src="" alt="">
+	<div class="lbstage">
+		<img id="lbimg" src="" alt="">
+		<div class="lbfaceov" id="lbfaces" hidden></div>
+	</div>
 	<?php // A clip plays here instead. Never both — see openLb(). ?>
 	<video id="lbvid" controls preload="metadata" playsinline hidden></video>
 	<div class="lbinfo" id="lbinfo"></div>

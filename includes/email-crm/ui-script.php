@@ -655,6 +655,58 @@ function gasf_crm_render_inbox_script() {
 		return empty;
 	}
 
+	function faceBoxesMarkup(p){
+		var faces = (p && p.faces) || [];
+		var iw = parseInt((p && p.w) || 0, 10), ih = parseInt((p && p.h) || 0, 10);
+		if (!faces.length || !iw || !ih) { return ''; }
+		return faces.map(function(f, i){
+			var b = (f && f.box) || [];
+			var x = parseInt(b[0] || 0, 10), y = parseInt(b[1] || 0, 10);
+			var w = Math.max(1, parseInt(b[2] || 0, 10)), h = Math.max(1, parseInt(b[3] || 0, 10));
+			var left = Math.max(0, Math.min(99.5, (x / iw) * 100));
+			var top  = Math.max(0, Math.min(99.5, (y / ih) * 100));
+			var ww   = Math.max(1, Math.min(100 - left, (w / iw) * 100));
+			var hh   = Math.max(1, Math.min(100 - top,  (h / ih) * 100));
+			return '<button type="button" class="facebox" data-name="' + esc(f.name || '') + '" ' +
+				'title="Add ' + esc(f.name || 'this name') + '" style="left:' + left.toFixed(3) + '%;top:' + top.toFixed(3) + '%;width:' + ww.toFixed(3) + '%;height:' + hh.toFixed(3) + '%">' +
+				'<span>' + (i + 1) + '</span></button>';
+		}).join('');
+	}
+
+	function wireFaceBoxes(overlay, formRoot, onNeedForm){
+		if (!overlay) { return; }
+		function markUsed(root){
+			if (!root) { return; }
+			var have = peopleValues(root).map(function(n){ return n.toLowerCase(); });
+			Array.prototype.forEach.call(overlay.querySelectorAll('.facebox'), function(b){
+				var n = (b.dataset.name || '').trim().toLowerCase();
+				b.classList.toggle('used', !!n && have.indexOf(n) !== -1);
+			});
+		}
+		markUsed(formRoot);
+		Array.prototype.forEach.call(overlay.querySelectorAll('.facebox'), function(b){
+			b.onclick = function(ev){
+				ev.preventDefault();
+				ev.stopPropagation();
+				var root = formRoot;
+				if ((!root || !root.querySelector('.p-people')) && onNeedForm) {
+					root = onNeedForm() || root;
+				}
+				if (!root) { return; }
+				var box = root.querySelector('.p-people');
+				var name = (b.dataset.name || '').trim();
+				if (!box || !name) { return; }
+				var focus = null;
+				Array.prototype.forEach.call(root.querySelectorAll('.p-person'), function(i){
+					if (!focus && i.value.trim().toLowerCase() === name.toLowerCase()) { focus = i; }
+				});
+				if (!focus) { focus = addSuggestedName(box, name); }
+				markUsed(root);
+				if (focus) { focus.focus(); }
+			};
+		});
+	}
+
 	/* ============ name suggestions ============
 	 *
 	 * Everyone already named in a photo, matched as you type. The point is not
@@ -2069,8 +2121,9 @@ function gasf_crm_render_inbox_script() {
 				// them is worth anybody's time.
 				? '<div class="note err">The image file is missing from the server, though its record is still here. ' +
 				  'Nothing can be done with it — reject it, and it can be taken in again from the original email.</div>'
-				: '<button type="button" class="pbig" aria-label="Open this photo full size">' +
-				  '<img src="' + esc(p.full || p.thumb) + '" alt=""></button>';
+				: '<div class="pbigwrap"><button type="button" class="pbig" aria-label="Open this photo full size">' +
+				  '<img src="' + esc(p.full || p.thumb) + '" alt=""></button>' +
+				  '<div class="pfaceov">' + faceBoxesMarkup(p) + '</div></div>';
 
 			h += '<p class="muted" style="margin:10px 0 4px">Sent by <strong>' + esc(p.from) + '</strong>' +
 				(p.email ? ' &lt;' + esc(p.email) + '&gt;' : '') +
@@ -2106,6 +2159,7 @@ function gasf_crm_render_inbox_script() {
 		wireEventPickers(ppane);
 		wirePlaceSelects(ppane);
 		wirePeople(ppane);
+		wireFaceBoxes(ppane.querySelector('.pfaceov'), ppane);
 
 		var ok = ppane.querySelector('.p-ok');
 		if (ok) {
@@ -2900,12 +2954,21 @@ function gasf_crm_render_inbox_script() {
 		var box = document.getElementById('lbox');
 		// A video has no full-size still to show, so the viewer swaps element.
 		var lbi = document.getElementById('lbimg'), lbv = document.getElementById('lbvid');
+		var lbstage = lbi ? lbi.parentNode : null;
+		var lbfaces = document.getElementById('lbfaces');
 		if (p.kind === 'video') {
 			lbi.hidden = true; lbi.src = '';
+			if (lbstage) { lbstage.hidden = true; }
+			if (lbfaces) { lbfaces.hidden = true; lbfaces.innerHTML = ''; }
 			lbv.hidden = false; lbv.src = p.url;
 		} else {
 			lbv.hidden = true; lbv.removeAttribute('src'); lbv.load();
 			lbi.hidden = false; lbi.src = p.full || p.url;
+			if (lbstage) { lbstage.hidden = false; }
+			if (lbfaces) {
+				lbfaces.innerHTML = faceBoxesMarkup(p);
+				lbfaces.hidden = !lbfaces.innerHTML;
+			}
 		}
 
 		// Two collections, because they want opposite layouts. Facts stack, one
@@ -3019,6 +3082,10 @@ function gasf_crm_render_inbox_script() {
 			if (!nextId) { return; }
 			lbOpen(nextId, null, (lgrid && lgrid._photos) ? lgrid._photos[nextId] : null);
 		}; }
+		wireFaceBoxes(lbfaces, null, function(){
+			lbEdit(p);
+			return document.getElementById('lbedit');
+		});
 
 		box.hidden = false;
 
@@ -3226,6 +3293,7 @@ function gasf_crm_render_inbox_script() {
 		wireEventPickers(edit);
 		wirePlaceSelects(edit);
 		wirePeople(edit);
+		wireFaceBoxes(document.getElementById('lbfaces'), edit);
 
 		var cancel = edit.querySelector('.p-cancel');
 		if (cancel) { cancel.onclick = function(){ lbOpen(p.id); }; }
