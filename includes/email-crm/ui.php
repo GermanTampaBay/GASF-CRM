@@ -447,6 +447,14 @@ function gasf_crm_render_inbox() {
 			<label class="lf"><span>Where</span><select id="lplace"><option value="">Anywhere</option></select></label>
 			<label class="lf"><span>Occasion</span><select id="levent"><option value="">Any</option></select></label>
 			<label class="lf"><span>Year</span><select id="lyear"><option value="">Any</option></select></label>
+			<label class="lf"><span>Description</span><select id="ldesc">
+				<option value="">Any</option>
+				<option value="none">No description</option>
+			</select></label>
+			<label class="lf"><span>Review</span><select id="lreview">
+				<option value="">Any</option>
+				<option value="face">Needs face match review</option>
+			</select></label>
 			<label class="lf"><span>Sort</span><select id="lsort">
 				<option value="upload_desc">Upload date: newest first</option>
 				<option value="upload_asc">Upload date: oldest first</option>

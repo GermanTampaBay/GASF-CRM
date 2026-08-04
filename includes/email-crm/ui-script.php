@@ -620,6 +620,26 @@ function gasf_crm_render_inbox_script() {
 			'</div>';
 	}
 
+	function withAiSummarySuffix(text){
+		var clean = (text || '').trim().replace(/\s*\(ai summary\)\s*$/i, '');
+		return clean ? (clean + ' (AI Summary)') : '';
+	}
+
+	function summaryChip(summary, currentCaption){
+		if (!summary || !summary.text) { return ''; }
+		var raw = (summary.text || '').trim();
+		if (!raw) { return ''; }
+		var have = ((currentCaption || '').trim()).toLowerCase();
+		var used = have && (have === raw.toLowerCase() || have === withAiSummarySuffix(raw).toLowerCase());
+		var model = summary.model ? (' (' + summary.model + ')') : '';
+		return '<div class="fchips psum">' +
+			'<span class="fchips-lead">AI summary</span>' +
+			'<button type="button" class="fchip psum-apply' + (used ? ' used' : '') + '" data-summary="' + esc(raw) + '"' +
+				' title="Fill the Notes field with this suggested summary and mark it as AI-written.">Use suggestion</button>' +
+			'<span class="fchips-note">' + esc(raw + model) + '</span>' +
+			'</div>';
+	}
+
 	function addSuggestedName(box, name){
 		var empty = null;
 		Array.prototype.forEach.call(box.querySelectorAll('.p-person'), function(i){
@@ -699,6 +719,19 @@ function gasf_crm_render_inbox_script() {
 		 * to put the name back.
 		 */
 		root.addEventListener('click', function(ev){
+			var sum = ev.target.closest ? ev.target.closest('.psum-apply') : null;
+			if (sum && root.contains(sum)) {
+				ev.preventDefault();
+				var cap = root.querySelector('.p-caption');
+				var text = withAiSummarySuffix(sum.dataset.summary || '');
+				if (!cap || !text) { return; }
+				cap.value = text;
+				cap.dispatchEvent(new Event('input', { bubbles: true }));
+				sum.classList.add('used');
+				cap.focus();
+				return;
+			}
+
 			var all = ev.target.closest ? ev.target.closest('.fchip-all') : null;
 			if (all && root.contains(all)) {
 				ev.preventDefault();
@@ -873,9 +906,11 @@ function gasf_crm_render_inbox_script() {
 		var note = opts.big
 			? '<textarea class="p-caption" rows="3" maxlength="600">' + esc(q.caption||'') + '</textarea>'
 			: '<input type="text" class="p-caption" maxlength="150" value="' + esc(q.caption||'') + '">';
+		var sum = summaryChip(p.summary, q.caption || p.caption || '');
 
 		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces) + peopleField(q.people || []) + '</div>' +
 			'<label class="pf"><span>' + (opts.big ? 'Notes — what is happening, anything worth remembering' : 'What is happening') + '</span>' +
+			sum +
 			note + '</label>' +
 			'<label class="pf pfcheck"><input type="checkbox" class="p-flyer" ' + (flyer ? 'checked' : '') + '>' +
 				'<span>This image is a flyer or ad, and not a candid/event photo.</span></label>' +
@@ -2257,7 +2292,8 @@ function gasf_crm_render_inbox_script() {
 
 	function lfilters(){
 		return { q: lval('lq'), person: lval('lperson'), place: lval('lplace'),
-		         event: lval('levent'), year: lval('lyear'), sort: lval('lsort') || 'upload_desc' };
+		         event: lval('levent'), year: lval('lyear'), desc: lval('ldesc'), review: lval('lreview'),
+		         sort: lval('lsort') || 'upload_desc' };
 	}
 
 	function lselCount(){ return Object.keys(lsel).length; }
@@ -2370,7 +2406,7 @@ function gasf_crm_render_inbox_script() {
 	// pages shows an empty grid and looks broken.
 	function lrefilter(){ lpage = 1; loadLib(); }
 
-	['lperson','lplace','levent','lyear','lsort'].forEach(function(id){
+	['lperson','lplace','levent','lyear','ldesc','lreview','lsort'].forEach(function(id){
 		var e = document.getElementById(id);
 		if (e) { e.onchange = lrefilter; }
 	});
@@ -2381,7 +2417,7 @@ function gasf_crm_render_inbox_script() {
 	var lclear = document.getElementById('lclear');
 	if (lclear) {
 		lclear.onclick = function(){
-			['lq','lperson','lplace','levent','lyear'].forEach(function(id){
+			['lq','lperson','lplace','levent','lyear','ldesc','lreview'].forEach(function(id){
 				var e = document.getElementById(id); if (e) { e.value = ''; }
 			});
 			lrefilter();

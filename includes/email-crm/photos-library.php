@@ -65,7 +65,7 @@ define( 'GASF_CRM_LIB_ZIP_TTL', 30 * MINUTE_IN_SECONDS );
  * Private photos are excluded outright. Anything still awaiting review is not
  * cleared for use, and this list exists to be used from.
  *
- * @param array $f person|place|event|year|q|sort
+ * @param array $f person|place|event|year|q|sort|desc|review
  * @return int[]
  */
 function gasf_crm_photo_library_ids( array $f = array() ) {
@@ -194,10 +194,12 @@ function gasf_crm_photo_library_filter( array $ids, array $f ) {
 	$event  = trim( (string) ( $f['event'] ?? '' ) );
 	$year   = preg_replace( '~\D~', '', (string) ( $f['year'] ?? '' ) );
 	$q      = trim( (string) ( $f['q'] ?? '' ) );
+	$desc   = trim( (string) ( $f['desc'] ?? '' ) );
+	$review = trim( (string) ( $f['review'] ?? '' ) );
 
-	if ( '' === $person && '' === $event && '' === $year && '' === $q && ! $places ) { return $ids; }
+	if ( '' === $person && '' === $event && '' === $year && '' === $q && '' === $desc && '' === $review && ! $places ) { return $ids; }
 
-	return array_values( array_filter( $ids, function ( $id ) use ( $places, $person, $event, $year, $q ) {
+	return array_values( array_filter( $ids, function ( $id ) use ( $places, $person, $event, $year, $q, $desc, $review ) {
 		$names = function ( $tax ) use ( $id ) { return gasf_crm_photo_term_names( $id, $tax ); };
 
 		if ( $places && ! array_intersect( $places, $names( 'gasf_photo_place' ) ) ) { return false; }
@@ -219,6 +221,8 @@ function gasf_crm_photo_library_filter( array $ids, array $f ) {
 			) ) );
 			if ( false === strpos( $hay, strtolower( $q ) ) ) { return false; }
 		}
+		if ( 'none' === $desc && '' !== trim( (string) get_post_field( 'post_excerpt', $id ) ) ) { return false; }
+		if ( 'face' === $review && ( ! function_exists( 'gasf_crm_faces_for' ) || ! gasf_crm_faces_for( $id ) ) ) { return false; }
 
 		return true;
 	} ) );
@@ -408,6 +412,7 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		 * client's own code path expects.
 		 */
 		'faces'     => function_exists( 'gasf_crm_faces_for' ) ? gasf_crm_faces_for( $id ) : array(),
+		'summary'   => function_exists( 'gasf_crm_caption_suggestion_for' ) ? gasf_crm_caption_suggestion_for( $id ) : array(),
 	);
 }
 
@@ -767,6 +772,8 @@ add_action( 'rest_api_init', function () {
 				'place'  => (string) $req->get_param( 'place' ),
 				'event'  => (string) $req->get_param( 'event' ),
 				'year'   => (string) $req->get_param( 'year' ),
+				'desc'   => (string) $req->get_param( 'desc' ),
+				'review' => (string) $req->get_param( 'review' ),
 				'q'      => (string) $req->get_param( 'q' ),
 				'sort'   => (string) $req->get_param( 'sort' ),
 			);

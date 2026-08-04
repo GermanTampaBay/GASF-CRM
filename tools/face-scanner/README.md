@@ -39,6 +39,21 @@ notepad config.json
 python scan.py --check
 ```
 
+### One-command setup (Ollama + model + scanner config)
+
+If you want a full bootstrap on Windows, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File install-ollama.ps1 `
+  -ScannerKey "gasf_face_xxxxx" `
+  -SiteUrl "https://germantampabay.com" `
+  -CaptionModel "llava:7b"
+```
+
+That script installs Ollama (if missing), starts/verifies the local API, pulls
+the vision model, installs scanner Python dependencies, writes `config.json`,
+and runs `scan.py --check`.
+
 The **scanner key** comes from **wp-admin → Email CRM → Photos → Face
 suggestions → Issue a scanner key**. It is shown once; if you lose it, issue a
 new one (the old one stops working immediately).
@@ -60,6 +75,20 @@ The first real run downloads the `buffalo_l` model pack (~280 MB) into
 | `python scan.py --selftest` | Exercise the non-ML plumbing. Needs no backend, no config, no network. |
 
 `--engine insightface|face_recognition|auto` overrides the backend for one run.
+
+### Optional: local AI summaries (captions)
+
+If you run a local vision model in Ollama, the scanner can submit a short
+caption suggestion with each scanned photo.
+
+1. In `config.json`, set `"caption_model"` (for example `llava:7b`).  
+2. Leave `caption_url` at `http://127.0.0.1:11434/api/generate` unless your
+   Ollama endpoint is elsewhere.
+3. Run `python scan.py --check` to confirm the model is configured.
+
+When enabled, the CRM shows a **Use suggestion** button in photo editing.
+Applying it writes the caption with ` (AI Summary)` appended, so provenance is
+explicit in the archive.
 
 ### How it learns
 

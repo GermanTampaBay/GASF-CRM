@@ -181,6 +181,50 @@ function gasf_crm_faces_for( $attachment_id ) {
 	return $out;
 }
 
+/** Store, clear, and read local-model caption suggestions (separate from truth). */
+function gasf_crm_caption_suggestion_store( $attachment_id, $raw_text, $raw_model = '' ) {
+	$id   = (int) $attachment_id;
+	$text = trim( sanitize_text_field( (string) $raw_text ) );
+	$text = preg_replace( '/\s+/', ' ', $text );
+	$text = function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 220 ) : substr( $text, 0, 220 );
+
+	if ( '' === $text ) {
+		delete_post_meta( $id, '_gasf_caption_suggestion' );
+		return false;
+	}
+
+	update_post_meta( $id, '_gasf_caption_suggestion', array(
+		'text'  => $text,
+		'model' => trim( sanitize_text_field( (string) $raw_model ) ),
+		'at'    => current_time( 'mysql', true ),
+	) );
+	return true;
+}
+
+function gasf_crm_caption_suggestion_for( $attachment_id ) {
+	$id  = (int) $attachment_id;
+	$raw = get_post_meta( $id, '_gasf_caption_suggestion', true );
+	if ( ! is_array( $raw ) ) { return array(); }
+
+	$text = trim( sanitize_text_field( (string) ( $raw['text'] ?? '' ) ) );
+	if ( '' === $text ) { return array(); }
+
+	// Hide the chip once this exact text has been applied into the caption.
+	$saved = trim( (string) get_post_field( 'post_excerpt', $id ) );
+	if ( '' !== $saved ) {
+		$saved_l = strtolower( html_entity_decode( $saved, ENT_QUOTES ) );
+		$text_l  = strtolower( html_entity_decode( $text, ENT_QUOTES ) );
+		if ( $saved_l === $text_l || $saved_l === ( $text_l . ' (ai summary)' ) ) {
+			return array();
+		}
+	}
+
+	return array(
+		'text'  => $text,
+		'model' => trim( sanitize_text_field( (string) ( $raw['model'] ?? '' ) ) ),
+	);
+}
+
 /* =====================================================================
  * The routes the scanner polls
  * ================================================================== */
@@ -276,16 +320,29 @@ add_action( 'rest_api_init', function () {
 
 			$stored = 0;
 			$seen   = 0;
+			$caps   = 0;
 			foreach ( array_slice( $items, 0, GASF_CRM_FACES_BATCH ) as $item ) {
 				$id = (int) ( $item['id'] ?? 0 );
 				if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				$stored += gasf_crm_faces_store( $id, (array) ( $item['faces'] ?? array() ), (int) ( $item['found'] ?? 0 ) );
+				if ( array_key_exists( 'caption', $item ) && gasf_crm_caption_suggestion_store(
+					$id,
+					(string) ( $item['caption'] ?? '' ),
+					(string) ( $item['caption_model'] ?? '' )
+				) ) {
+					$caps++;
+				}
 				$seen++;
 			}
 
-			gasf_crm_log( sprintf( 'CRM faces: scanner returned %d photo(s), %d suggestion(s) kept', $seen, $stored ) );
-			return array( 'ok' => true, 'photos' => $seen, 'suggestions' => $stored );
+			gasf_crm_log( sprintf(
+				'CRM faces: scanner returned %d photo(s), %d face suggestion(s) kept, %d caption suggestion(s) kept',
+				$seen,
+				$stored,
+				$caps
+			) );
+			return array( 'ok' => true, 'photos' => $seen, 'suggestions' => $stored, 'captions' => $caps );
 		},
 	) );
 

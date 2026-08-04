@@ -4441,6 +4441,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 		'places'  => $info['places'] ?? array(),
 		'events'  => $info['events'] ?? array(),
 		'caption' => $info['caption'] ?? '',
+		'summary' => function_exists( 'gasf_crm_caption_suggestion_for' ) ? gasf_crm_caption_suggestion_for( $id ) : array(),
 		'pending'   => is_array( $pending ) ? $pending : null,
 		/*
 		 * What is already ON the photo, shaped exactly like 'pending' so the

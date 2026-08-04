@@ -66,6 +66,7 @@ It is shown once. If you lose it, issue a new one.
 """
 
 import argparse
+import base64
 import io
 import json
 import os
@@ -130,7 +131,7 @@ def load_config(required=True):
     cfg = {}
     path = HERE / "config.json"
     if path.exists():
-        cfg = json.loads(path.read_text(encoding="utf-8"))
+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
     url = os.environ.get("GASF_URL", cfg.get("url", "")).rstrip("/")
     key = os.environ.get("GASF_FACE_KEY", cfg.get("key", ""))
     if required and (not url or not key):
@@ -156,6 +157,37 @@ def cfg_tolerance(cfg, engine):
     return DEFAULT_TOLERANCE.get(engine, 0.50)
 
 
+def cfg_caption_model(cfg):
+    return os.environ.get("GASF_FACE_CAPTION_MODEL", cfg.get("caption_model", "")).strip()
+
+
+def cfg_caption_prompt(cfg):
+    return (
+        os.environ.get(
+            "GASF_FACE_CAPTION_PROMPT",
+            cfg.get(
+                "caption_prompt",
+                "Write one short, neutral description of this photo for a club archive. "
+                "Describe visible people, activity, setting, and notable objects. "
+                "Do not guess names or identities.",
+            ),
+        ).strip()
+    )
+
+
+def cfg_caption_url(cfg):
+    return os.environ.get("GASF_FACE_CAPTION_URL", cfg.get("caption_url", "http://127.0.0.1:11434/api/generate")).strip()
+
+
+def cfg_caption_timeout(cfg):
+    raw = os.environ.get("GASF_FACE_CAPTION_TIMEOUT", cfg.get("caption_timeout", "120"))
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"caption_timeout must be an integer number of seconds, got {raw!r}")
+    return max(15, min(300, n))
+
+
 class Api:
     """The CRM, reached the only way this machine talks to anything: outward."""
 
@@ -163,13 +195,20 @@ class Api:
         parts = urlsplit(base.rstrip("/"))
         self.origin = (parts.scheme + "://" + parts.netloc).rstrip("/")
         self.base = base + "/wp-json/gasf/v1/crm/photos/faces"
+        self.key = key
         self.s = requests.Session()
         self.s.headers["Authorization"] = "Bearer " + key
         self.s.headers["User-Agent"] = USER_AGENT
         self.s.headers["Accept"] = "application/json"
+    def _needs_key_fallback(self, response):
+        return response.status_code in (401, 403, 406)
 
     def get(self, path, **params):
         r = self.s.get(self.base + path, params=params, timeout=60)
+        if self._needs_key_fallback(r):
+            p2 = dict(params)
+            p2["key"] = self.key
+            r = self.s.get(self.base + path, params=p2, timeout=60)
         if r.status_code == 403:
             sys.exit("The server refused the key. Issue a new one in wp-admin and update the config.")
         r.raise_for_status()
@@ -177,6 +216,8 @@ class Api:
 
     def post(self, path, payload):
         r = self.s.post(self.base + path, json=payload, timeout=120)
+        if self._needs_key_fallback(r):
+            r = self.s.post(self.base + path, params={"key": self.key}, json=payload, timeout=120)
         if r.status_code == 403:
             sys.exit("The server refused the key.")
         r.raise_for_status()
@@ -190,6 +231,8 @@ class Api:
         if origin != self.origin:
             raise RuntimeError(f"refusing cross-origin image URL: {origin}")
         r = self.s.get(url, timeout=120)
+        if self._needs_key_fallback(r):
+            r = self.s.get(url, params={"key": self.key}, timeout=120)
         r.raise_for_status()
         return r.content
 
@@ -315,6 +358,28 @@ def build_backend(pref="auto"):
             )
         sys.exit(f"Engine {pref!r} is selected but not installed. Try: pip install {pref}")
     return _BACKENDS[engine]()
+
+
+def local_caption(image_bytes, cfg):
+    """Ask a local vision model for a short caption, or return ("", "")."""
+    model = cfg_caption_model(cfg)
+    if not model:
+        return "", ""
+
+    prompt = cfg_caption_prompt(cfg)
+    timeout = cfg_caption_timeout(cfg)
+    url = cfg_caption_url(cfg)
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "images": [base64.b64encode(image_bytes).decode("ascii")],
+    }
+    r = requests.post(url, json=payload, timeout=timeout)
+    r.raise_for_status()
+    out = r.json()
+    text = " ".join((out.get("response") or "").split()).strip()
+    return text, f"ollama:{model}"
 
 
 # --------------------------------------------------------------------------- store
@@ -517,7 +582,7 @@ def learn(api, conn, backend, verbose=True):
 # --------------------------------------------------------------------------- scan
 
 
-def scan(api, conn, backend, tolerance, verbose=True):
+def scan(api, conn, backend, tolerance, cfg, verbose=True):
     references = load_references(conn, backend.name)
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
@@ -540,10 +605,12 @@ def scan(api, conn, backend, tolerance, verbose=True):
         for p in photos:
             photo_id = int(p["id"])
             found = None
+            image_bytes = None
             err = None
             for attempt in range(MAX_SCAN_RETRIES):
                 try:
-                    found = backend.embed(api.image(p["url"]))
+                    image_bytes = api.image(p["url"])
+                    found = backend.embed(image_bytes)
                     err = None
                     break
                 except Exception as e:
@@ -586,7 +653,18 @@ def scan(api, conn, backend, tolerance, verbose=True):
                     }
                 )
 
-            results.append({"id": photo_id, "found": len(found), "faces": faces})
+            item = {"id": photo_id, "found": len(found), "faces": faces}
+            try:
+                if image_bytes is not None:
+                    cap, model = local_caption(image_bytes, cfg)
+                    if cap:
+                        item["caption"] = cap
+                        item["caption_model"] = model
+            except Exception as e:
+                if verbose:
+                    print(f"  #{photo_id}: caption skipped — {e}")
+
+            results.append(item)
             if verbose:
                 names = ", ".join(f["name"] for f in faces) or "no one recognised"
                 print(f"  #{photo_id}: {len(found)} face(s) — {names}")
@@ -641,6 +719,11 @@ def status(api, conn, cfg):
     engine = cfg_engine(cfg)
     resolved = available_engine(engine)
     print(f"engine: {engine}" + (f" -> {resolved}" if resolved else " -> none installed"))
+    cap_model = cfg_caption_model(cfg)
+    if cap_model:
+        print(f"local caption model: {cap_model} ({cfg_caption_url(cfg)})")
+    else:
+        print("local caption model: off")
 
     rows = conn.execute(
         "SELECT engine, person, COUNT(*) FROM refs GROUP BY engine, person ORDER BY engine, COUNT(*) DESC"
@@ -700,6 +783,12 @@ def check(cfg):
     line(resolved is not None, f"recognition backend (engine={engine_pref})",
          resolved or "none installed — pip install insightface onnxruntime")
 
+    cap_model = cfg_caption_model(cfg)
+    if cap_model:
+        line(True, "caption model configured", cap_model)
+    else:
+        line(True, "caption model configured", "off (set caption_model to enable local summaries)")
+
     # Load it for real: a spec can exist yet fail to import or download models.
     backend = None
     if resolved is not None:
@@ -730,25 +819,13 @@ def check(cfg):
     # Reach the server with the key — the one check only the real deployment can pass.
     if url and key:
         try:
-            r = requests.get(
-                url + "/wp-json/gasf/v1/crm/photos/faces/queue",
-                headers={
-                    "Authorization": "Bearer " + key,
-                    "User-Agent": USER_AGENT,
-                    "Accept": "application/json",
-                },
-                params={"limit": 1}, timeout=30,
-            )
-            if r.status_code == 403:
-                line(False, "server accepts the key", "403 — issue a new key in wp-admin and update the config")
-            elif r.status_code == 200:
-                line(True, "server accepts the key", f"{r.json().get('remaining', 0)} photo(s) waiting")
-            elif r.status_code == 406:
-                line(False, "server accepts the key",
-                     "406 — the host's WAF (Bluehost mod_security) blocked the request before WordPress saw it; "
-                     "a User-Agent problem, not the key")
-            else:
-                line(False, "server accepts the key", f"HTTP {r.status_code}")
+            waiting = Api(url, key).get("/queue", limit=1).get("remaining", 0)
+            line(True, "server accepts the key", f"{waiting} photo(s) waiting")
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else 0
+            line(False, "server accepts the key", f"HTTP {code}")
+        except SystemExit as e:
+            line(False, "server accepts the key", str(e))
         except Exception as e:
             line(False, "server reachable", str(e))
     else:
@@ -914,7 +991,7 @@ def main():
         # asked, or when there is nothing to compare against yet.
         if args.learn or args.watch or not load_references(conn, backend.name):
             learn(api, conn, backend, verbose)
-        scan(api, conn, backend, tolerance, verbose)
+        scan(api, conn, backend, tolerance, cfg, verbose)
         if not args.watch:
             break
         if verbose:
