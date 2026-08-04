@@ -746,7 +746,14 @@ def _label_ui_html():
 <style>
 body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
 .top{padding:12px 16px;border-bottom:1px solid #26324a;display:flex;gap:12px;align-items:center;justify-content:space-between}
-.main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;padding:14px}
+.main{display:grid;grid-template-columns:270px minmax(0,1fr) 420px;gap:14px;padding:14px}
+.gal{border:1px solid #2d3748;border-radius:8px;background:#111827;padding:10px;display:flex;flex-direction:column;min-height:72vh}
+.gal h3{margin:0 0 8px 0;font-size:14px}
+.glist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;overflow:auto}
+.gbtn{border:1px solid #334155;background:#0b1220;color:#cbd5e1;border-radius:8px;padding:4px;cursor:pointer;text-align:left}
+.gbtn.on{border-color:#60a5fa;box-shadow:0 0 0 1px #60a5fa inset}
+.gbtn img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:6px;display:block;background:#0b1220}
+.gmeta{display:block;font-size:11px;padding:4px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px}
 #photo{display:block;max-width:100%;height:auto;margin:0 auto}
 #ov{position:absolute;inset:0;pointer-events:none}
@@ -769,15 +776,19 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 <body>
 <div class="top"><div><strong id="title">Loading…</strong><div class="muted" id="sub"></div></div><div id="stat" class="muted"></div></div>
 <div class="main">
+  <div class="gal"><h3>Gallery</h3><div class="glist" id="glist"></div></div>
   <div class="stage"><img id="photo" alt=""><div id="ov"></div></div>
   <div class="side">
     <div class="muted">People already on this photo</div><div class="people" id="people"></div>
     <datalist id="peopleList"></datalist>
     <div class="rows" id="rows"></div>
     <div class="acts">
+      <button id="first">First</button>
       <button id="prev">Previous</button>
       <button id="skip">Skip</button>
       <button id="save" class="pri">Save & Next</button>
+      <button id="next">Next</button>
+      <button id="last">Last</button>
       <button id="done">Done</button>
     </div>
   </div>
@@ -839,6 +850,10 @@ function render(p){
     if(inp && hint && hint.name){inp.value=hint.name; inp.focus();}
   });
   document.getElementById('prev').disabled = idx <= 0;
+  document.getElementById('first').disabled = idx <= 0;
+  document.getElementById('next').disabled = idx >= count - 1;
+  document.getElementById('last').disabled = idx >= count - 1;
+  document.querySelectorAll('#glist .gbtn').forEach((b,bi)=>b.classList.toggle('on', bi===idx));
   refreshNameList();
 }
 async function load(i){
@@ -849,6 +864,9 @@ async function load(i){
 async function init(){
   const m=await j('/api/meta'); count=m.count||0;
   (m.people||[]).forEach(addName);
+  const gl=document.getElementById('glist');
+  gl.innerHTML=(m.gallery||[]).map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}"><img src="${g.thumb}" alt=""><span class="gmeta">#${g.id}</span></button>`).join('');
+  gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{ await load(parseInt(b.getAttribute('data-i'),10)||0); });
   refreshNameList();
   if(!count){ setText('title','Nothing to label'); setText('sub','No confirmed photos with detectable faces in this batch.'); return; }
   await load(0);
@@ -868,12 +886,15 @@ async function saveAndNext(){
 document.getElementById('save').onclick=saveAndNext;
 document.getElementById('skip').onclick=async()=>{ if(idx+1 < count){ await load(idx+1); } };
 document.getElementById('prev').onclick=async()=>{ if(idx>0){ await load(idx-1); } };
+document.getElementById('first').onclick=async()=>{ if(count>0){ await load(0); } };
+document.getElementById('next').onclick=async()=>{ if(idx+1 < count){ await load(idx+1); } };
+document.getElementById('last').onclick=async()=>{ if(count>0){ await load(count-1); } };
 document.getElementById('done').onclick=async()=>{ await j('/api/done',{method:'POST'}); setText('sub','Done. You can close this tab.'); };
 init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e)); });
 </script></body></html>"""
 
 
-def local_label(api, conn, backend, tolerance, limit=40):
+def local_label(api, conn, backend, tolerance, limit=150):
     """Interactive local browser UI: tag faces and step next in one page."""
     items, people_names = _collect_label_items(api, conn, backend, tolerance, limit)
     if not items:
@@ -897,10 +918,12 @@ def local_label(api, conn, backend, tolerance, limit=40):
             if u.path == "/":
                 return self._write(200, _label_ui_html(), "text/html; charset=utf-8")
             if u.path == "/api/meta":
+                gallery = [{"id": it["id"], "thumb": it["image"]} for it in state["items"]]
                 return self._write(200, json.dumps({
                     "count": len(state["items"]),
                     "saved": state["saved"],
                     "people": state["people"],
+                    "gallery": gallery,
                 }))
             if u.path == "/api/photo":
                 q = parse_qs(u.query or "")
@@ -1460,8 +1483,8 @@ def main():
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
     ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
-    ap.add_argument("--label-limit", type=int, default=40, metavar="N",
-                    help="how many recent confirmed photos to consider in --label mode (default: 40)")
+    ap.add_argument("--label-limit", type=int, default=150, metavar="N",
+                    help="how many recent confirmed photos to load in --label mode (default: 150)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
     ap.add_argument("--status", action="store_true", help="show what is known and what is waiting")
     ap.add_argument("--check", action="store_true", help="preflight: backend, config, database, and server")
