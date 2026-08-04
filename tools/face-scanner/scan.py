@@ -754,8 +754,9 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 .gbtn.on{border-color:#60a5fa;box-shadow:0 0 0 1px #60a5fa inset}
 .gbtn img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:6px;display:block;background:#0b1220}
 .gmeta{display:block;font-size:11px;padding:4px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px}
-#photo{display:block;max-width:100%;height:auto;margin:0 auto}
+.stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
+.frame{position:relative;display:inline-block;max-width:100%;line-height:0}
+#photo{display:block;max-width:100%;height:auto}
 #ov{position:absolute;inset:0;pointer-events:none}
 .fb{position:absolute;border:2px solid #60a5fa;background:rgba(37,99,235,.14);border-radius:6px}
 .fb span{position:absolute;left:-1px;top:-1px;padding:2px 6px;background:#1d4ed8;border-radius:0 0 6px 0;font-weight:700;font-size:12px}
@@ -777,7 +778,7 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 <div class="top"><div><strong id="title">Loading…</strong><div class="muted" id="sub"></div></div><div id="stat" class="muted"></div></div>
 <div class="main">
   <div class="gal"><h3>Gallery</h3><div class="glist" id="glist"></div></div>
-  <div class="stage"><img id="photo" alt=""><div id="ov"></div></div>
+  <div class="stage"><div class="frame" id="frame"><img id="photo" alt=""><div id="ov"></div></div></div>
   <div class="side">
     <div class="muted">People already on this photo</div><div class="people" id="people"></div>
     <datalist id="peopleList"></datalist>
