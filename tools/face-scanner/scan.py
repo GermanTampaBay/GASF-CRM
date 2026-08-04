@@ -70,11 +70,14 @@ import base64
 import io
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 import sysconfig
 import tempfile
 import time
+import webbrowser
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -136,15 +139,39 @@ def ensure_windows_cuda_dll_dirs():
     if not pure:
         return
     base = Path(pure) / "nvidia"
-    for leaf in ("cudnn", "cublas", "cuda_runtime", "cuda_nvrtc"):
-        p = base / leaf / "bin"
-        if not p.is_dir():
-            continue
+    dirs = []
+    cu13 = base / "cu13" / "bin" / "x86_64"
+    cudnn = base / "cudnn" / "bin"
+
+    # New NVIDIA wheel layout (CUDA 13): keep this pair together to avoid
+    # mixing CUDA 13 provider DLLs with legacy CUDA 12 runtime DLL names.
+    if cu13.is_dir():
+        dirs.append(cu13)
+        if cudnn.is_dir():
+            dirs.append(cudnn)
+    else:
+        # Legacy wheel layout (CUDA 12 style folders).
+        for leaf in ("cudnn", "cublas", "cuda_runtime", "cuda_nvrtc"):
+            p = base / leaf / "bin"
+            if p.is_dir():
+                dirs.append(p)
+
+    for p in dirs:
         try:
             # Keep handles alive for process lifetime; dropping them removes the dir.
             _DLL_DIR_HANDLES.append(os.add_dll_directory(str(p)))
         except OSError:
             pass
+
+    # Some native loaders still rely on PATH-based resolution. Keep the same
+    # order there so transitive CUDA/cuDNN DLL loads stay on one stack.
+    current = os.environ.get("PATH", "")
+    parts = [x for x in current.split(";") if x]
+    for p in reversed([str(d) for d in dirs]):
+        if p in parts:
+            parts.remove(p)
+        parts.insert(0, p)
+    os.environ["PATH"] = ";".join(parts)
 
 
 # --------------------------------------------------------------------------- config
@@ -297,6 +324,16 @@ class InsightFaceBackend(Backend):
     name = "insightface:buffalo_l"
     dim = 512
 
+    @staticmethod
+    def _is_cuda_runtime_error(err):
+        msg = str(err or "").lower()
+        return (
+            "cudnn" in msg
+            or "cudaexecutionprovider" in msg
+            or "loadlibrary failed with error 126" in msg
+            or "onnxruntimeerror" in msg and "cuda" in msg
+        )
+
     def __init__(self):
         from insightface.app import FaceAnalysis  # heavy; imported on demand
         from PIL import Image
@@ -305,7 +342,6 @@ class InsightFaceBackend(Backend):
         self._Image = Image
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
         use_cuda = "CUDAExecutionProvider" in providers
-
         self._app = FaceAnalysis(name="buffalo_l", providers=providers or ["CPUExecutionProvider"])
         self._app.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
     def embed(self, image_bytes):
@@ -375,7 +411,6 @@ def available_engine(pref="auto"):
 def build_backend(pref="auto"):
     """Construct the chosen backend, importing ML now. Exits with guidance if
     nothing usable is installed."""
-    ensure_windows_cuda_dll_dirs()
     engine = available_engine(pref)
     if engine is None:
         if pref == "auto":
@@ -385,7 +420,25 @@ def build_backend(pref="auto"):
                 "  (or the dlib one, if you have it:  pip install face_recognition)"
             )
         sys.exit(f"Engine {pref!r} is selected but not installed. Try: pip install {pref}")
-    return _BACKENDS[engine]()
+    if engine != "insightface":
+        return _BACKENDS[engine]()
+
+    ensure_windows_cuda_dll_dirs()
+
+    # On some Windows setups, forcing pip NVIDIA DLL directories breaks an
+    # otherwise working CUDA stack; on others, those dirs are required. So try
+    # native resolution first, then retry with pip DLL dirs only if CUDA load
+    # errors indicate missing/mismatched runtime symbols.
+    try:
+        return InsightFaceBackend()
+    except Exception as first:
+        if not InsightFaceBackend._is_cuda_runtime_error(first):
+            raise
+        ensure_windows_cuda_dll_dirs()
+        try:
+            return InsightFaceBackend()
+        except Exception:
+            raise first
 
 
 def local_caption(image_bytes, cfg):
@@ -555,6 +608,163 @@ def box_iou_xywh(a, b):
     area_b = float(max(0, bw) * max(0, bh))
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+# --------------------------------------------------------------------------- local labeling
+
+
+def _render_label_preview(photo_id, image_bytes, boxes_xywh):
+    """Write a local HTML preview with numbered face rectangles and return its path."""
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    rects = []
+    for i, (x, y, w, h) in enumerate(boxes_xywh, start=1):
+        rects.append(
+            f"<button class='fb' style='left:{x}px;top:{y}px;width:{w}px;height:{h}px'><span>{i}</span></button>"
+        )
+    html = (
+        "<!doctype html><meta charset='utf-8'><title>GASF face labels</title>"
+        "<style>"
+        "body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:16px}"
+        ".wrap{position:relative;display:inline-block;max-width:min(96vw,1400px)}"
+        "img{display:block;max-width:100%;height:auto;border-radius:8px}"
+        ".fb{position:absolute;background:rgba(37,99,235,.2);border:2px solid #60a5fa;border-radius:6px;"
+        "color:#fff;padding:0;pointer-events:none}"
+        ".fb span{position:absolute;left:-1px;top:-1px;background:#1d4ed8;border-radius:0 0 6px 0;"
+        "font:700 13px/1.2 Segoe UI,Arial,sans-serif;padding:2px 6px}"
+        ".meta{margin:0 0 10px 0;color:#cbd5e1}"
+        "</style>"
+        f"<p class='meta'>Photo #{photo_id} — rectangles are numbered for the terminal prompt.</p>"
+        f"<div class='wrap'><img src='data:image/jpeg;base64,{b64}' alt='photo'>{''.join(rects)}</div>"
+    )
+    fd, path = tempfile.mkstemp(prefix=f"gasf-face-label-{photo_id}-", suffix=".html")
+    os.close(fd)
+    Path(path).write_text(html, encoding="utf-8")
+    return path
+
+
+def _open_preview_html(path):
+    """Open preview HTML in Edge on Windows; fall back to default browser elsewhere."""
+    p = Path(path).resolve()
+    if os.name == "nt":
+        candidates = [
+            "msedge.exe",
+            str(Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+            str(Path(os.environ.get("ProgramFiles", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+            str(Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe"),
+        ]
+        for edge in candidates:
+            if not edge or edge.endswith("\\.exe"):
+                continue
+            try:
+                if edge.lower() == "msedge.exe" or Path(edge).is_file():
+                    subprocess.Popen([edge, str(p)])
+                    return
+            except OSError:
+                continue
+    webbrowser.open_new_tab(p.as_uri())
+
+
+def _parse_face_label_input(text, max_index):
+    """Parse '1=Hans,2=Greta' into zero-based assignments."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    out = []
+    seen = set()
+    for part in re.split(r"[,\n;]+", text):
+        bit = part.strip()
+        if not bit:
+            continue
+        if "=" not in bit:
+            raise ValueError(f"missing '=' in {bit!r}")
+        left, right = bit.split("=", 1)
+        try:
+            idx = int(left.strip())
+        except ValueError as e:
+            raise ValueError(f"invalid face index {left!r}") from e
+        name = right.strip()
+        if idx < 1 or idx > max_index:
+            raise ValueError(f"face index {idx} is out of range 1..{max_index}")
+        if not name:
+            raise ValueError(f"face {idx} has an empty name")
+        if idx in seen:
+            raise ValueError(f"face {idx} is assigned more than once")
+        seen.add(idx)
+        out.append((idx - 1, name))
+    return out
+
+
+def local_label(api, conn, backend, tolerance, limit=40):
+    """Interactive local tool: show numbered face boxes, then store box->name labels."""
+    limit = max(1, min(100, int(limit)))
+    try:
+        data = api.get("/label-queue", limit=limit)
+    except requests.HTTPError as e:
+        code = e.response.status_code if e.response is not None else 0
+        if code != 404:
+            raise
+        # Backward compatibility if the server has not yet deployed the route.
+        data = api.get("/confirmed", limit=limit)
+    photos = [p for p in data.get("photos", []) if (p.get("people") or [])]
+    if not photos:
+        print("No confirmed, named photos are waiting for local labeling.")
+        return 0
+
+    saved = 0
+    refs = None
+
+    for p in photos:
+        photo_id = int(p["id"])
+        people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
+        if not people:
+            continue
+        try:
+            image_bytes = api.image(p["url"])
+            found = backend.embed(image_bytes)
+        except Exception as e:
+            print(f"#{photo_id}: skipped ({e})")
+            continue
+        if not found:
+            continue
+
+        boxes = [css_box_to_xywh(box_css) for (box_css, _) in found]
+        preview = _render_label_preview(photo_id, image_bytes, boxes)
+        _open_preview_html(preview)
+
+        if refs is None:
+            refs = load_references(conn, backend.name)
+
+        print(f"\nPhoto #{photo_id}")
+        print("  People on this photo:", ", ".join(people))
+        print("  Face boxes:", len(boxes))
+        hints = []
+        for i, (_, vec) in enumerate(found, start=1):
+            name, conf = identify(vec, refs or {}, backend, tolerance)
+            if name:
+                hints.append(f"{i}:{name} ({int(round(conf * 100))}%)")
+        if hints:
+            print("  Recognized hints:", ", ".join(hints))
+        print("  Enter mappings like: 1=Hans,2=Greta")
+        print("  Commands: [Enter]=skip, done=finish")
+
+        while True:
+            raw = input("  labels> ").strip()
+            if raw.lower() == "done":
+                return saved
+            if raw == "":
+                break
+            try:
+                pairs = _parse_face_label_input(raw, len(boxes))
+            except ValueError as e:
+                print(f"  Invalid input: {e}")
+                continue
+            labels = [{"name": name, "box": boxes[i]} for (i, name) in pairs]
+            out = api.post("/label", {"photo": photo_id, "labels": labels})
+            saved += int(out.get("stored") or 0)
+            print(f"  Stored {int(out.get('stored') or 0)} label(s).")
+            break
+
+    return saved
 
 
 # --------------------------------------------------------------------------- learn
@@ -1056,6 +1266,9 @@ def main():
 
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
+    ap.add_argument("--label", action="store_true", help="interactive local box->name labeling for learning")
+    ap.add_argument("--label-limit", type=int, default=40, metavar="N",
+                    help="how many recent confirmed photos to consider in --label mode (default: 40)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
     ap.add_argument("--status", action="store_true", help="show what is known and what is waiting")
     ap.add_argument("--check", action="store_true", help="preflight: backend, config, database, and server")
@@ -1091,6 +1304,12 @@ def main():
     api = Api(url, key)
     conn = db()
     verbose = not args.quiet
+
+    if args.label:
+        stored = local_label(api, conn, backend, tolerance, args.label_limit)
+        if verbose:
+            print(f"stored {stored} explicit face label(s)")
+        return
 
     while True:
         # In watch mode learn every pass — it is incremental past the watermark,

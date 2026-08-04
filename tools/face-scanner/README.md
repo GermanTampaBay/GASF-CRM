@@ -69,6 +69,7 @@ The first real run downloads the `buffalo_l` model pack (~280 MB) into
 |---|---|
 | `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
+| `python scan.py --label` | Open a local preview with numbered face boxes and save explicit box→name labels for learning. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
 | `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
@@ -99,8 +100,9 @@ runs do not depend on manual PATH edits in every shell.
 It learns from two safe sources:
 
 1. **Unambiguous photos** (one face, one name), and
-2. **Explicit face-box labels** from the CRM editor (a volunteer clicks a face
-   rectangle and assigns the name to that specific face).
+2. **Explicit face-box labels** from the local scanner tool (`python scan.py --label`),
+   which detects faces locally and stores exact box→name mappings through the
+   scanner API.
 
 That second path means group photos can now teach the model without guessing
 which name belongs to which face. A person is not offered as a suggestion until

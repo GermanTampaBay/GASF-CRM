@@ -220,21 +220,15 @@ function gasf_crm_face_boxes_for( $attachment_id ) {
  * @param array $map [ ['i'=>0,'name'=>'...'], ... ] where i indexes faces_for().
  * @return int number of labels applied from this save
  */
-function gasf_crm_face_labels_record( $attachment_id, array $map ) {
+function gasf_crm_face_labels_store( $attachment_id, array $labels ) {
 	$id = (int) $attachment_id;
-	if ( ! $id || ! $map ) { return 0; }
-
-	$src = function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array();
-	if ( ! $src ) { return 0; }
+	if ( ! $id || ! $labels ) { return 0; }
 
 	$next = array();
-	foreach ( $map as $m ) {
-		$i    = isset( $m['i'] ) ? (int) $m['i'] : -1;
-		$name = trim( sanitize_text_field( (string) ( $m['name'] ?? '' ) ) );
-		if ( $i < 0 || '' === $name || ! isset( $src[ $i ] ) || ! is_array( $src[ $i ] ) ) { continue; }
-
-		$box = array_map( 'intval', (array) ( $src[ $i ]['box'] ?? array() ) );
-		if ( 4 !== count( $box ) ) { continue; }
+	foreach ( $labels as $l ) {
+		$name = trim( sanitize_text_field( (string) ( $l['name'] ?? '' ) ) );
+		$box  = array_map( 'intval', (array) ( $l['box'] ?? array() ) );
+		if ( '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 		$key = implode( ',', $box );
 		$next[ $key ] = array(
 			'name' => $name,
@@ -257,6 +251,29 @@ function gasf_crm_face_labels_record( $attachment_id, array $map ) {
 
 	update_post_meta( $id, '_gasf_face_labels', array_values( $all ) );
 	return count( $next );
+}
+
+function gasf_crm_face_labels_record( $attachment_id, array $map ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || ! $map ) { return 0; }
+
+	$src = function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array();
+	if ( ! $src ) { return 0; }
+
+	$next = array();
+	foreach ( $map as $m ) {
+		$i    = isset( $m['i'] ) ? (int) $m['i'] : -1;
+		$name = trim( sanitize_text_field( (string) ( $m['name'] ?? '' ) ) );
+		if ( $i < 0 || '' === $name || ! isset( $src[ $i ] ) || ! is_array( $src[ $i ] ) ) { continue; }
+
+		$box = array_map( 'intval', (array) ( $src[ $i ]['box'] ?? array() ) );
+		if ( 4 !== count( $box ) ) { continue; }
+		$next[] = array(
+			'name' => $name,
+			'box'  => array_values( $box ),
+		);
+	}
+	return gasf_crm_face_labels_store( $id, $next );
 }
 
 /** Sanitized face labels kept for scanner learning. */
@@ -457,7 +474,69 @@ add_action( 'rest_api_init', function () {
 				$stored,
 				$caps
 			) );
+
 			return array( 'ok' => true, 'photos' => $seen, 'suggestions' => $stored, 'captions' => $caps );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/label', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$in     = (array) $req->get_json_params();
+			$id     = (int) ( $in['photo'] ?? 0 );
+			$labels = (array) ( $in['labels'] ?? array() );
+			if ( ! $id || ! gasf_crm_photo_in_library( $id ) || get_post_meta( $id, '_gasf_photo_flyer', true ) ) {
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
+			if ( ! $labels ) {
+				return new WP_Error( 'gasf_crm_bad', 'No labels supplied.', array( 'status' => 400 ) );
+			}
+			$stored = gasf_crm_face_labels_store( $id, $labels );
+			if ( $stored < 1 ) {
+				return new WP_Error( 'gasf_crm_bad', 'No valid labels in that request.', array( 'status' => 400 ) );
+			}
+			gasf_crm_log( sprintf( 'CRM faces: %d explicit label(s) stored for photo #%d via scanner API', $stored, $id ) );
+			return array( 'ok' => true, 'photo' => $id, 'stored' => $stored );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/label-queue', array(
+		'methods'             => 'GET',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$limit = min( 100, max( 1, (int) $req->get_param( 'limit' ) ?: 25 ) );
+			$ids = get_posts( array(
+				'post_type'      => 'attachment',
+				'post_status'    => 'inherit',
+				'posts_per_page' => $limit,
+				'fields'         => 'ids',
+				'no_found_rows'  => true,
+				'orderby'        => 'ID',
+				'order'          => 'DESC',
+				'post_mime_type' => 'image',
+				'meta_query'     => array(
+					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
+				),
+				'tax_query'      => array(
+					array( 'taxonomy' => 'gasf_photo_person', 'operator' => 'EXISTS' ),
+				),
+			) );
+
+			$out = array();
+			foreach ( $ids as $id ) {
+				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
+				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+				if ( ! $people ) { continue; }
+				$out[] = array(
+					'id'     => (int) $id,
+					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+					'people' => array_map( 'html_entity_decode', $people ),
+					'labels' => gasf_crm_face_labels_for( $id ),
+				);
+			}
+			return array( 'photos' => $out );
 		},
 	) );
 

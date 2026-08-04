@@ -420,12 +420,6 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .pbig{display:block;border-radius:6px;overflow:hidden;background:var(--gasf-chip)}
 .pbig img{width:100%;max-height:46vh;object-fit:contain;display:block}
 .pbigwrap{position:relative}
-.pfaceov,.lbfaceov{position:absolute;inset:0;pointer-events:none}
-.facebox{position:absolute;pointer-events:auto;background:rgba(15,23,42,.2);border:2px solid var(--s-accent);
-	border-radius:6px;color:#fff;display:flex;align-items:flex-start;justify-content:flex-start;padding:2px 4px;
-	font:700 11px/1.1 var(--slug);cursor:pointer}
-.facebox:hover,.facebox:focus-visible{background:rgba(15,23,42,.42);outline:none}
-.facebox.used{opacity:.45}
 .firsttime{display:inline-block;font-size:11px;font-weight:600;background:#fdf8e7;color:#8a6508;
 	border:1px solid #dba617;border-radius:9px;padding:1px 8px;margin-left:4px}
 .badge{display:inline-block;font-size:11px;padding:1px 7px;border-radius:9px;background:var(--gasf-chip);color:var(--gasf-muted);vertical-align:middle}

@@ -2159,8 +2159,7 @@ function gasf_crm_render_inbox_script() {
 				? '<div class="note err">The image file is missing from the server, though its record is still here. ' +
 				  'Nothing can be done with it — reject it, and it can be taken in again from the original email.</div>'
 				: '<div class="pbigwrap"><button type="button" class="pbig" aria-label="Open this photo full size">' +
-				  '<img src="' + esc(p.full || p.thumb) + '" alt=""></button>' +
-				  '<div class="pfaceov">' + faceBoxesMarkup(p) + '</div></div>';
+				  '<img src="' + esc(p.full || p.thumb) + '" alt=""></button></div>';
 
 			h += '<p class="muted" style="margin:10px 0 4px">Sent by <strong>' + esc(p.from) + '</strong>' +
 				(p.email ? ' &lt;' + esc(p.email) + '&gt;' : '') +
@@ -2196,7 +2195,6 @@ function gasf_crm_render_inbox_script() {
 		wireEventPickers(ppane);
 		wirePlaceSelects(ppane);
 		wirePeople(ppane);
-		wireFaceBoxes(ppane.querySelector('.pfaceov'), ppane);
 
 		var ok = ppane.querySelector('.p-ok');
 		if (ok) {
@@ -2212,7 +2210,6 @@ function gasf_crm_render_inbox_script() {
 					flyer: !!(ppane.querySelector('.p-flyer') && ppane.querySelector('.p-flyer').checked),
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
-					face_map: faceAssignments(ppane.querySelector('.pfaceov')),
 					revision: v('.p-rev')
 				})}).then(function(){ loadPeople(true); loadPhotos(); openPhoto(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
@@ -3032,8 +3029,8 @@ function gasf_crm_render_inbox_script() {
 			lbi.hidden = false; lbi.src = p.full || p.url;
 			if (lbstage) { lbstage.hidden = false; }
 			if (lbfaces) {
-				lbfaces.innerHTML = faceBoxesMarkup(p);
-				lbfaces.hidden = !lbfaces.innerHTML;
+				lbfaces.innerHTML = '';
+				lbfaces.hidden = true;
 			}
 		}
 
@@ -3148,11 +3145,6 @@ function gasf_crm_render_inbox_script() {
 			if (!nextId) { return; }
 			lbOpen(nextId, null, (lgrid && lgrid._photos) ? lgrid._photos[nextId] : null);
 		}; }
-		wireFaceBoxes(lbfaces, null, function(){
-			lbEdit(p);
-			return document.getElementById('lbedit');
-		});
-
 		box.hidden = false;
 
 		// Focus follows the eye. Without this a keyboard user opens the photo
@@ -3359,7 +3351,6 @@ function gasf_crm_render_inbox_script() {
 		wireEventPickers(edit);
 		wirePlaceSelects(edit);
 		wirePeople(edit);
-		wireFaceBoxes(document.getElementById('lbfaces'), edit);
 
 		var cancel = edit.querySelector('.p-cancel');
 		if (cancel) { cancel.onclick = function(){ lbOpen(p.id); }; }
@@ -3377,7 +3368,6 @@ function gasf_crm_render_inbox_script() {
 				flyer: !!(edit.querySelector('.p-flyer') && edit.querySelector('.p-flyer').checked),
 				event_id: parseInt(v('.p-evid'), 10) || 0,
 				taken: v('.p-taken'), caption: v('.p-caption'),
-				face_map: faceAssignments(document.getElementById('lbfaces')),
 				revision: v('.p-rev')
 			})}).then(function(card){
 				// The grid behind the overlay is now stale in exactly one cell.
