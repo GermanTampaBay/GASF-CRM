@@ -746,14 +746,17 @@ def _label_ui_html():
 <style>
 body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
 .top{padding:12px 16px;border-bottom:1px solid #26324a;display:flex;gap:12px;align-items:center;justify-content:space-between}
-.main{display:grid;grid-template-columns:270px minmax(0,1fr) 420px;gap:14px;padding:14px}
-.gal{border:1px solid #2d3748;border-radius:8px;background:#111827;padding:10px;display:flex;flex-direction:column;min-height:72vh}
-.gal h3{margin:0 0 8px 0;font-size:14px}
-.glist{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;overflow:auto}
-.gbtn{border:1px solid #334155;background:#0b1220;color:#cbd5e1;border-radius:8px;padding:4px;cursor:pointer;text-align:left}
+.main{padding:14px}
+.view{display:none}
+.view.on{display:block}
+.gallery{border:1px solid #2d3748;border-radius:10px;background:#111827;padding:12px}
+.gallery h3{margin:0 0 10px 0;font-size:15px}
+.glist{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.gbtn{border:1px solid #334155;background:#0b1220;color:#cbd5e1;border-radius:8px;padding:6px;cursor:pointer;text-align:left}
 .gbtn.on{border-color:#60a5fa;box-shadow:0 0 0 1px #60a5fa inset}
 .gbtn img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:6px;display:block;background:#0b1220}
-.gmeta{display:block;font-size:11px;padding:4px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gmeta{display:block;font-size:12px;padding:6px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.detail{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:14px}
 .stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
 .frame{position:relative;display:inline-block;max-width:100%;line-height:0}
 #photo{display:block;max-width:100%;height:auto}
@@ -769,7 +772,6 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 .row label{font-size:12px;color:#cbd5e1}
 .row input{background:#0b1220;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:6px 8px}
 .row button{background:#1d4ed8;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer}
-.hint{font-size:11px;color:#93c5fd}
 .acts{display:flex;gap:8px;margin-top:12px}
 .acts button{padding:8px 12px;border:1px solid #334155;border-radius:6px;background:#0b1220;color:#e5e7eb;cursor:pointer}
 .acts .pri{background:#2563eb;border-color:#2563eb;color:white}
@@ -777,22 +779,25 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 <body>
 <div class="top"><div><strong id="title">Loading…</strong><div class="muted" id="sub"></div></div><div id="stat" class="muted"></div></div>
 <div class="main">
-  <div class="gal"><h3>Gallery</h3><div class="glist" id="glist"></div></div>
-  <div class="stage"><div class="frame" id="frame"><img id="photo" alt=""><div id="ov"></div></div></div>
-  <div class="side">
-    <div class="muted">People already on this photo</div><div class="people" id="people"></div>
-    <datalist id="peopleList"></datalist>
-    <div class="rows" id="rows"></div>
-    <div class="acts">
-      <button id="first">First</button>
-      <button id="prev">Previous</button>
-      <button id="skip">Skip</button>
-      <button id="save" class="pri">Save & Next</button>
-      <button id="next">Next</button>
-      <button id="last">Last</button>
-      <button id="done">Done</button>
+  <section class="view gallery on" id="galleryView">
+    <h3>Photo gallery</h3>
+    <div class="glist" id="glist"></div>
+  </section>
+  <section class="view detail" id="detailView">
+    <div class="stage"><div class="frame" id="frame"><img id="photo" alt=""><div id="ov"></div></div></div>
+    <div class="side">
+      <div class="muted">People already on this photo</div><div class="people" id="people"></div>
+      <datalist id="peopleList"></datalist>
+      <div class="rows" id="rows"></div>
+      <div class="acts">
+        <button id="back">Back</button>
+        <button id="next">Next</button>
+        <button id="save" class="pri">Save & Next</button>
+        <button id="exit">Exit to gallery</button>
+        <button id="done">Done</button>
+      </div>
     </div>
-  </div>
+  </section>
 </div>
 <script>
 let count=0, idx=0, current=null;
@@ -800,6 +805,8 @@ const nameSet = new Map();
 async function j(url,opt){ const r=await fetch(url,opt); if(!r.ok){throw new Error(await r.text()||r.statusText);} return r.json(); }
 function setText(id,t){document.getElementById(id).textContent=t;}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function showGallery(){ document.getElementById('galleryView').classList.add('on'); document.getElementById('detailView').classList.remove('on'); }
+function showDetail(){ document.getElementById('galleryView').classList.remove('on'); document.getElementById('detailView').classList.add('on'); }
 function addName(n){
   const name=(n||'').trim();
   if(!name){return;}
@@ -827,6 +834,7 @@ function drawBoxes(p){
 }
 function render(p){
   current=p;
+  showDetail();
   setText('title', `Photo #${p.id}`);
   setText('sub', `${p.boxes.length} face box(es)`);
   setText('stat', `${idx+1} / ${count}`);
@@ -850,10 +858,8 @@ function render(p){
     const inp=rows.querySelector(`input[data-i="${i}"]`);
     if(inp && hint && hint.name){inp.value=hint.name; inp.focus();}
   });
-  document.getElementById('prev').disabled = idx <= 0;
-  document.getElementById('first').disabled = idx <= 0;
+  document.getElementById('back').disabled = idx <= 0;
   document.getElementById('next').disabled = idx >= count - 1;
-  document.getElementById('last').disabled = idx >= count - 1;
   document.querySelectorAll('#glist .gbtn').forEach((b,bi)=>b.classList.toggle('on', bi===idx));
   refreshNameList();
 }
@@ -869,8 +875,11 @@ async function init(){
   gl.innerHTML=(m.gallery||[]).map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}"><img src="${g.thumb}" alt=""><span class="gmeta">#${g.id}</span></button>`).join('');
   gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{ await load(parseInt(b.getAttribute('data-i'),10)||0); });
   refreshNameList();
+  showGallery();
   if(!count){ setText('title','Nothing to label'); setText('sub','No confirmed photos with detectable faces in this batch.'); return; }
-  await load(0);
+  setText('title','Photo gallery');
+  setText('sub',`Click a photo to open it (${count} total in this batch).`);
+  setText('stat','');
 }
 async function saveAndNext(){
   if(!current){return;}
@@ -885,11 +894,9 @@ async function saveAndNext(){
   if(idx+1 < count){ await load(idx+1); } else { setText('sub','Saved. End of batch.'); }
 }
 document.getElementById('save').onclick=saveAndNext;
-document.getElementById('skip').onclick=async()=>{ if(idx+1 < count){ await load(idx+1); } };
-document.getElementById('prev').onclick=async()=>{ if(idx>0){ await load(idx-1); } };
-document.getElementById('first').onclick=async()=>{ if(count>0){ await load(0); } };
+document.getElementById('back').onclick=async()=>{ if(idx>0){ await load(idx-1); } };
 document.getElementById('next').onclick=async()=>{ if(idx+1 < count){ await load(idx+1); } };
-document.getElementById('last').onclick=async()=>{ if(count>0){ await load(count-1); } };
+document.getElementById('exit').onclick=()=>{ showGallery(); setText('title','Photo gallery'); setText('sub',`Click a photo to open it (${count} total in this batch).`); setText('stat',''); };
 document.getElementById('done').onclick=async()=>{ await j('/api/done',{method:'POST'}); setText('sub','Done. You can close this tab.'); };
 init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e)); });
 </script></body></html>"""

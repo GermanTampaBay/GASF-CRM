@@ -69,7 +69,7 @@ The first real run downloads the `buffalo_l` model pack (~280 MB) into
 |---|---|
 | `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
-| `python scan.py --label` | Open a local browser UI with a gallery strip, First/Previous/Next/Last navigation, name autocomplete from library people, and save explicit box→name mappings for learning. |
+| `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
 | `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
