@@ -334,6 +334,9 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .lf input[type=search]{min-width:230px}
 .libbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:5;background:var(--s-tint);border-bottom:2px solid var(--s-accent)}
 .libcount{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.pad#lpager{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#ljumps{display:flex;gap:6px;flex-wrap:wrap}
+#ljumps .btn{padding:4px 8px;font-size:12px}
 .lgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;padding:10px}
 .lcard{position:relative;border:1px solid var(--gasf-border);border-radius:5px;overflow:hidden;background:var(--gasf-surface)}
 .lcard.sel{outline:3px solid var(--s-accent);outline-offset:-3px}

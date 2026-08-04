@@ -667,10 +667,22 @@ function gasf_crm_render_inbox_script() {
 			var top  = Math.max(0, Math.min(99.5, (y / ih) * 100));
 			var ww   = Math.max(1, Math.min(100 - left, (w / iw) * 100));
 			var hh   = Math.max(1, Math.min(100 - top,  (h / ih) * 100));
-			return '<button type="button" class="facebox" data-name="' + esc(f.name || '') + '" ' +
+			return '<button type="button" class="facebox" data-face-index="' + i + '" data-name="' + esc(f.name || '') + '" ' +
 				'title="Add ' + esc(f.name || 'this name') + '" style="left:' + left.toFixed(3) + '%;top:' + top.toFixed(3) + '%;width:' + ww.toFixed(3) + '%;height:' + hh.toFixed(3) + '%">' +
 				'<span>' + (i + 1) + '</span></button>';
 		}).join('');
+	}
+
+	function faceAssignments(overlay){
+		if (!overlay) { return []; }
+		var out = [];
+		Array.prototype.forEach.call(overlay.querySelectorAll('.facebox'), function(b){
+			var name = (b.dataset.assigned || '').trim();
+			var idx = parseInt(b.dataset.faceIndex, 10);
+			if (!name || !(idx >= 0)) { return; }
+			out.push({ i: idx, name: name });
+		});
+		return out;
 	}
 
 	function wireFaceBoxes(overlay, formRoot, onNeedForm){
@@ -701,6 +713,7 @@ function gasf_crm_render_inbox_script() {
 					if (!focus && i.value.trim().toLowerCase() === name.toLowerCase()) { focus = i; }
 				});
 				if (!focus) { focus = addSuggestedName(box, name); }
+				b.dataset.assigned = name;
 				markUsed(root);
 				if (focus) { focus.focus(); }
 			};
@@ -1149,6 +1162,7 @@ function gasf_crm_render_inbox_script() {
 					// a hand-typed name never claims to be a specific event.
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
+					face_map: faceAssignments(card.querySelector('.pfaceov')),
 					revision: v('.p-rev')
 				})}).then(function(){ loadPeople(true); open(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
@@ -2175,6 +2189,7 @@ function gasf_crm_render_inbox_script() {
 					flyer: !!(ppane.querySelector('.p-flyer') && ppane.querySelector('.p-flyer').checked),
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
+					face_map: faceAssignments(ppane.querySelector('.pfaceov')),
 					revision: v('.p-rev')
 				})}).then(function(){ loadPeople(true); loadPhotos(); openPhoto(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
@@ -2340,7 +2355,7 @@ function gasf_crm_render_inbox_script() {
 	 */
 	var lgrid = document.getElementById('lgrid');
 	var lsel  = {};              // id -> card, the running selection
-	var lpage = 1, lids = [], lfacets = null, lqTimer = null;
+	var lpage = 1, lpages = 1, lids = [], lfacets = null, lqTimer = null;
 
 	function lval(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 
@@ -2351,6 +2366,23 @@ function gasf_crm_render_inbox_script() {
 	}
 
 	function lselCount(){ return Object.keys(lsel).length; }
+
+	function lrenderJumps(page, pages){
+		var host = document.getElementById('ljumps');
+		if (!host) { return; }
+		var bits = [];
+		if (page > 1) {
+			bits.push('<button type="button" class="btn sec" data-page="1">First</button>');
+		}
+		for (var n = page; n <= Math.min(pages, page + 5); n++) {
+			if (n === page) { bits.push('<button type="button" class="btn sec" disabled>' + n + '</button>'); }
+			else { bits.push('<button type="button" class="btn sec" data-page="' + n + '">' + n + '</button>'); }
+		}
+		if (page < pages) {
+			bits.push('<button type="button" class="btn sec" data-page="' + pages + '">Last</button>');
+		}
+		host.innerHTML = bits.join('');
+	}
 
 	function lsyncBar(){
 		var n = lselCount();
@@ -2444,9 +2476,11 @@ function gasf_crm_render_inbox_script() {
 
 			var pager = document.getElementById('lpager');
 			pager.hidden = (r.pages <= 1);
+			lpages = r.pages || 1;
 			document.getElementById('lpage').textContent = 'Page ' + r.page + ' of ' + r.pages;
 			document.getElementById('lprev').disabled = (r.page <= 1);
 			document.getElementById('lnext').disabled = (r.page >= r.pages);
+			lrenderJumps(r.page, r.pages);
 
 			document.getElementById('lzip').textContent = 'Download as a zip';
 			lsyncBar();
@@ -2847,7 +2881,16 @@ function gasf_crm_render_inbox_script() {
 
 	var lprev = document.getElementById('lprev'), lnext = document.getElementById('lnext');
 	if (lprev) { lprev.onclick = function(){ if (lpage > 1) { lpage--; loadLib(); } }; }
-	if (lnext) { lnext.onclick = function(){ lpage++; loadLib(); }; }
+	if (lnext) { lnext.onclick = function(){ if (lpage < lpages) { lpage++; loadLib(); } }; }
+	var ljumps = document.getElementById('ljumps');
+	if (ljumps) { ljumps.onclick = function(ev){
+		var b = ev.target.closest ? ev.target.closest('[data-page]') : null;
+		if (!b) { return; }
+		var to = parseInt(b.getAttribute('data-page'), 10) || 0;
+		if (to < 1 || to === lpage) { return; }
+		lpage = to;
+		loadLib();
+	}; }
 
 	if (lgrid) {
 		lgrid.addEventListener('click', function(ev){
@@ -3311,6 +3354,7 @@ function gasf_crm_render_inbox_script() {
 				flyer: !!(edit.querySelector('.p-flyer') && edit.querySelector('.p-flyer').checked),
 				event_id: parseInt(v('.p-evid'), 10) || 0,
 				taken: v('.p-taken'), caption: v('.p-caption'),
+				face_map: faceAssignments(document.getElementById('lbfaces')),
 				revision: v('.p-rev')
 			})}).then(function(card){
 				// The grid behind the overlay is now stale in exactly one cell.

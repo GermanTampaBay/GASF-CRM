@@ -90,12 +90,21 @@ When enabled, the CRM shows a **Use suggestion** button in photo editing.
 Applying it writes the caption with ` (AI Summary)` appended, so provenance is
 explicit in the archive.
 
+On Windows, `scan.py` now auto-adds pip-installed NVIDIA runtime DLL folders
+(`site-packages\nvidia\...\bin`) before loading ONNX/InsightFace, so CUDA
+runs do not depend on manual PATH edits in every shell.
+
 ### How it learns
 
-It only learns from **unambiguous** photos: one face, one name. A crowd shot
-with six names teaches it nothing about which face is which, so it is skipped —
-guessing there would poison the reference set. A person is not offered as a
-suggestion until it has **at least three** examples of them.
+It learns from two safe sources:
+
+1. **Unambiguous photos** (one face, one name), and
+2. **Explicit face-box labels** from the CRM editor (a volunteer clicks a face
+   rectangle and assigns the name to that specific face).
+
+That second path means group photos can now teach the model without guessing
+which name belongs to which face. A person is not offered as a suggestion until
+it has **at least three** examples.
 
 ---
 

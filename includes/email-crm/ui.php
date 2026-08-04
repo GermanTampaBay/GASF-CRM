@@ -571,6 +571,7 @@ function gasf_crm_render_inbox() {
 		<div class="pad" id="lpager" hidden>
 			<button class="btn sec" id="lprev" type="button">Previous</button>
 			<span class="muted" id="lpage"></span>
+			<span id="ljumps"></span>
 			<button class="btn sec" id="lnext" type="button">Next</button>
 		</div>
 	</div>

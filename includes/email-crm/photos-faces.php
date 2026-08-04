@@ -181,6 +181,69 @@ function gasf_crm_faces_for( $attachment_id ) {
 	return $out;
 }
 
+/**
+ * Persist explicit face->name choices made by a volunteer on this photo.
+ *
+ * Stored apart from taxonomy, as training hints for the home scanner only.
+ * Each entry points at a face suggestion rectangle plus the chosen name.
+ *
+ * @param array $map [ ['i'=>0,'name'=>'...'], ... ] where i indexes faces_for().
+ * @return int number of labels applied from this save
+ */
+function gasf_crm_face_labels_record( $attachment_id, array $map ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || ! $map ) { return 0; }
+
+	$src = gasf_crm_faces_for( $id );
+	if ( ! $src ) { return 0; }
+
+	$next = array();
+	foreach ( $map as $m ) {
+		$i    = isset( $m['i'] ) ? (int) $m['i'] : -1;
+		$name = trim( sanitize_text_field( (string) ( $m['name'] ?? '' ) ) );
+		if ( $i < 0 || '' === $name || ! isset( $src[ $i ] ) || ! is_array( $src[ $i ] ) ) { continue; }
+
+		$box = array_map( 'intval', (array) ( $src[ $i ]['box'] ?? array() ) );
+		if ( 4 !== count( $box ) ) { continue; }
+		$key = implode( ',', $box );
+		$next[ $key ] = array(
+			'name' => $name,
+			'box'  => array_values( $box ),
+		);
+	}
+	if ( ! $next ) { return 0; }
+
+	$have = get_post_meta( $id, '_gasf_face_labels', true );
+	$all  = array();
+	if ( is_array( $have ) ) {
+		foreach ( $have as $h ) {
+			$b = array_map( 'intval', (array) ( $h['box'] ?? array() ) );
+			$n = trim( sanitize_text_field( (string) ( $h['name'] ?? '' ) ) );
+			if ( 4 !== count( $b ) || '' === $n ) { continue; }
+			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ) );
+		}
+	}
+	foreach ( $next as $k => $v ) { $all[ $k ] = $v; }
+
+	update_post_meta( $id, '_gasf_face_labels', array_values( $all ) );
+	return count( $next );
+}
+
+/** Sanitized face labels kept for scanner learning. */
+function gasf_crm_face_labels_for( $attachment_id ) {
+	$id  = (int) $attachment_id;
+	$raw = get_post_meta( $id, '_gasf_face_labels', true );
+	if ( ! is_array( $raw ) ) { return array(); }
+	$out = array();
+	foreach ( $raw as $r ) {
+		$box = array_map( 'intval', (array) ( $r['box'] ?? array() ) );
+		$name = trim( sanitize_text_field( (string) ( $r['name'] ?? '' ) ) );
+		if ( 4 !== count( $box ) || '' === $name ) { continue; }
+		$out[] = array( 'name' => $name, 'box' => array_values( $box ) );
+	}
+	return $out;
+}
+
 /** Store, clear, and read local-model caption suggestions (separate from truth). */
 function gasf_crm_caption_suggestion_store( $attachment_id, $raw_text, $raw_model = '' ) {
 	$id   = (int) $attachment_id;
@@ -421,11 +484,13 @@ add_action( 'rest_api_init', function () {
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
 				if ( ! $people ) { continue; }
+				$labels = gasf_crm_face_labels_for( $id );
 				$out[] = array(
 					'id'     => (int) $id,
 					'modified' => $modified,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
 					'people' => array_map( 'html_entity_decode', $people ),
+					'labels' => $labels,
 				);
 			}
 			return array( 'photos' => $out );

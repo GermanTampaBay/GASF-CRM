@@ -72,6 +72,7 @@ import json
 import os
 import sqlite3
 import sys
+import sysconfig
 import tempfile
 import time
 from pathlib import Path
@@ -120,6 +121,30 @@ MAX_SCAN_RETRIES = 3
 QUARANTINE_FAILS = 3
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
 DETERMINISTIC_HTTP = {400, 401, 403, 404, 410, 415, 422}
+_DLL_DIR_HANDLES = []
+
+
+def ensure_windows_cuda_dll_dirs():
+    """On Windows, add pip-installed NVIDIA runtime DLL folders for this process.
+
+    onnxruntime-gpu depends on CUDA/cuDNN DLLs that may live under
+    site-packages\\nvidia\\*\\bin and not be on PATH. add_dll_directory keeps
+    loading deterministic without requiring machine-wide PATH edits."""
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    pure = sysconfig.get_paths().get("purelib", "")
+    if not pure:
+        return
+    base = Path(pure) / "nvidia"
+    for leaf in ("cudnn", "cublas", "cuda_runtime", "cuda_nvrtc"):
+        p = base / leaf / "bin"
+        if not p.is_dir():
+            continue
+        try:
+            # Keep handles alive for process lifetime; dropping them removes the dir.
+            _DLL_DIR_HANDLES.append(os.add_dll_directory(str(p)))
+        except OSError:
+            pass
 
 
 # --------------------------------------------------------------------------- config
@@ -275,12 +300,14 @@ class InsightFaceBackend(Backend):
     def __init__(self):
         from insightface.app import FaceAnalysis  # heavy; imported on demand
         from PIL import Image
-        self._Image = Image
-        self._app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-        # ctx_id=-1 is CPU. det_size is the detector's working resolution; 640
-        # is insightface's own default and a fair speed/recall trade on a home PC.
-        self._app.prepare(ctx_id=-1, det_size=(640, 640))
+        import onnxruntime as ort
 
+        self._Image = Image
+        providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
+        use_cuda = "CUDAExecutionProvider" in providers
+
+        self._app = FaceAnalysis(name="buffalo_l", providers=providers or ["CPUExecutionProvider"])
+        self._app.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
     def embed(self, image_bytes):
         # insightface expects an OpenCV-style BGR uint8 array. PIL gives us RGB;
         # reverse the channels and make it contiguous for the C++ detector.
@@ -348,6 +375,7 @@ def available_engine(pref="auto"):
 def build_backend(pref="auto"):
     """Construct the chosen backend, importing ML now. Exits with guidance if
     nothing usable is installed."""
+    ensure_windows_cuda_dll_dirs()
     engine = available_engine(pref)
     if engine is None:
         if pref == "auto":
@@ -404,8 +432,9 @@ def _migrate(conn):
                person TEXT NOT NULL,
                photo_id INTEGER NOT NULL,
                engine TEXT NOT NULL DEFAULT '',
+               face_key TEXT NOT NULL DEFAULT '0',
                vector BLOB NOT NULL,
-               UNIQUE(photo_id, engine)
+               UNIQUE(photo_id, engine, face_key)
            )"""
     )
     conn.execute("CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT)")
@@ -414,27 +443,31 @@ def _migrate(conn):
     if "engine" not in cols:  # a database written before backends existed
         conn.execute("ALTER TABLE refs ADD COLUMN engine TEXT NOT NULL DEFAULT ''")
         conn.execute("UPDATE refs SET engine = 'face_recognition:dlib-hog' WHERE engine = ''")
+    if "face_key" not in cols:
+        conn.execute("ALTER TABLE refs ADD COLUMN face_key TEXT NOT NULL DEFAULT '0'")
+        conn.execute("UPDATE refs SET face_key = '0' WHERE face_key IS NULL OR face_key = ''")
 
-    if not _has_unique_photo_engine(conn):
+    if not _has_unique_photo_engine_face(conn):
         conn.execute("DROP TABLE IF EXISTS refs_new")
         conn.execute(
             """CREATE TABLE refs_new (
-                   id INTEGER PRIMARY KEY,
-                   person TEXT NOT NULL,
-                   photo_id INTEGER NOT NULL,
-                   engine TEXT NOT NULL DEFAULT '',
-                   vector BLOB NOT NULL,
-                   UNIQUE(photo_id, engine)
+                  id INTEGER PRIMARY KEY,
+                  person TEXT NOT NULL,
+                  photo_id INTEGER NOT NULL,
+                  engine TEXT NOT NULL DEFAULT '',
+                  face_key TEXT NOT NULL DEFAULT '0',
+                  vector BLOB NOT NULL,
+                  UNIQUE(photo_id, engine, face_key)
                )"""
         )
         conn.execute(
-            """INSERT INTO refs_new (id, person, photo_id, engine, vector)
-               SELECT r.id, r.person, r.photo_id, r.engine, r.vector
+            """INSERT INTO refs_new (id, person, photo_id, engine, face_key, vector)
+               SELECT r.id, r.person, r.photo_id, r.engine, COALESCE(NULLIF(r.face_key, ''), '0'), r.vector
                FROM refs r
                INNER JOIN (
-                   SELECT photo_id, engine, MAX(id) AS keep_id
+                   SELECT photo_id, engine, COALESCE(NULLIF(face_key, ''), '0') AS face_key, MAX(id) AS keep_id
                    FROM refs
-                   GROUP BY photo_id, engine
+                   GROUP BY photo_id, engine, COALESCE(NULLIF(face_key, ''), '0')
                ) k ON k.keep_id = r.id"""
         )
         conn.execute("DROP TABLE refs")
@@ -444,12 +477,12 @@ def _migrate(conn):
     conn.commit()
 
 
-def _has_unique_photo_engine(conn):
+def _has_unique_photo_engine_face(conn):
     for _, index_name, is_unique, *_ in conn.execute("PRAGMA index_list(refs)"):
         if not is_unique:
             continue
         cols = [row[2] for row in conn.execute(f"PRAGMA index_info({index_name!r})")]
-        if cols == ["photo_id", "engine"]:
+        if cols == ["photo_id", "engine", "face_key"]:
             return True
     return False
 
@@ -502,6 +535,28 @@ def identify(vector, references, backend, tolerance):
     return best_name, confidence(best_dist, tolerance)
 
 
+def css_box_to_xywh(box_css):
+    top, right, bottom, left = box_css
+    return [int(left), int(top), int(right - left), int(bottom - top)]
+
+
+def box_iou_xywh(a, b):
+    ax1, ay1, aw, ah = a
+    bx1, by1, bw, bh = b
+    ax2, ay2 = ax1 + max(0, aw), ay1 + max(0, ah)
+    bx2, by2 = bx1 + max(0, bw), by1 + max(0, bh)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = float(iw * ih)
+    if inter <= 0:
+        return 0.0
+    area_a = float(max(0, aw) * max(0, ah))
+    area_b = float(max(0, bw) * max(0, bh))
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
 # --------------------------------------------------------------------------- learn
 
 
@@ -509,10 +564,13 @@ def learn(api, conn, backend, verbose=True):
     """
     Grow the reference set from photos volunteers have actually tagged.
 
-    Only unambiguous pairs are learned: one face in the photo, one name on it.
-    A crowd shot with six names cannot say which face is which, and guessing
-    would poison the reference set with confident nonsense — the failure mode
-    that makes a system like this worse than nothing.
+    Two learning paths are allowed:
+      - one-face/one-name photos (the original unambiguous path), and
+      - explicit face-box labels from the CRM editor (box + chosen name).
+
+    Group photos without explicit face boxes are still skipped: guessing which
+    name belongs to which face would poison the reference set with confident
+    nonsense — the failure mode that makes a system like this worse than nothing.
 
     The watermark is per engine, so switching backends relearns from scratch
     into that engine's own vectors rather than trusting the other's homework.
@@ -544,6 +602,53 @@ def learn(api, conn, backend, verbose=True):
                 since_id = max(since_id, photo_id)
 
             people = [n for n in p.get("people", []) if n.strip()]
+            labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
+            if labels:
+                try:
+                    found = backend.embed(api.image(p["url"]))
+                except Exception as e:  # a missing file must not stop the run
+                    if verbose:
+                        print(f"  #{p['id']}: {e}")
+                    continue
+                if not found:
+                    skipped += 1
+                    continue
+
+                det_boxes = [css_box_to_xywh(b) for (b, _) in found]
+                used = set()
+                matched = 0
+                for li, lbl in enumerate(labels):
+                    name = str(lbl.get("name") or "").strip()
+                    box = lbl.get("box") or []
+                    if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
+                        continue
+                    target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                    best_i, best_iou = -1, 0.0
+                    for j, db in enumerate(det_boxes):
+                        if j in used:
+                            continue
+                        iou = box_iou_xywh(target, db)
+                        if iou > best_iou:
+                            best_i, best_iou = j, iou
+                    if best_i < 0 or best_iou < 0.15:
+                        continue
+                    used.add(best_i)
+                    _, vector = found[best_i]
+                    face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
+                    conn.execute(
+                        """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
+                               person = excluded.person,
+                               vector = excluded.vector""",
+                        (name, photo_id, backend.name, face_key, vector.astype(np.float32).tobytes()),
+                    )
+                    added += 1
+                    matched += 1
+                if matched == 0:
+                    skipped += 1
+                continue
+
             if len(people) != 1:
                 skipped += 1
                 continue
@@ -559,12 +664,12 @@ def learn(api, conn, backend, verbose=True):
 
             _, vector = found[0]
             conn.execute(
-                """INSERT INTO refs (person, photo_id, engine, vector)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(photo_id, engine) DO UPDATE SET
+                """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
                        person = excluded.person,
                        vector = excluded.vector""",
-                (people[0].strip(), photo_id, backend.name, vector.astype(np.float32).tobytes()),
+                (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
             )
             added += 1
 

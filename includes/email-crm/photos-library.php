@@ -541,6 +541,9 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 		'write_flyer'              => true,
 		'apply_names'              => true,
 	) );
+	if ( ! empty( $in['face_map'] ) && function_exists( 'gasf_crm_face_labels_record' ) ) {
+		gasf_crm_face_labels_record( $id, (array) $in['face_map'] );
+	}
 
 	/*
 	 * A human has now had their say, so the backfill's claim on this photo ends.
@@ -1238,6 +1241,7 @@ add_action( 'rest_api_init', function () {
 				'taken'    => (string) $req->get_param( 'taken' ),
 				'caption'  => (string) $req->get_param( 'caption' ),
 				'flyer'    => $req->get_param( 'flyer' ),
+				'face_map' => (array) $req->get_param( 'face_map' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
 		},

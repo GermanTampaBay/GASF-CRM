@@ -4038,6 +4038,9 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 		'write_flyer'              => true,
 		'apply_names'              => true,
 	) );
+	if ( ! empty( $keep['face_map'] ) && function_exists( 'gasf_crm_face_labels_record' ) ) {
+		gasf_crm_face_labels_record( $id, (array) $keep['face_map'] );
+	}
 
 	// Clearing the pending record is what takes it off the review list. Kept as
 	// history on the photo so "who said this was Hans" stays answerable.
@@ -4204,6 +4207,7 @@ add_action( 'rest_api_init', function () {
 				'taken'    => (string) $req->get_param( 'taken' ),
 				'caption'  => (string) $req->get_param( 'caption' ),
 				'flyer'    => $req->get_param( 'flyer' ),
+				'face_map' => (array) $req->get_param( 'face_map' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
 			return is_wp_error( $ok ) ? $ok : gasf_crm_photo_card( $aid );
@@ -4355,6 +4359,7 @@ add_action( 'rest_api_init', function () {
 				'taken'    => (string) $req->get_param( 'taken' ),
 				'caption'  => (string) $req->get_param( 'caption' ),
 				'flyer'    => $req->get_param( 'flyer' ),
+				'face_map' => (array) $req->get_param( 'face_map' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
 			if ( is_wp_error( $ok ) ) { return $ok; }
