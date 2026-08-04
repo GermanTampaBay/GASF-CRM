@@ -261,6 +261,10 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .pf .p-placeother{margin-top:5px}
 .p-people .pwrap{display:block;position:relative}
 .p-people .pwrap+.pwrap{margin-top:5px}
+.p-people .p-person{padding-right:30px}
+.pdelperson{position:absolute;right:5px;top:50%;transform:translateY(-50%);border:0;background:none;
+	color:var(--gasf-muted);font-size:16px;line-height:1;cursor:pointer;padding:0 4px}
+.pdelperson:hover{color:var(--danger)}
 /* The suggestion list. Absolutely positioned so it overlays whatever is below
    rather than shoving the form around as you type. */
 .psug{position:absolute;top:100%;left:0;right:0;z-index:40;background:var(--gasf-surface);

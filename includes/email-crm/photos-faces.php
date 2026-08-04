@@ -181,6 +181,36 @@ function gasf_crm_faces_for( $attachment_id ) {
 	return $out;
 }
 
+/** Store detection rectangles (named or not) for click-to-label in the UI. */
+function gasf_crm_face_boxes_store( $attachment_id, array $boxes, $found = 0 ) {
+	$id = (int) $attachment_id;
+	$keep = array();
+	foreach ( $boxes as $b ) {
+		$box = array_map( 'intval', (array) ( $b['box'] ?? $b ) );
+		if ( 4 !== count( $box ) ) { continue; }
+		if ( $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		$keep[] = array( 'box' => array_values( $box ) );
+		if ( count( $keep ) >= 60 ) { break; } // sane cap for crowd shots
+	}
+	if ( $keep ) { update_post_meta( $id, '_gasf_face_boxes', $keep ); }
+	else if ( (int) $found > 0 ) { delete_post_meta( $id, '_gasf_face_boxes' ); }
+	return count( $keep );
+}
+
+/** Detection rectangles for one photo. */
+function gasf_crm_face_boxes_for( $attachment_id ) {
+	$id  = (int) $attachment_id;
+	$raw = get_post_meta( $id, '_gasf_face_boxes', true );
+	if ( ! is_array( $raw ) ) { return array(); }
+	$out = array();
+	foreach ( $raw as $r ) {
+		$box = array_map( 'intval', (array) ( $r['box'] ?? $r ) );
+		if ( 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		$out[] = array( 'box' => array_values( $box ) );
+	}
+	return $out;
+}
+
 /**
  * Persist explicit face->name choices made by a volunteer on this photo.
  *
@@ -194,7 +224,7 @@ function gasf_crm_face_labels_record( $attachment_id, array $map ) {
 	$id = (int) $attachment_id;
 	if ( ! $id || ! $map ) { return 0; }
 
-	$src = gasf_crm_faces_for( $id );
+	$src = function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array();
 	if ( ! $src ) { return 0; }
 
 	$next = array();
@@ -399,7 +429,18 @@ add_action( 'rest_api_init', function () {
 				$id = (int) ( $item['id'] ?? 0 );
 				if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
-				$stored += gasf_crm_faces_store( $id, (array) ( $item['faces'] ?? array() ), (int) ( $item['found'] ?? 0 ) );
+				$faces = (array) ( $item['faces'] ?? array() );
+				$found = (int) ( $item['found'] ?? 0 );
+				$stored += gasf_crm_faces_store( $id, $faces, $found );
+				$boxes = array();
+				if ( array_key_exists( 'boxes', $item ) && is_array( $item['boxes'] ) ) {
+					$boxes = (array) $item['boxes'];
+				} else {
+					foreach ( $faces as $f ) {
+						if ( isset( $f['box'] ) ) { $boxes[] = array( 'box' => (array) $f['box'] ); }
+					}
+				}
+				gasf_crm_face_boxes_store( $id, $boxes, $found );
 				if ( array_key_exists( 'caption', $item ) && gasf_crm_caption_suggestion_store(
 					$id,
 					(string) ( $item['caption'] ?? '' ),

@@ -746,7 +746,10 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True):
 
             already = {n.strip().lower() for n in p.get("people", [])}
             faces = []
+            boxes = []
             for (top, right, bottom, left), vector in found:
+                box = [int(left), int(top), int(right - left), int(bottom - top)]
+                boxes.append({"box": box})
                 name, conf = identify(vector, references, backend, tolerance)
                 if not name or name.lower() in already:
                     continue
@@ -754,11 +757,11 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True):
                     {
                         "name": name,
                         "confidence": conf,
-                        "box": [int(left), int(top), int(right - left), int(bottom - top)],
+                        "box": box,
                     }
                 )
 
-            item = {"id": photo_id, "found": len(found), "faces": faces}
+            item = {"id": photo_id, "found": len(found), "faces": faces, "boxes": boxes}
             try:
                 if image_bytes is not None:
                     cap, model = local_caption(image_bytes, cfg)

@@ -4446,6 +4446,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 		'places'  => $info['places'] ?? array(),
 		'events'  => $info['events'] ?? array(),
 		'caption' => $info['caption'] ?? '',
+		'face_boxes' => function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array(),
 		'summary' => function_exists( 'gasf_crm_caption_suggestion_for' ) ? gasf_crm_caption_suggestion_for( $id ) : array(),
 		'pending'   => is_array( $pending ) ? $pending : null,
 		/*

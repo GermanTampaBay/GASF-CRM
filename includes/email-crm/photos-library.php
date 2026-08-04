@@ -412,6 +412,7 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		 * client's own code path expects.
 		 */
 		'faces'     => function_exists( 'gasf_crm_faces_for' ) ? gasf_crm_faces_for( $id ) : array(),
+		'face_boxes'=> function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array(),
 		'summary'   => function_exists( 'gasf_crm_caption_suggestion_for' ) ? gasf_crm_caption_suggestion_for( $id ) : array(),
 	);
 }

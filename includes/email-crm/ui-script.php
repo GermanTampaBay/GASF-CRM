@@ -589,7 +589,7 @@ function gasf_crm_render_inbox_script() {
 
 	function personBox(v){
 		return '<span class="pwrap"><input type="text" class="p-person" maxlength="80" value="' + esc(v || '') +
-			'" placeholder="Name" autocomplete="off" spellcheck="false"></span>';
+			'" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="pdelperson" aria-label="Remove this person">×</button></span>';
 	}
 
 	/* ============ face suggestions ============
@@ -656,7 +656,7 @@ function gasf_crm_render_inbox_script() {
 	}
 
 	function faceBoxesMarkup(p){
-		var faces = (p && p.faces) || [];
+		var faces = (p && (p.face_boxes && p.face_boxes.length ? p.face_boxes : p.faces)) || [];
 		var iw = parseInt((p && p.w) || 0, 10), ih = parseInt((p && p.h) || 0, 10);
 		if (!faces.length || !iw || !ih) { return ''; }
 		return faces.map(function(f, i){
@@ -668,7 +668,7 @@ function gasf_crm_render_inbox_script() {
 			var ww   = Math.max(1, Math.min(100 - left, (w / iw) * 100));
 			var hh   = Math.max(1, Math.min(100 - top,  (h / ih) * 100));
 			return '<button type="button" class="facebox" data-face-index="' + i + '" data-name="' + esc(f.name || '') + '" ' +
-				'title="Add ' + esc(f.name || 'this name') + '" style="left:' + left.toFixed(3) + '%;top:' + top.toFixed(3) + '%;width:' + ww.toFixed(3) + '%;height:' + hh.toFixed(3) + '%">' +
+				'title="' + esc(f.name ? ('Add ' + f.name) : 'Name this face') + '" style="left:' + left.toFixed(3) + '%;top:' + top.toFixed(3) + '%;width:' + ww.toFixed(3) + '%;height:' + hh.toFixed(3) + '%">' +
 				'<span>' + (i + 1) + '</span></button>';
 		}).join('');
 	}
@@ -707,7 +707,12 @@ function gasf_crm_render_inbox_script() {
 				if (!root) { return; }
 				var box = root.querySelector('.p-people');
 				var name = (b.dataset.name || '').trim();
-				if (!box || !name) { return; }
+				if (!box) { return; }
+				if (!name) {
+					name = (window.prompt('Name for this face:') || '').trim();
+					if (!name) { return; }
+					b.dataset.name = name;
+				}
 				var focus = null;
 				Array.prototype.forEach.call(root.querySelectorAll('.p-person'), function(i){
 					if (!focus && i.value.trim().toLowerCase() === name.toLowerCase()) { focus = i; }
@@ -839,6 +844,24 @@ function gasf_crm_render_inbox_script() {
 				var input = box.lastElementChild.querySelector('.p-person');
 				if (input) { input.focus(); }
 			};
+		});
+		root.addEventListener('click', function(ev){
+			var del = ev.target.closest ? ev.target.closest('.pdelperson') : null;
+			if (!del || !root.contains(del)) { return; }
+			ev.preventDefault();
+			var wrap = del.closest('.pwrap');
+			var box = wrap ? wrap.parentNode : null;
+			if (!box || !box.classList || !box.classList.contains('p-people')) { return; }
+			var rows = box.querySelectorAll('.pwrap');
+			if (rows.length <= 1) {
+				var only = rows[0] ? rows[0].querySelector('.p-person') : null;
+				if (only) { only.value = ''; only.focus(); }
+				return;
+			}
+			var next = wrap.nextElementSibling || wrap.previousElementSibling;
+			wrap.remove();
+			var focus = next ? next.querySelector('.p-person') : null;
+			if (focus) { focus.focus(); }
 		});
 		loadPeople();
 	}
