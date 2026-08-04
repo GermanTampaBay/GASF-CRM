@@ -540,6 +540,28 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/people', array(
+		'methods'             => 'GET',
+		'permission_callback' => $guard,
+		'callback'            => function () {
+			$terms = get_terms( array( 'taxonomy' => 'gasf_photo_person', 'hide_empty' => false ) );
+			if ( is_wp_error( $terms ) ) { return array( 'people' => array() ); }
+			$out = array();
+			foreach ( $terms as $t ) {
+				$name = function_exists( 'gasf_photo_label' ) ? gasf_photo_label( $t->name ) : $t->name;
+				$name = trim( (string) $name );
+				if ( '' === $name ) { continue; }
+				$out[] = $name;
+			}
+			usort( $out, function ( $a, $b ) {
+				$ka = function_exists( 'gasf_photo_translit' ) ? gasf_photo_translit( $a ) : $a;
+				$kb = function_exists( 'gasf_photo_translit' ) ? gasf_photo_translit( $b ) : $b;
+				return strnatcasecmp( $ka, $kb ) ?: strnatcasecmp( $a, $b );
+			} );
+			return array( 'people' => array_values( array_unique( $out ) ) );
+		},
+	) );
+
 	/**
 	 * Confirmed ground truth, for the scanner's reference set.
 	 *

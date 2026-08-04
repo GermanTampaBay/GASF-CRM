@@ -660,6 +660,19 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
         data = api.get("/confirmed", limit=limit)
 
     photos = [p for p in data.get("photos", []) if (p.get("people") or [])]
+    people_names = []
+    try:
+        pd = api.get("/people")
+        raw_people = pd.get("people", []) if isinstance(pd, dict) else []
+        for n in raw_people:
+            if isinstance(n, dict):
+                name = str(n.get("label") or n.get("value") or "").strip()
+            else:
+                name = str(n or "").strip()
+            if name:
+                people_names.append(name)
+    except Exception:
+        people_names = []
     refs = load_references(conn, backend.name)
     items = []
     for p in photos:
@@ -715,7 +728,16 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
                 "image": data_uri,
             }
         )
-    return items
+        people_names.extend(people)
+    dedup = []
+    seen = set()
+    for n in people_names:
+        k = n.casefold()
+        if k in seen:
+            continue
+        seen.add(k)
+        dedup.append(n)
+    return items, dedup
 
 
 def _label_ui_html():
@@ -750,6 +772,7 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
   <div class="stage"><img id="photo" alt=""><div id="ov"></div></div>
   <div class="side">
     <div class="muted">People already on this photo</div><div class="people" id="people"></div>
+    <datalist id="peopleList"></datalist>
     <div class="rows" id="rows"></div>
     <div class="acts">
       <button id="prev">Previous</button>
@@ -761,9 +784,21 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 </div>
 <script>
 let count=0, idx=0, current=null;
+const nameSet = new Map();
 async function j(url,opt){ const r=await fetch(url,opt); if(!r.ok){throw new Error(await r.text()||r.statusText);} return r.json(); }
 function setText(id,t){document.getElementById(id).textContent=t;}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function addName(n){
+  const name=(n||'').trim();
+  if(!name){return;}
+  const k=name.toLocaleLowerCase();
+  if(!nameSet.has(k)){ nameSet.set(k,name); }
+}
+function refreshNameList(){
+  const dl=document.getElementById('peopleList');
+  const vals=Array.from(nameSet.values()).sort((a,b)=>a.localeCompare(b));
+  dl.innerHTML=vals.map(n=>`<option value="${esc(n)}"></option>`).join('');
+}
 function drawBoxes(p){
   const ov=document.getElementById('ov'); ov.innerHTML='';
   if(!p||!p.boxes||!p.boxes.length){return;}
@@ -787,13 +822,15 @@ function render(p){
   img.onload=()=>drawBoxes(p); img.src=p.image;
   const ppl=document.getElementById('people');
   ppl.innerHTML=(p.people||[]).map(n=>`<span class="pchip">${esc(n)}</span>`).join('');
+  (p.people||[]).forEach(addName);
   const rows=document.getElementById('rows'); rows.innerHTML='';
   (p.boxes||[]).forEach((b,i)=>{
     const hint=(p.hints||[]).find(h=>h.index===i) || {name:'',confidence:0};
     const val=(p.prefill && p.prefill[String(i)]) || '';
     const row=document.createElement('div'); row.className='row';
-    row.innerHTML=`<label>Face ${i+1}</label><input data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`;
+    row.innerHTML=`<label>Face ${i+1}</label><input list="peopleList" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`;
     rows.appendChild(row);
+    if(val){ addName(val); }
   });
   rows.querySelectorAll('button[data-fill]').forEach(b=>b.onclick=()=>{
     const i=b.getAttribute('data-fill');
@@ -802,6 +839,7 @@ function render(p){
     if(inp && hint && hint.name){inp.value=hint.name; inp.focus();}
   });
   document.getElementById('prev').disabled = idx <= 0;
+  refreshNameList();
 }
 async function load(i){
   idx=i;
@@ -810,6 +848,8 @@ async function load(i){
 }
 async function init(){
   const m=await j('/api/meta'); count=m.count||0;
+  (m.people||[]).forEach(addName);
+  refreshNameList();
   if(!count){ setText('title','Nothing to label'); setText('sub','No confirmed photos with detectable faces in this batch.'); return; }
   await load(0);
 }
@@ -818,8 +858,10 @@ async function saveAndNext(){
   const labels=[];
   document.querySelectorAll('#rows input').forEach(inp=>{
     const name=inp.value.trim(); if(!name){return;}
+    addName(name);
     const i=parseInt(inp.getAttribute('data-i'),10); labels.push({name, box: current.boxes[i]});
   });
+  refreshNameList();
   if(labels.length){ await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})}); }
   if(idx+1 < count){ await load(idx+1); } else { setText('sub','Saved. End of batch.'); }
 }
@@ -833,12 +875,12 @@ init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e))
 
 def local_label(api, conn, backend, tolerance, limit=40):
     """Interactive local browser UI: tag faces and step next in one page."""
-    items = _collect_label_items(api, conn, backend, tolerance, limit)
+    items, people_names = _collect_label_items(api, conn, backend, tolerance, limit)
     if not items:
         print("No confirmed, named photos are waiting for local labeling.")
         return 0
 
-    state = {"items": items, "saved": 0, "done": threading.Event()}
+    state = {"items": items, "saved": 0, "done": threading.Event(), "people": people_names}
 
     class LabelHandler(BaseHTTPRequestHandler):
         def _write(self, code, payload, ctype="application/json; charset=utf-8"):
@@ -855,7 +897,11 @@ def local_label(api, conn, backend, tolerance, limit=40):
             if u.path == "/":
                 return self._write(200, _label_ui_html(), "text/html; charset=utf-8")
             if u.path == "/api/meta":
-                return self._write(200, json.dumps({"count": len(state["items"]), "saved": state["saved"]}))
+                return self._write(200, json.dumps({
+                    "count": len(state["items"]),
+                    "saved": state["saved"],
+                    "people": state["people"],
+                }))
             if u.path == "/api/photo":
                 q = parse_qs(u.query or "")
                 i = int((q.get("i") or ["0"])[0] or 0)
