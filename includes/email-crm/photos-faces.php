@@ -186,7 +186,7 @@ function gasf_crm_caption_suggestion_store( $attachment_id, $raw_text, $raw_mode
 	$id   = (int) $attachment_id;
 	$text = trim( sanitize_text_field( (string) $raw_text ) );
 	$text = preg_replace( '/\s+/', ' ', $text );
-	$text = function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 220 ) : substr( $text, 0, 220 );
+	$text = function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 420 ) : substr( $text, 0, 420 );
 
 	if ( '' === $text ) {
 		delete_post_meta( $id, '_gasf_caption_suggestion' );
