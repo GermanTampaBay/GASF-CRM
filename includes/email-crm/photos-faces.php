@@ -186,7 +186,18 @@ function gasf_crm_caption_suggestion_store( $attachment_id, $raw_text, $raw_mode
 	$id   = (int) $attachment_id;
 	$text = trim( sanitize_text_field( (string) $raw_text ) );
 	$text = preg_replace( '/\s+/', ' ', $text );
-	$text = function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 420 ) : substr( $text, 0, 420 );
+	$len  = function_exists( 'mb_strlen' ) ? mb_strlen( $text ) : strlen( $text );
+	$cut  = function_exists( 'mb_substr' ) ? mb_substr( $text, 0, 420 ) : substr( $text, 0, 420 );
+	if ( $len > 420 ) {
+		// Keep complete sentences only: trim to the last sentence terminator in-range.
+		if ( preg_match( '/^(.+[.!?])[^.!?]*$/u', $cut, $m ) ) {
+			$cut = trim( $m[1] );
+		} else {
+			// No sentence end yet; at least avoid chopping the final word in half.
+			$cut = preg_replace( '/\s+\S*$/u', '', $cut );
+		}
+	}
+	$text = trim( (string) $cut );
 
 	if ( '' === $text ) {
 		delete_post_meta( $id, '_gasf_caption_suggestion' );
