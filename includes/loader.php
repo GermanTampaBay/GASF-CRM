@@ -67,6 +67,11 @@ if ( true ) {
 	require_once GASF_CRM_DIR . '/health.php';
 	require_once GASF_CRM_DIR . '/wpmail.php';
 	require_once GASF_CRM_DIR . '/auth.php';
+	// After auth.php: the kiosk-admin OAuth broker reuses its provider table,
+	// callback param, id_token decoding, and logging. It mints its own codes
+	// behind GASF_KIOSK_OAUTH_* wp-config constants and never touches WP users
+	// or cookies.
+	require_once GASF_CRM_DIR . '/auth-kiosk.php';
 	require_once GASF_CRM_DIR . '/ai.php';
 	require_once GASF_CRM_DIR . '/notify.php';
 	require_once GASF_CRM_DIR . '/rest.php';
@@ -76,6 +81,10 @@ if ( true ) {
 	// After photos.php: the library leans on its private-path helpers and on
 	// gasf_crm_photos_available().
 	require_once GASF_CRM_DIR . '/photos-library.php';
+	// After photos-library.php: the kiosk feed reads library ids and cards
+	// through gasf_crm_photo_may( $id, 'kiosk' ) behind its own shared-secret
+	// token (GASF_KIOSK_PHOTOS_TOKEN in wp-config.php).
+	require_once GASF_CRM_DIR . '/photos-kiosk.php';
 	// After photos-library.php: an upload publishes through photos.php and is
 	// then tagged through gasf_crm_photo_library_save().
 	require_once GASF_CRM_DIR . '/photos-upload.php';
