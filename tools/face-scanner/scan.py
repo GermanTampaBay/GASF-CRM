@@ -67,16 +67,18 @@ It is shown once. If you lose it, issue a new one.
 
 import argparse
 import base64
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
-import re
 import sqlite3
 import subprocess
 import sys
 import sysconfig
 import tempfile
+import threading
 import time
+from urllib.parse import parse_qs, urlparse
 import webbrowser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -613,38 +615,11 @@ def box_iou_xywh(a, b):
 # --------------------------------------------------------------------------- local labeling
 
 
-def _render_label_preview(photo_id, image_bytes, boxes_xywh):
-    """Write a local HTML preview with numbered face rectangles and return its path."""
-    b64 = base64.b64encode(image_bytes).decode("ascii")
-    rects = []
-    for i, (x, y, w, h) in enumerate(boxes_xywh, start=1):
-        rects.append(
-            f"<button class='fb' style='left:{x}px;top:{y}px;width:{w}px;height:{h}px'><span>{i}</span></button>"
-        )
-    html = (
-        "<!doctype html><meta charset='utf-8'><title>GASF face labels</title>"
-        "<style>"
-        "body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:16px}"
-        ".wrap{position:relative;display:inline-block;max-width:min(96vw,1400px)}"
-        "img{display:block;max-width:100%;height:auto;border-radius:8px}"
-        ".fb{position:absolute;background:rgba(37,99,235,.2);border:2px solid #60a5fa;border-radius:6px;"
-        "color:#fff;padding:0;pointer-events:none}"
-        ".fb span{position:absolute;left:-1px;top:-1px;background:#1d4ed8;border-radius:0 0 6px 0;"
-        "font:700 13px/1.2 Segoe UI,Arial,sans-serif;padding:2px 6px}"
-        ".meta{margin:0 0 10px 0;color:#cbd5e1}"
-        "</style>"
-        f"<p class='meta'>Photo #{photo_id} — rectangles are numbered for the terminal prompt.</p>"
-        f"<div class='wrap'><img src='data:image/jpeg;base64,{b64}' alt='photo'>{''.join(rects)}</div>"
-    )
-    fd, path = tempfile.mkstemp(prefix=f"gasf-face-label-{photo_id}-", suffix=".html")
-    os.close(fd)
-    Path(path).write_text(html, encoding="utf-8")
-    return path
-
-
-def _open_preview_html(path):
-    """Open preview HTML in Edge on Windows; fall back to default browser elsewhere."""
-    p = Path(path).resolve()
+def _open_preview_html(path_or_url):
+    """Open preview in Edge on Windows; fall back to default browser elsewhere."""
+    target = str(path_or_url)
+    is_url = target.startswith("http://") or target.startswith("https://")
+    p = None if is_url else Path(target).resolve()
     if os.name == "nt":
         candidates = [
             "msedge.exe",
@@ -657,45 +632,24 @@ def _open_preview_html(path):
                 continue
             try:
                 if edge.lower() == "msedge.exe" or Path(edge).is_file():
-                    subprocess.Popen([edge, str(p)])
+                    subprocess.Popen([edge, target if is_url else str(p)])
                     return
             except OSError:
                 continue
-    webbrowser.open_new_tab(p.as_uri())
+    webbrowser.open_new_tab(target if is_url else p.as_uri())
 
 
-def _parse_face_label_input(text, max_index):
-    """Parse '1=Hans,2=Greta' into zero-based assignments."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    out = []
-    seen = set()
-    for part in re.split(r"[,\n;]+", text):
-        bit = part.strip()
-        if not bit:
-            continue
-        if "=" not in bit:
-            raise ValueError(f"missing '=' in {bit!r}")
-        left, right = bit.split("=", 1)
-        try:
-            idx = int(left.strip())
-        except ValueError as e:
-            raise ValueError(f"invalid face index {left!r}") from e
-        name = right.strip()
-        if idx < 1 or idx > max_index:
-            raise ValueError(f"face index {idx} is out of range 1..{max_index}")
-        if not name:
-            raise ValueError(f"face {idx} has an empty name")
-        if idx in seen:
-            raise ValueError(f"face {idx} is assigned more than once")
-        seen.add(idx)
-        out.append((idx - 1, name))
-    return out
+def _mime_for_image(image_bytes):
+    if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if image_bytes.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if image_bytes[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    return "application/octet-stream"
 
 
-def local_label(api, conn, backend, tolerance, limit=40):
-    """Interactive local tool: show numbered face boxes, then store box->name labels."""
+def _collect_label_items(api, conn, backend, tolerance, limit):
     limit = max(1, min(100, int(limit)))
     try:
         data = api.get("/label-queue", limit=limit)
@@ -703,16 +657,11 @@ def local_label(api, conn, backend, tolerance, limit=40):
         code = e.response.status_code if e.response is not None else 0
         if code != 404:
             raise
-        # Backward compatibility if the server has not yet deployed the route.
         data = api.get("/confirmed", limit=limit)
+
     photos = [p for p in data.get("photos", []) if (p.get("people") or [])]
-    if not photos:
-        print("No confirmed, named photos are waiting for local labeling.")
-        return 0
-
-    saved = 0
-    refs = None
-
+    refs = load_references(conn, backend.name)
+    items = []
     for p in photos:
         photo_id = int(p["id"])
         people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
@@ -728,43 +677,241 @@ def local_label(api, conn, backend, tolerance, limit=40):
             continue
 
         boxes = [css_box_to_xywh(box_css) for (box_css, _) in found]
-        preview = _render_label_preview(photo_id, image_bytes, boxes)
-        _open_preview_html(preview)
-
-        if refs is None:
-            refs = load_references(conn, backend.name)
-
-        print(f"\nPhoto #{photo_id}")
-        print("  People on this photo:", ", ".join(people))
-        print("  Face boxes:", len(boxes))
         hints = []
-        for i, (_, vec) in enumerate(found, start=1):
-            name, conf = identify(vec, refs or {}, backend, tolerance)
-            if name:
-                hints.append(f"{i}:{name} ({int(round(conf * 100))}%)")
-        if hints:
-            print("  Recognized hints:", ", ".join(hints))
-        print("  Enter mappings like: 1=Hans,2=Greta")
-        print("  Commands: [Enter]=skip, done=finish")
+        for i, (_, vec) in enumerate(found):
+            name, conf = identify(vec, refs, backend, tolerance)
+            hints.append({"index": i, "name": name or "", "confidence": int(round(conf * 100)) if name else 0})
 
-        while True:
-            raw = input("  labels> ").strip()
-            if raw.lower() == "done":
-                return saved
-            if raw == "":
-                break
-            try:
-                pairs = _parse_face_label_input(raw, len(boxes))
-            except ValueError as e:
-                print(f"  Invalid input: {e}")
+        # Pre-fill from previously saved labels on matching rectangles.
+        prefill = {}
+        labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
+        used = set()
+        for lbl in labels:
+            name = str(lbl.get("name") or "").strip()
+            box = lbl.get("box") or []
+            if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
                 continue
-            labels = [{"name": name, "box": boxes[i]} for (i, name) in pairs]
-            out = api.post("/label", {"photo": photo_id, "labels": labels})
-            saved += int(out.get("stored") or 0)
-            print(f"  Stored {int(out.get('stored') or 0)} label(s).")
-            break
+            target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+            best_i, best_iou = -1, 0.0
+            for i, db in enumerate(boxes):
+                if i in used:
+                    continue
+                iou = box_iou_xywh(target, db)
+                if iou > best_iou:
+                    best_i, best_iou = i, iou
+            if best_i >= 0 and best_iou >= 0.15:
+                used.add(best_i)
+                prefill[str(best_i)] = name
 
-    return saved
+        mime = _mime_for_image(image_bytes)
+        data_uri = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+        items.append(
+            {
+                "id": photo_id,
+                "people": people,
+                "boxes": boxes,
+                "hints": hints,
+                "prefill": prefill,
+                "image": data_uri,
+            }
+        )
+    return items
+
+
+def _label_ui_html():
+    return """<!doctype html>
+<html><head><meta charset="utf-8"><title>GASF Face Labeler</title>
+<style>
+body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
+.top{padding:12px 16px;border-bottom:1px solid #26324a;display:flex;gap:12px;align-items:center;justify-content:space-between}
+.main{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:14px;padding:14px}
+.stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px}
+#photo{display:block;max-width:100%;height:auto;margin:0 auto}
+#ov{position:absolute;inset:0;pointer-events:none}
+.fb{position:absolute;border:2px solid #60a5fa;background:rgba(37,99,235,.14);border-radius:6px}
+.fb span{position:absolute;left:-1px;top:-1px;padding:2px 6px;background:#1d4ed8;border-radius:0 0 6px 0;font-weight:700;font-size:12px}
+.side{border:1px solid #2d3748;border-radius:8px;padding:12px;background:#111827}
+.muted{color:#94a3b8}
+.people{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
+.pchip{background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:3px 10px;font-size:12px}
+.rows{display:grid;gap:8px;max-height:56vh;overflow:auto}
+.row{display:grid;grid-template-columns:64px 1fr auto;gap:6px;align-items:center}
+.row label{font-size:12px;color:#cbd5e1}
+.row input{background:#0b1220;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:6px 8px}
+.row button{background:#1d4ed8;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer}
+.hint{font-size:11px;color:#93c5fd}
+.acts{display:flex;gap:8px;margin-top:12px}
+.acts button{padding:8px 12px;border:1px solid #334155;border-radius:6px;background:#0b1220;color:#e5e7eb;cursor:pointer}
+.acts .pri{background:#2563eb;border-color:#2563eb;color:white}
+</style></head>
+<body>
+<div class="top"><div><strong id="title">Loading…</strong><div class="muted" id="sub"></div></div><div id="stat" class="muted"></div></div>
+<div class="main">
+  <div class="stage"><img id="photo" alt=""><div id="ov"></div></div>
+  <div class="side">
+    <div class="muted">People already on this photo</div><div class="people" id="people"></div>
+    <div class="rows" id="rows"></div>
+    <div class="acts">
+      <button id="prev">Previous</button>
+      <button id="skip">Skip</button>
+      <button id="save" class="pri">Save & Next</button>
+      <button id="done">Done</button>
+    </div>
+  </div>
+</div>
+<script>
+let count=0, idx=0, current=null;
+async function j(url,opt){ const r=await fetch(url,opt); if(!r.ok){throw new Error(await r.text()||r.statusText);} return r.json(); }
+function setText(id,t){document.getElementById(id).textContent=t;}
+function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function drawBoxes(p){
+  const ov=document.getElementById('ov'); ov.innerHTML='';
+  if(!p||!p.boxes||!p.boxes.length){return;}
+  const img=document.getElementById('photo'), w=img.naturalWidth||1, h=img.naturalHeight||1;
+  p.boxes.forEach((b,i)=>{
+    const left=Math.max(0,Math.min(100,b[0]*100/w));
+    const top=Math.max(0,Math.min(100,b[1]*100/h));
+    const ww=Math.max(.2,Math.min(100-left,b[2]*100/w));
+    const hh=Math.max(.2,Math.min(100-top,b[3]*100/h));
+    const d=document.createElement('div'); d.className='fb';
+    d.style.cssText=`left:${left}%;top:${top}%;width:${ww}%;height:${hh}%`;
+    d.innerHTML=`<span>${i+1}</span>`; ov.appendChild(d);
+  });
+}
+function render(p){
+  current=p;
+  setText('title', `Photo #${p.id}`);
+  setText('sub', `${p.boxes.length} face box(es)`);
+  setText('stat', `${idx+1} / ${count}`);
+  const img=document.getElementById('photo');
+  img.onload=()=>drawBoxes(p); img.src=p.image;
+  const ppl=document.getElementById('people');
+  ppl.innerHTML=(p.people||[]).map(n=>`<span class="pchip">${esc(n)}</span>`).join('');
+  const rows=document.getElementById('rows'); rows.innerHTML='';
+  (p.boxes||[]).forEach((b,i)=>{
+    const hint=(p.hints||[]).find(h=>h.index===i) || {name:'',confidence:0};
+    const val=(p.prefill && p.prefill[String(i)]) || '';
+    const row=document.createElement('div'); row.className='row';
+    row.innerHTML=`<label>Face ${i+1}</label><input data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`;
+    rows.appendChild(row);
+  });
+  rows.querySelectorAll('button[data-fill]').forEach(b=>b.onclick=()=>{
+    const i=b.getAttribute('data-fill');
+    const hint=(p.hints||[]).find(h=>String(h.index)===String(i));
+    const inp=rows.querySelector(`input[data-i="${i}"]`);
+    if(inp && hint && hint.name){inp.value=hint.name; inp.focus();}
+  });
+  document.getElementById('prev').disabled = idx <= 0;
+}
+async function load(i){
+  idx=i;
+  const p = await j(`/api/photo?i=${i}`);
+  render(p);
+}
+async function init(){
+  const m=await j('/api/meta'); count=m.count||0;
+  if(!count){ setText('title','Nothing to label'); setText('sub','No confirmed photos with detectable faces in this batch.'); return; }
+  await load(0);
+}
+async function saveAndNext(){
+  if(!current){return;}
+  const labels=[];
+  document.querySelectorAll('#rows input').forEach(inp=>{
+    const name=inp.value.trim(); if(!name){return;}
+    const i=parseInt(inp.getAttribute('data-i'),10); labels.push({name, box: current.boxes[i]});
+  });
+  if(labels.length){ await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})}); }
+  if(idx+1 < count){ await load(idx+1); } else { setText('sub','Saved. End of batch.'); }
+}
+document.getElementById('save').onclick=saveAndNext;
+document.getElementById('skip').onclick=async()=>{ if(idx+1 < count){ await load(idx+1); } };
+document.getElementById('prev').onclick=async()=>{ if(idx>0){ await load(idx-1); } };
+document.getElementById('done').onclick=async()=>{ await j('/api/done',{method:'POST'}); setText('sub','Done. You can close this tab.'); };
+init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e)); });
+</script></body></html>"""
+
+
+def local_label(api, conn, backend, tolerance, limit=40):
+    """Interactive local browser UI: tag faces and step next in one page."""
+    items = _collect_label_items(api, conn, backend, tolerance, limit)
+    if not items:
+        print("No confirmed, named photos are waiting for local labeling.")
+        return 0
+
+    state = {"items": items, "saved": 0, "done": threading.Event()}
+
+    class LabelHandler(BaseHTTPRequestHandler):
+        def _write(self, code, payload, ctype="application/json; charset=utf-8"):
+            body = payload if isinstance(payload, (bytes, bytearray)) else payload.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            u = urlparse(self.path)
+            if u.path == "/":
+                return self._write(200, _label_ui_html(), "text/html; charset=utf-8")
+            if u.path == "/api/meta":
+                return self._write(200, json.dumps({"count": len(state["items"]), "saved": state["saved"]}))
+            if u.path == "/api/photo":
+                q = parse_qs(u.query or "")
+                i = int((q.get("i") or ["0"])[0] or 0)
+                if i < 0 or i >= len(state["items"]):
+                    return self._write(404, json.dumps({"error": "No such photo index"}))
+                return self._write(200, json.dumps(state["items"][i]))
+            return self._write(404, json.dumps({"error": "Not found"}))
+
+        def do_POST(self):
+            u = urlparse(self.path)
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            raw = self.rfile.read(n) if n > 0 else b"{}"
+            try:
+                data = json.loads(raw.decode("utf-8") or "{}")
+            except Exception:
+                return self._write(400, json.dumps({"error": "Invalid JSON"}))
+
+            if u.path == "/api/save":
+                photo = int(data.get("photo") or 0)
+                labels = [l for l in (data.get("labels") or []) if isinstance(l, dict)]
+                if photo < 1:
+                    return self._write(400, json.dumps({"error": "Missing photo id"}))
+                if not labels:
+                    return self._write(200, json.dumps({"ok": True, "stored": 0, "saved_total": state["saved"]}))
+                out = api.post("/label", {"photo": photo, "labels": labels})
+                kept = int(out.get("stored") or 0)
+                state["saved"] += kept
+                return self._write(200, json.dumps({"ok": True, "stored": kept, "saved_total": state["saved"]}))
+
+            if u.path == "/api/done":
+                state["done"].set()
+                return self._write(200, json.dumps({"ok": True, "saved_total": state["saved"]}))
+
+            return self._write(404, json.dumps({"error": "Not found"}))
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), LabelHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    print(f"label UI: http://127.0.0.1:{port}/")
+    _open_preview_html(f"http://127.0.0.1:{port}/")
+
+    try:
+        while not state["done"].wait(0.25):
+            pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+    return state["saved"]
 
 
 # --------------------------------------------------------------------------- learn
@@ -1266,7 +1413,7 @@ def main():
 
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
-    ap.add_argument("--label", action="store_true", help="interactive local box->name labeling for learning")
+    ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
     ap.add_argument("--label-limit", type=int, default=40, metavar="N",
                     help="how many recent confirmed photos to consider in --label mode (default: 40)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
