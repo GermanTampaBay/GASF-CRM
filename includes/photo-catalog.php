@@ -1189,6 +1189,47 @@ JS;
 		return remove_accents( $s );
 	}
 
+	/**
+	 * Canonical key for person-name comparisons.
+	 *
+	 * expand_umlauts=true keeps the German "Mueller" spelling form available;
+	 * false keeps the plain "Muller" form. Callers that need tolerant equality
+	 * compare BOTH forms so "Jürgen", "Juergen", and "Jurgen" all meet once.
+	 */
+	function gasf_photo_person_key( $name, $expand_umlauts = true ) {
+		$s = trim( preg_replace( '/\s+/u', ' ', gasf_photo_label( $name ) ) );
+		if ( '' === $s ) { return ''; }
+
+		if ( $expand_umlauts ) {
+			$s = strtr( $s, array(
+				'ä' => 'ae', 'ö' => 'oe', 'ü' => 'ue', 'ß' => 'ss',
+				'Ä' => 'ae', 'Ö' => 'oe', 'Ü' => 'ue',
+			) );
+		}
+		$s = remove_accents( $s );
+		if ( function_exists( 'mb_strtolower' ) ) { $s = mb_strtolower( $s, 'UTF-8' ); }
+		else { $s = strtolower( $s ); }
+		$s = preg_replace( '/[^a-z0-9 ]+/', ' ', $s );
+		return trim( preg_replace( '/\s+/', ' ', $s ) );
+	}
+
+	/** All canonical keys that should be considered the same person. */
+	function gasf_photo_person_keys( $name ) {
+		$keys = array(
+			gasf_photo_person_key( $name, true ),
+			gasf_photo_person_key( $name, false ),
+		);
+		return array_values( array_filter( array_unique( $keys ) ) );
+	}
+
+	/** True when two name spellings should be treated as the same person. */
+	function gasf_photo_person_same( $a, $b ) {
+		$ak = gasf_photo_person_keys( $a );
+		$bk = gasf_photo_person_keys( $b );
+		if ( ! $ak || ! $bk ) { return false; }
+		return (bool) array_intersect( $ak, $bk );
+	}
+
 	/** The most specific place on a photo — Bierstube says more than the grounds. */
 	function gasf_photo_deepest_place( $attachment_id ) {
 		$terms = wp_get_object_terms( (int) $attachment_id, 'gasf_photo_place' );

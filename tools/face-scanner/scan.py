@@ -863,10 +863,16 @@ function gallerySub(){
   if(!count){ return `No ${noun}s in this batch.`; }
   return `Click a photo to open it (${count} ${noun}${count===1?'':'s'} in this view).`;
 }
+function foldName(s, expand){
+  let v=(s||'').toLocaleLowerCase();
+  if(expand){ v=v.replace(/ä/g,'ae').replace(/ö/g,'oe').replace(/ü/g,'ue').replace(/ß/g,'ss'); }
+  if(v.normalize){ v=v.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); }
+  return v.replace(/[^a-z0-9 ]/g, ' ').replace(/\\s+/g, ' ').trim();
+}
 function addName(n){
   const name=(n||'').trim();
   if(!name){return;}
-  const k=name.toLocaleLowerCase();
+  const k=foldName(name,true)||foldName(name,false)||name.toLocaleLowerCase();
   if(!nameSet.has(k)){ nameSet.set(k,name); }
 }
 function refreshNameList(){
@@ -906,7 +912,8 @@ function render(p){
   ppl.innerHTML=(p.people||[]).map(n=>`<span class="pchip">${esc(n)}</span>`).join('');
   (p.people||[]).forEach(addName);
   const localNames = setupLocalNames(p);
-  const localFold = localNames.map(n=>n.toLocaleLowerCase());
+  const localFoldA = localNames.map(n=>foldName(n,true));
+  const localFoldB = localNames.map(n=>foldName(n,false));
   const rows=document.getElementById('rows'); rows.innerHTML='';
   (p.boxes||[]).forEach((b,i)=>{
     const hint=(p.hints||[]).find(h=>h.index===i) || {name:'',confidence:0};
@@ -926,9 +933,12 @@ function render(p){
   rows.querySelectorAll('input[data-i]').forEach(inp=>{
     inp.addEventListener('input', ()=>{
       if(!localNames.length){ inp.setAttribute('list','peopleListGlobal'); return; }
-      const v=(inp.value||'').trim().toLocaleLowerCase();
-      if(!v){ inp.setAttribute('list','peopleListLocal'); return; }
-      const matchesLocal = localFold.some(n=>n.startsWith(v) || v.startsWith(n));
+      const vA=foldName(inp.value||'', true);
+      const vB=foldName(inp.value||'', false);
+      if(!vA && !vB){ inp.setAttribute('list','peopleListLocal'); return; }
+      const matchesLocal = localFoldA.some((n,i)=>
+        n.startsWith(vA) || vA.startsWith(n) ||
+        localFoldB[i].startsWith(vB) || vB.startsWith(localFoldB[i]));
       inp.setAttribute('list', matchesLocal ? 'peopleListLocal' : 'peopleListGlobal');
     });
   });
@@ -1120,6 +1130,7 @@ def learn(api, conn, backend, verbose=True):
     since_mod = state_get(conn, wk_mod, "")
     since_id = int(state_get(conn, wk_id, "0") or 0)
     added = skipped = 0
+    learned_ids = set()
 
     while True:
         params = {"limit": 100}
@@ -1185,6 +1196,7 @@ def learn(api, conn, backend, verbose=True):
                     )
                     added += 1
                     matched += 1
+                    learned_ids.add(photo_id)
                 if matched == 0:
                     skipped += 1
                 continue
@@ -1212,6 +1224,7 @@ def learn(api, conn, backend, verbose=True):
                 (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
             )
             added += 1
+            learned_ids.add(photo_id)
 
         conn.commit()
         if since_mod:
@@ -1221,6 +1234,12 @@ def learn(api, conn, backend, verbose=True):
 
     if verbose:
         print(f"learned: {added} new reference face(s); {skipped} photo(s) too ambiguous to learn from")
+    if learned_ids:
+        try:
+            api.post("/learned", {"photos": sorted(learned_ids), "engine": backend.name})
+        except Exception as e:
+            if verbose:
+                print(f"learned marker push skipped: {e}")
     return added
 
 
@@ -1302,6 +1321,7 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True):
                 )
 
             item = {"id": photo_id, "found": len(found), "faces": faces, "boxes": boxes}
+            item["engine"] = backend.name
             try:
                 if image_bytes is not None:
                     cap, model = local_caption(image_bytes, cfg)
@@ -1398,6 +1418,17 @@ def status(api, conn, cfg):
             print(f"\nwaiting to be scanned: {api.get('/queue', limit=1).get('remaining', 0)}")
         except Exception as e:
             print(f"\nwaiting to be scanned: (could not ask the server: {e})")
+        try:
+            m = api.get("/metrics", sample=25)
+            states = m.get("states", {}) if isinstance(m, dict) else {}
+            if states:
+                print("\nserver face pipeline:")
+                for k in sorted(states.keys()):
+                    print(f"  {k}: {int(states[k])}")
+                print(f"  eligible: {int(m.get('eligible', 0))}")
+                print(f"  learned:  {int(m.get('learned', 0))}")
+        except Exception as e:
+            print(f"\nserver face pipeline: (could not ask the server: {e})")
     print(f"\nvectors live in {DB_PATH} and nowhere else.")
 
 

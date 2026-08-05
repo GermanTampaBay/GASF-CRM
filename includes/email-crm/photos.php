@@ -173,10 +173,8 @@ function gasf_crm_photo_consent_text() {
  *                                              single line to tighten when the
  *                                              club decides unknown means no
  *
- * 'web' is aspiration as much as enforcement today: a published file is
- * physically web-served regardless of what this returns. True enforcement
- * means limited photos staying in gated storage behind the handler — design
- * work that belongs wherever this function's answer is finally trusted.
+ * 'web' is enforced by storage: photos that may not be web-published are kept
+ * in the private store and served only through gated handlers.
  */
 function gasf_crm_photo_may( $attachment_id, $use ) {
 	$st    = gasf_crm_photo_consent_state( (int) $attachment_id );
@@ -186,6 +184,32 @@ function gasf_crm_photo_may( $attachment_id, $use ) {
 	if ( 'refused' === $state ) { return false; }
 	if ( 'limited' === (string) ( $st['scope'] ?? 'full' ) ) {
 		return 'kiosk' === $use;
+	}
+	return true;
+}
+
+/**
+ * Align storage with the consent matrix for web usage.
+ *
+ * A policy answer is not enough; the bytes must sit behind the same boundary.
+ * When web use is not allowed, this moves any published copy back to private
+ * storage. When web use is allowed and the photo is confirmed, it can be
+ * published.
+ *
+ * @return true|WP_Error
+ */
+function gasf_crm_photo_enforce_web_boundary( $attachment_id, $publish_if_allowed = true ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+		return new WP_Error( 'gasf_crm_404', 'No such photo.' );
+	}
+
+	if ( ! gasf_crm_photo_may( $id, 'web' ) ) {
+		return gasf_crm_photo_unpublish( $id );
+	}
+
+	if ( $publish_if_allowed && get_post_meta( $id, '_gasf_photo_confirmed', true ) ) {
+		return gasf_crm_photo_publish( $id );
 	}
 	return true;
 }
@@ -412,6 +436,11 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 
 	if ( 'clear' === $decision ) {
 		delete_post_meta( $id, '_gasf_photo_consent' );
+		$sync = gasf_crm_photo_enforce_web_boundary( $id, true );
+		if ( is_wp_error( $sync ) ) {
+			gasf_crm_log( 'CRM photos: consent cleared on #' . $id . ' but visibility sync failed — ' . $sync->get_error_message() );
+			return $sync;
+		}
 		gasf_crm_log( sprintf( 'CRM photos: permission record cleared on media #%d by %s', $id, gasf_crm_display_name( $user->ID ) ) );
 		gasf_crm_log_event( 0, 'photo_consent', 'media #' . $id . ' permission record cleared' );
 		return gasf_crm_photo_consent_state( $id );
@@ -443,6 +472,11 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 		// permission is on the record even though they never saw this text.
 		'text'             => gasf_crm_photo_consent_text(),
 	) );
+	$sync = gasf_crm_photo_enforce_web_boundary( $id, true );
+	if ( is_wp_error( $sync ) ) {
+		gasf_crm_log( 'CRM photos: consent set on #' . $id . ' but visibility sync failed — ' . $sync->get_error_message() );
+		return $sync;
+	}
 
 	gasf_crm_log( sprintf( 'CRM photos: permission %s on media #%d by %s — %s',
 		'grant' === $decision ? 'RECORDED' : 'REFUSAL recorded', $id, gasf_crm_display_name( $user->ID ), $note ) );
@@ -612,7 +646,9 @@ add_filter( 'get_attached_file', function ( $file, $id ) {
 add_filter( 'wp_get_attachment_url', function ( $url, $id ) {
 	// A private file has no public URL. Returning the uploads path anyway would
 	// hand out a 404 that looks like a broken image rather than a boundary.
-	return gasf_crm_photo_private_rel( $id ) ? '' : $url;
+	if ( gasf_crm_photo_private_rel( $id ) ) { return ''; }
+	if ( function_exists( 'gasf_crm_photo_may' ) && ! gasf_crm_photo_may( $id, 'web' ) ) { return ''; }
+	return $url;
 }, 10, 2 );
 
 add_action( 'delete_attachment', function ( $id ) {
@@ -2157,6 +2193,7 @@ function gasf_crm_photo_save_pending( array $invite ) {
 			if ( '' !== $p ) { $people[] = function_exists( 'mb_substr' ) ? mb_substr( $p, 0, 80 ) : substr( $p, 0, 80 ); }
 			if ( count( $people ) >= GASF_CRM_PHOTO_MAX_PEOPLE ) { break; }
 		}
+		$people = gasf_crm_photo_unique_people( $people, GASF_CRM_PHOTO_MAX_PEOPLE );
 
 		$caption = sanitize_text_field( (string) ( $row['caption'] ?? '' ) );
 		$caption = function_exists( 'mb_substr' )
@@ -2951,7 +2988,15 @@ function gasf_crm_photo_backfill() {
 	);
 	foreach ( $all as $aid ) {
 		$aid = (int) $aid;
-		if ( get_post_meta( $aid, '_gasf_photo_confirmed', true ) ) { continue; }
+		if ( get_post_meta( $aid, '_gasf_photo_confirmed', true ) ) {
+			if ( ! gasf_crm_photo_may( $aid, 'web' ) ) {
+				$moved = gasf_crm_photo_unpublish( $aid );
+				if ( is_wp_error( $moved ) ) {
+					gasf_crm_log( 'CRM photos: could not enforce private storage for non-web photo #' . $aid . ' — ' . $moved->get_error_message() );
+				}
+			}
+			continue;
+		}
 
 		if ( ! gasf_crm_photo_is_private( $aid ) ) {
 			$moved = gasf_crm_photo_unpublish( $aid );
@@ -3693,6 +3738,28 @@ function gasf_crm_photo_clean_time( $raw ) {
 	return preg_match( '~^(?:[01]\d|2[0-3]):[0-5]\d$~', $t ) ? $t : '';
 }
 
+/** De-duplicate person names with the same canonical identity. */
+function gasf_crm_photo_unique_people( array $names, $limit = GASF_CRM_PHOTO_MAX_PEOPLE ) {
+	$out = array();
+	$seen = array();
+	foreach ( $names as $name ) {
+		$name = trim( sanitize_text_field( (string) $name ) );
+		if ( '' === $name ) { continue; }
+		$keys = function_exists( 'gasf_photo_person_keys' )
+			? gasf_photo_person_keys( $name )
+			: array( strtolower( html_entity_decode( $name, ENT_QUOTES ) ) );
+		$dup = false;
+		foreach ( $keys as $k ) {
+			if ( isset( $seen[ $k ] ) ) { $dup = true; break; }
+		}
+		if ( $dup ) { continue; }
+		$out[] = $name;
+		foreach ( $keys as $k ) { $seen[ $k ] = true; }
+		if ( count( $out ) >= max( 1, (int) $limit ) ) { break; }
+	}
+	return $out;
+}
+
 /** Truthy request/form values for photo flags. */
 function gasf_crm_photo_flag( $raw ) {
 	if ( is_bool( $raw ) ) { return $raw; }
@@ -3729,7 +3796,7 @@ function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts =
 		$p = trim( sanitize_text_field( (string) $p ) );
 		if ( '' !== $p ) { $people[] = $p; }
 	}
-	$people = array_slice( array_values( array_unique( $people ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
+	$people = gasf_crm_photo_unique_people( $people, GASF_CRM_PHOTO_MAX_PEOPLE );
 	if ( $people || $opts['clear_people_when_empty'] ) {
 		wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
 	}
@@ -4006,26 +4073,17 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 	}
 
 	/*
-	 * Publish BEFORE anything is written, and hand the revision back if it
-	 * refuses.
+	 * Align storage with consent BEFORE metadata writes, and hand the revision
+	 * back if that move refuses.
 	 *
-	 * Publishing is the only step here that can genuinely fail — it strips EXIF
-	 * from every derivative, verifies the strip, and moves a dozen files. Doing
-	 * it last meant a refusal (metadata that would not come out, a full disk)
-	 * returned an error AFTER the tags had been applied and the revision spent:
-	 * the photo was left tagged, unpublished, its revision consumed, and the
-	 * screen said the approval had failed. Nothing about that state told anyone
-	 * which half had happened.
-	 *
-	 * Approval is the one operation here that spans taxonomy, files and state,
-	 * and this is the closest thing to atomic available without a transaction
-	 * across the filesystem: do the fallible part first, and if it fails leave
-	 * the photo exactly as it was found.
+	 * Web-cleared photos publish out of private storage; limited/refused photos
+	 * are actively kept behind it. Both paths touch real files and can fail.
 	 */
-	$moved = gasf_crm_photo_publish( $id );
+	$web_allowed = gasf_crm_photo_may( $id, 'web' );
+	$moved = $web_allowed ? gasf_crm_photo_publish( $id ) : gasf_crm_photo_unpublish( $id );
 	if ( is_wp_error( $moved ) ) {
 		update_post_meta( $id, '_gasf_photo_rev', $have ); // give the revision back
-		gasf_crm_log( 'CRM photos: could not publish media #' . $id . ' — ' . $moved->get_error_message() );
+		gasf_crm_log( 'CRM photos: could not apply consent storage boundary for media #' . $id . ' — ' . $moved->get_error_message() );
 		return $moved;
 	}
 

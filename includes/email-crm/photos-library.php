@@ -62,8 +62,9 @@ define( 'GASF_CRM_LIB_ZIP_TTL', 30 * MINUTE_IN_SECONDS );
  * meta_query against a tax_query. At this size that is not worth a custom join:
  * both halves are indexed lookups and the union is a few hundred integers.
  *
- * Private photos are excluded outright. Anything still awaiting review is not
- * cleared for use, and this list exists to be used from.
+ * Private photos are included only when they are confirmed library items (for
+ * example, limited-consent photos intentionally kept off the public web). Items
+ * still awaiting review are excluded separately below.
  *
  * @param array $f person|place|event|year|q|sort|desc|review
  * @return int[]
@@ -71,7 +72,7 @@ define( 'GASF_CRM_LIB_ZIP_TTL', 30 * MINUTE_IN_SECONDS );
 function gasf_crm_photo_library_ids( array $f = array() ) {
 	$common = array(
 		'post_type'      => 'attachment',
-		'post_status'    => 'inherit', // never 'private' — see above
+		'post_status'    => array( 'inherit', 'private' ),
 		'posts_per_page' => -1,
 		'fields'         => 'ids',
 		'no_found_rows'  => true,
@@ -887,9 +888,13 @@ add_action( 'rest_api_init', function () {
 				$card  = gasf_crm_photo_library_card( $id );
 				$saved = (array) ( $card['saved'] ?? array() );
 
-				$merged = array_values( array_unique( array_merge(
-					array_map( 'strval', (array) ( $saved['people'] ?? array() ) ), $adds
-				) ) );
+				$merged = function_exists( 'gasf_crm_photo_unique_people' )
+					? gasf_crm_photo_unique_people( array_merge(
+						array_map( 'strval', (array) ( $saved['people'] ?? array() ) ), $adds
+					), GASF_CRM_PHOTO_MAX_PEOPLE )
+					: array_values( array_unique( array_merge(
+						array_map( 'strval', (array) ( $saved['people'] ?? array() ) ), $adds
+					) ) );
 
 				$r = gasf_crm_photo_library_save( $id, array(
 					'people'   => $merged,
@@ -931,8 +936,9 @@ add_action( 'rest_api_init', function () {
 			$counts = function_exists( 'gasf_photo_person_counts' ) ? gasf_photo_person_counts() : array();
 
 			$out = array();
+			$by_key = array();
 			foreach ( $terms as $t ) {
-				$out[] = array(
+				$row = array(
 					// Raw for writing back, decoded for reading. Same distinction
 					// the place picker needs, and for the same reason: a name
 					// holding &amp; must round-trip to the term it came from.
@@ -944,7 +950,20 @@ add_action( 'rest_api_init', function () {
 					// and it is what the panel's "recently added" order reads.
 					'id'    => (int) $t->term_id,
 				);
+				$keys = function_exists( 'gasf_photo_person_keys' )
+					? gasf_photo_person_keys( (string) $row['label'] )
+					: array( strtolower( (string) $row['label'] ) );
+				$slot = $keys ? $keys[0] : strtolower( (string) $row['label'] );
+				if ( isset( $by_key[ $slot ] ) ) {
+					$cur = $by_key[ $slot ];
+					if ( (int) $row['n'] > (int) $cur['n'] ) {
+						$by_key[ $slot ] = $row;
+					}
+					continue;
+				}
+				$by_key[ $slot ] = $row;
 			}
+			$out = array_values( $by_key );
 
 			// Alphabetical, which for "Michael Tressler" means by first name —
 			// that is how the club refers to people. Sorted on a transliterated
@@ -1016,10 +1035,23 @@ add_action( 'rest_api_init', function () {
 			if ( ! gasf_crm_photos_available() ) {
 				return new WP_Error( 'gasf_crm_nocatalog', 'The Photo Catalogue module is switched off.', array( 'status' => 503 ) );
 			}
+			$find_person_term = function ( $raw ) {
+				$name = trim( (string) $raw );
+				if ( '' === $name ) { return null; }
+				$terms = get_terms( array( 'taxonomy' => 'gasf_photo_person', 'hide_empty' => false ) );
+				if ( is_wp_error( $terms ) ) { return null; }
+				foreach ( $terms as $t ) {
+					$same = function_exists( 'gasf_photo_person_same' )
+						? gasf_photo_person_same( $name, (string) $t->name )
+						: ( 0 === strcasecmp( html_entity_decode( $name, ENT_QUOTES ), html_entity_decode( (string) $t->name, ENT_QUOTES ) ) );
+					if ( $same ) { return $t; }
+				}
+				return null;
+			};
 
 			$action = (string) $req->get_param( 'action' );
 			$name   = trim( (string) $req->get_param( 'name' ) );
-			$term   = $name ? get_term_by( 'name', $name, 'gasf_photo_person' ) : null;
+			$term   = $find_person_term( $name );
 
 			if ( ! $term || is_wp_error( $term ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such person in the collection.', array( 'status' => 404 ) );
@@ -1032,7 +1064,7 @@ add_action( 'rest_api_init', function () {
 				// Already somebody else? Then this is a merge wearing the wrong
 				// hat, and doing it as a rename would fail on the duplicate slug
 				// and leave the volunteer with an error they cannot act on.
-				$clash = get_term_by( 'name', $to, 'gasf_photo_person' );
+				$clash = $find_person_term( $to );
 				if ( $clash && ! is_wp_error( $clash ) && (int) $clash->term_id !== (int) $term->term_id ) {
 					return new WP_Error(
 						'gasf_crm_exists',
@@ -1063,7 +1095,7 @@ add_action( 'rest_api_init', function () {
 
 			if ( 'merge' === $action ) {
 				$into = trim( (string) $req->get_param( 'into' ) );
-				$dest = $into ? get_term_by( 'name', $into, 'gasf_photo_person' ) : null;
+				$dest = $find_person_term( $into );
 				if ( ! $dest || is_wp_error( $dest ) ) {
 					return new WP_Error( 'gasf_crm_404', 'No such person to merge into.', array( 'status' => 404 ) );
 				}

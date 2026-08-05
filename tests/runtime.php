@@ -191,6 +191,12 @@ final class GASF_CRM_Selftest {
 		return call_user_func( $this->rest_cb( $route ), $req );
 	}
 
+	private function rest_get( $route, array $params = array() ) {
+		$req = new WP_REST_Request( 'GET', '' );
+		foreach ( $params as $k => $v ) { $req->set_param( $k, $v ); }
+		return call_user_func( $this->rest_cb( $route ), $req );
+	}
+
 	/* ---------------------------------------------------------------- tests */
 
 	/** The whole matrix, one photo pushed through every state. */
@@ -376,6 +382,27 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/** Limited consent stays in private storage even after confirmation. */
+	public function test_confirm_limited_stays_private() {
+		$id = $this->held_photo( 'st-confirm-limited' );
+		$this->consent( $id, 'limited' );
+		$r = gasf_crm_photo_confirm( $id, array(
+			'people'   => array( 'Selftest Limited' ),
+			'place'    => '',
+			'event'    => '',
+			'event_id' => 0,
+			'taken'    => '2026-01-01',
+			'caption'  => 'selftest limited',
+			'flyer'    => 0,
+			'revision' => gasf_crm_photo_revision( $id ),
+		) );
+		if ( ! $this->ok( ! is_wp_error( $r ), 'confirm limited: succeeds' . ( is_wp_error( $r ) ? ' — ' . $r->get_error_message() : '' ) ) ) { return; }
+		$this->ok( gasf_crm_photo_is_private( $id ), 'confirm limited: photo stays private' );
+		$this->ok( ! gasf_crm_photo_may( $id, 'web' ), 'confirm limited: policy blocks web use' );
+		$t = get_term_by( 'name', 'Selftest Limited', 'gasf_photo_person' );
+		if ( $t ) { wp_delete_term( (int) $t->term_id, 'gasf_photo_person' ); }
+	}
+
 	/** The stateless door credentials: stamp ages honestly, pass binds. */
 	public function test_door_credentials() {
 		$stamp = gasf_crm_door_stamp();
@@ -440,6 +467,42 @@ final class GASF_CRM_Selftest {
 		gasf_crm_faces_store( $blank, array(), 0 );
 		$this->ok( (bool) get_post_meta( $blank, '_gasf_face_scanned', true ), 'faces: a photo with no faces is still stamped' );
 		$this->ok( ! get_post_meta( $blank, '_gasf_face_suggestions', true ), 'faces: no suggestions stored for a blank photo' );
+
+		// Explicit labels are idempotent and create one canonical person term.
+		$lab = $this->library_photo( 'st-face-label' );
+		update_post_meta( $lab, '_gasf_face_boxes', array(
+			array( 'box' => array( 10, 10, 30, 30 ) ),
+			array( 'box' => array( 60, 10, 30, 30 ) ),
+		) );
+		$n1 = gasf_crm_face_labels_record( $lab, array(
+			array( 'i' => 0, 'name' => 'Jürgen Example' ),
+			array( 'i' => 1, 'name' => 'Juergen Example' ),
+		) );
+		$n2 = gasf_crm_face_labels_record( $lab, array(
+			array( 'i' => 0, 'name' => 'Jürgen Example' ),
+			array( 'i' => 1, 'name' => 'Juergen Example' ),
+		) );
+		$this->ok( 2 === $n1, 'faces: two explicit labels are stored on first save' );
+		$this->ok( 0 === $n2, 'faces: saving the same explicit labels again is idempotent' );
+		$term = get_term_by( 'name', 'Jürgen Example', 'gasf_photo_person' );
+		$this->ok( (bool) $term, 'faces: scanner labels create a person term for next-photo suggestions' );
+		$alias = get_term_by( 'name', 'Juergen Example', 'gasf_photo_person' );
+		$this->ok( ! $alias || (int) $alias->term_id === (int) $term->term_id,
+			'faces: umlaut and expanded spelling resolve to one person term' );
+		if ( $alias && $term && (int) $alias->term_id !== (int) $term->term_id ) {
+			wp_delete_term( (int) $alias->term_id, 'gasf_photo_person' );
+		}
+		if ( $term ) { wp_delete_term( (int) $term->term_id, 'gasf_photo_person' ); }
+
+		// Label-only photos are still offered to the learning feed.
+		$learn = $this->library_photo( 'st-face-learn-label-only' );
+		update_post_meta( $learn, '_gasf_face_labels', array(
+			array( 'name' => 'Label Only', 'box' => array( 12, 14, 30, 32 ) ),
+		) );
+		$feed = $this->rest_get( '/gasf/v1/crm/photos/faces/confirmed', array( 'since' => 0, 'limit' => 200 ) );
+		$ids = array();
+		foreach ( (array) ( $feed['photos'] ?? array() ) as $p ) { $ids[] = (int) ( $p['id'] ?? 0 ); }
+		$this->ok( in_array( $learn, $ids, true ), 'faces: confirmed feed includes label-only photos for learning' );
 	}
 
 	/** The scanner key: hashed at rest, and the only way through the guard. */
