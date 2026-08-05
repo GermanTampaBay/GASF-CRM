@@ -284,11 +284,26 @@ class Api:
         origin = (parts.scheme + "://" + parts.netloc).rstrip("/")
         if origin != self.origin:
             raise RuntimeError(f"refusing cross-origin image URL: {origin}")
-        r = self.s.get(url, timeout=120)
-        if self._needs_key_fallback(r):
-            r = self.s.get(url, params={"key": self.key}, timeout=120)
-        r.raise_for_status()
-        return r.content
+        attempts = 4
+        for attempt in range(1, attempts + 1):
+            try:
+                r = self.s.get(url, timeout=120)
+                if self._needs_key_fallback(r):
+                    r = self.s.get(url, params={"key": self.key}, timeout=120)
+                if r.status_code == 403:
+                    sys.exit("The server refused the key.")
+                if r.status_code in RETRYABLE_HTTP:
+                    raise requests.HTTPError(
+                        f"{r.status_code} {r.reason}",
+                        response=r,
+                    )
+                r.raise_for_status()
+                return r.content
+            except requests.RequestException:
+                if attempt >= attempts:
+                    raise
+                # Brief backoff for host throttling/transient 5xx.
+                time.sleep(0.6 * attempt)
 
 
 # --------------------------------------------------------------------------- backends
@@ -649,6 +664,20 @@ def _mime_for_image(image_bytes):
     return "application/octet-stream"
 
 
+def _thumb_data_uri(image_bytes, max_px=240, quality=70):
+    """Small JPEG thumbnail data URI for gallery cards; empty on any failure."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        img.thumbnail((max_px, max_px))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=quality, optimize=True)
+        payload = base64.b64encode(out.getvalue()).decode("ascii")
+        return f"data:image/jpeg;base64,{payload}"
+    except Exception:
+        return ""
+
+
 def _collect_label_items(api, conn, backend, tolerance, limit):
     limit = max(1, min(1000, int(limit)))
     try:
@@ -675,7 +704,8 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
         people_names = []
     refs = load_references(conn, backend.name)
     items = []
-    for p in photos:
+    total = len(photos)
+    for n, p in enumerate(photos, start=1):
         photo_id = int(p["id"])
         people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
         try:
@@ -722,20 +752,22 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
         else:
             status = "full"
 
-        mime = _mime_for_image(image_bytes)
-        data_uri = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
         items.append(
             {
                 "id": photo_id,
+                "url": p["url"],
                 "people": people,
                 "boxes": boxes,
                 "hints": hints,
                 "prefill": prefill,
                 "status": status,
-                "image": data_uri,
+                # Lightweight preview only. Full image is loaded on demand per photo.
+                "thumb": _thumb_data_uri(image_bytes),
             }
         )
         people_names.extend(people)
+        if n % 25 == 0 or n == total:
+            print(f"label prep: {n}/{total} photos checked, {len(items)} ready")
     dedup = []
     seen = set()
     for n in people_names:
@@ -764,6 +796,7 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 .gbtn{border:1px solid #334155;background:#0b1220;color:#cbd5e1;border-radius:8px;padding:6px;cursor:pointer;text-align:left}
 .gbtn.on{border-color:#60a5fa;box-shadow:0 0 0 1px #60a5fa inset}
 .gbtn img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:6px;display:block;background:#0b1220}
+.gph{display:block;width:100%;aspect-ratio:1/1;border-radius:6px;background:#0b1220;border:1px dashed #334155}
 .gmeta{display:block;font-size:12px;padding:6px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .detail{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:14px}
 .stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
@@ -910,7 +943,9 @@ async function load(globalIndex){
 }
 function paintGallery(){
   const gl=document.getElementById('glist');
-  gl.innerHTML=activeGallery.map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}"><img src="${g.thumb}" alt=""><span class="gmeta">#${g.id}</span></button>`).join('');
+  gl.innerHTML=activeGallery.map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}">${
+    g.thumb ? `<img src="${g.thumb}" alt="">` : `<span class="gph" aria-hidden="true"></span>`
+  }<span class="gmeta">#${g.id}</span></button>`).join('');
   gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{
     pos = parseInt(b.getAttribute('data-i'),10)||0;
     await load(activeGallery[pos].global_i);
@@ -975,7 +1010,11 @@ def local_label(api, conn, backend, tolerance, limit=500):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                # Browser tab closed or navigation interrupted mid-response.
+                return
 
         def do_GET(self):
             u = urlparse(self.path)
@@ -983,7 +1022,7 @@ def local_label(api, conn, backend, tolerance, limit=500):
                 return self._write(200, _label_ui_html(), "text/html; charset=utf-8")
             if u.path == "/api/meta":
                 gallery = [
-                    {"id": it["id"], "thumb": it["image"], "status": it.get("status", "untagged"), "global_i": i}
+                    {"id": it["id"], "thumb": it.get("thumb", ""), "status": it.get("status", "untagged"), "global_i": i}
                     for i, it in enumerate(state["items"])
                 ]
                 return self._write(200, json.dumps({
@@ -997,7 +1036,15 @@ def local_label(api, conn, backend, tolerance, limit=500):
                 i = int((q.get("i") or ["0"])[0] or 0)
                 if i < 0 or i >= len(state["items"]):
                     return self._write(404, json.dumps({"error": "No such photo index"}))
-                return self._write(200, json.dumps(state["items"][i]))
+                item = state["items"][i]
+                if not item.get("image"):
+                    try:
+                        image_bytes = api.image(item["url"])
+                    except Exception as e:
+                        return self._write(502, json.dumps({"error": f"Could not load photo #{item.get('id')}: {e}"}))
+                    mime = _mime_for_image(image_bytes)
+                    item["image"] = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+                return self._write(200, json.dumps(item))
             return self._write(404, json.dumps({"error": "Not found"}))
 
         def do_POST(self):
