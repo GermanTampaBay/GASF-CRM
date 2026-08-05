@@ -2931,6 +2931,8 @@ function gasf_crm_render_inbox_script() {
 			box.innerHTML = list.map(function(p){
 				var skip = { id: p.id, desc: descOf(p.id) };
 				return '<div class="prow2" data-id="' + p.id + '" style="margin-left:' + (p.depth * 18) + 'px">' +
+					'<button class="btn sec pmove pup ico" type="button" aria-label="Move up" title="Move up">↑</button>' +
+					'<button class="btn sec pmove pdown ico" type="button" aria-label="Move down" title="Move down">↓</button>' +
 					'<input type="text" class="pname" value="' + esc(p.label) + '" aria-label="Place name">' +
 					'<select class="pparent" aria-label="Inside">' + opts(p.parent, skip) + '</select>' +
 					'<input type="text" class="pgeo2 plat" value="' + esc(p.lat) + '" placeholder="lat" aria-label="Latitude">' +
@@ -2953,6 +2955,8 @@ function gasf_crm_render_inbox_script() {
 					place('save', { term: id, name: v('.pname'), parent: parseInt(v('.pparent'), 10) || 0,
 					                lat: v('.plat'), lon: v('.plon'), radius: v('.prad') });
 				};
+				row.querySelector('.pup').onclick = function(){ place('move', { term: id, dir: 'up' }); };
+				row.querySelector('.pdown').onclick = function(){ place('move', { term: id, dir: 'down' }); };
 				row.querySelector('.pdel').onclick = function(){
 					var nm = v('.pname');
 					if (!confirm('Remove the place “' + nm + '”?\n\nPhotos tagged with it keep everything else and simply lose this place. Anything nested inside it moves up a level rather than being deleted.')) { return; }
@@ -2967,7 +2971,13 @@ function gasf_crm_render_inbox_script() {
 		pnewgo.onclick = function(){
 			var nm = document.getElementById('pnewname').value.trim();
 			if (!nm) { document.getElementById('pnewmsg').textContent = 'A name is needed.'; return; }
-			place('add', { name: nm, parent: parseInt(document.getElementById('pnewparent').value, 10) || 0 });
+			place('add', {
+				name: nm,
+				parent: parseInt(document.getElementById('pnewparent').value, 10) || 0,
+				lat: document.getElementById('pnewlat').value.trim(),
+				lon: document.getElementById('pnewlon').value.trim(),
+				radius: document.getElementById('pnewradius').value.trim()
+			});
 		};
 	}
 
@@ -2977,7 +2987,12 @@ function gasf_crm_render_inbox_script() {
 		args.action = action;
 		return api('/photos/place', { method:'POST', body: JSON.stringify(args) })
 			.then(function(r){
-				if (action === 'add') { document.getElementById('pnewname').value = ''; }
+				if (action === 'add') {
+					document.getElementById('pnewname').value = '';
+					document.getElementById('pnewlat').value = '';
+					document.getElementById('pnewlon').value = '';
+					document.getElementById('pnewradius').value = '';
+				}
 				if (r.deleted) {
 					msg.textContent = 'Removed “' + r.deleted + '”' +
 						(r.photos ? ' — ' + r.photos + ' photo(s) lost that tag' : '') +

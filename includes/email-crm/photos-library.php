@@ -1185,6 +1185,7 @@ add_action( 'rest_api_init', function () {
 					'name'   => $t->name,
 					'label'  => function_exists( 'gasf_photo_label' ) ? gasf_photo_label( $t->name ) : $t->name,
 					'parent' => (int) $t->parent,
+					'sort'   => (int) get_term_meta( $t->term_id, 'gasf_sort', true ),
 					'depth'  => (int) $r['depth'],
 					'photos' => isset( $counts[ (int) $t->term_id ] ) ? (int) $counts[ (int) $t->term_id ] : 0,
 					'lat'    => (string) get_term_meta( $t->term_id, 'gasf_lat', true ),
@@ -1210,6 +1211,41 @@ add_action( 'rest_api_init', function () {
 			$term   = $tid ? get_term( $tid, 'gasf_photo_place' ) : null;
 			$name   = trim( sanitize_text_field( (string) $req->get_param( 'name' ) ) );
 			$parent = (int) $req->get_param( 'parent' );
+			$geo    = array(
+				'gasf_lat'    => trim( (string) $req->get_param( 'lat' ) ),
+				'gasf_lon'    => trim( (string) $req->get_param( 'lon' ) ),
+				'gasf_radius' => trim( (string) $req->get_param( 'radius' ) ),
+			);
+
+			$sibling_sort = static function ( $a, $b ) {
+				$sa = (int) get_term_meta( (int) $a->term_id, 'gasf_sort', true );
+				$sb = (int) get_term_meta( (int) $b->term_id, 'gasf_sort', true );
+				if ( $sa !== $sb ) { return $sa < $sb ? -1 : 1; }
+				return strnatcasecmp( $a->name, $b->name );
+			};
+			$siblings_for = static function ( $pid ) use ( $sibling_sort ) {
+				$kids = get_terms( array(
+					'taxonomy'   => 'gasf_photo_place',
+					'hide_empty' => false,
+					'parent'     => (int) $pid,
+				) );
+				if ( is_wp_error( $kids ) || ! $kids ) { return array(); }
+				usort( $kids, $sibling_sort );
+				return $kids;
+			};
+			$append_sort = static function ( $term_id, $pid ) use ( $siblings_for ) {
+				$max = 0;
+				foreach ( $siblings_for( $pid ) as $s ) {
+					$max = max( $max, (int) get_term_meta( (int) $s->term_id, 'gasf_sort', true ) );
+				}
+				update_term_meta( (int) $term_id, 'gasf_sort', $max + 10 );
+			};
+			$write_geo = static function ( $term_id, $vals ) {
+				foreach ( $vals as $meta => $v ) {
+					if ( '' === $v ) { delete_term_meta( (int) $term_id, $meta ); continue; }
+					update_term_meta( (int) $term_id, $meta, 'gasf_radius' === $meta ? (int) $v : (float) $v );
+				}
+			};
 
 			if ( 'add' === $action ) {
 				if ( '' === $name ) { return new WP_Error( 'gasf_crm_bad', 'A name is needed.', array( 'status' => 400 ) ); }
@@ -1220,6 +1256,8 @@ add_action( 'rest_api_init', function () {
 						array( 'status' => 409 ) );
 				}
 				$term = get_term( $r['term_id'], 'gasf_photo_place' );
+				$append_sort( (int) $term->term_id, $parent );
+				$write_geo( (int) $term->term_id, $geo );
 				gasf_crm_log( sprintf( 'Photo places: added "%s"%s — user %d', $name,
 					$parent ? ' under ' . get_term( $parent, 'gasf_photo_place' )->name : '', get_current_user_id() ) );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'name' => $term->name );
@@ -1230,6 +1268,7 @@ add_action( 'rest_api_init', function () {
 			}
 
 			if ( 'save' === $action ) {
+				$old_parent = (int) $term->parent;
 				// A place cannot be moved inside itself. WordPress guards this
 				// but silently drops the parent, which reads as "the move did
 				// nothing" and invites a second try.
@@ -1245,6 +1284,7 @@ add_action( 'rest_api_init', function () {
 				}
 				$r = wp_update_term( (int) $term->term_id, 'gasf_photo_place', $up );
 				if ( is_wp_error( $r ) ) { return new WP_Error( 'gasf_crm_bad', $r->get_error_message(), array( 'status' => 409 ) ); }
+				if ( $old_parent !== $parent ) { $append_sort( (int) $term->term_id, $parent ); }
 
 				/*
 				 * Coordinates are optional and usually WRONG on a room. Consumer
@@ -1253,15 +1293,40 @@ add_action( 'rest_api_init', function () {
 				 * building carries the coordinates; the room is chosen by a
 				 * person. Blank clears them, which is how a mistake is undone.
 				 */
-				foreach ( array( 'gasf_lat' => 'lat', 'gasf_lon' => 'lon', 'gasf_radius' => 'radius' ) as $meta => $field ) {
-					$v = trim( (string) $req->get_param( $field ) );
-					if ( '' === $v ) { delete_term_meta( (int) $term->term_id, $meta ); continue; }
-					update_term_meta( (int) $term->term_id, $meta, 'gasf_radius' === $meta ? (int) $v : (float) $v );
-				}
+				$write_geo( (int) $term->term_id, $geo );
 
 				gasf_crm_log( sprintf( 'Photo places: saved "%s" — user %d', $name ?: $term->name, get_current_user_id() ) );
 				$term = get_term( (int) $term->term_id, 'gasf_photo_place' );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'name' => $term->name );
+			}
+
+			if ( 'move' === $action ) {
+				$dir = (string) $req->get_param( 'dir' );
+				if ( 'up' !== $dir && 'down' !== $dir ) {
+					return new WP_Error( 'gasf_crm_bad', 'Unknown move direction.', array( 'status' => 400 ) );
+				}
+
+				$siblings = $siblings_for( (int) $term->parent );
+				if ( ! $siblings ) { return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false ); }
+
+				$ids = array_values( array_map( 'intval', wp_list_pluck( $siblings, 'term_id' ) ) );
+				$idx = array_search( (int) $term->term_id, $ids, true );
+				if ( false === $idx ) { return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false ); }
+
+				$swap = 'up' === $dir ? $idx - 1 : $idx + 1;
+				if ( $swap < 0 || $swap >= count( $ids ) ) {
+					return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false );
+				}
+
+				$tmp        = $ids[ $idx ];
+				$ids[ $idx ] = $ids[ $swap ];
+				$ids[ $swap ] = $tmp;
+				foreach ( $ids as $i => $sid ) {
+					update_term_meta( (int) $sid, 'gasf_sort', ( $i + 1 ) * 10 );
+				}
+
+				gasf_crm_log( sprintf( 'Photo places: moved "%s" %s — user %d', $term->name, $dir, get_current_user_id() ) );
+				return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => true );
 			}
 
 			if ( 'delete' === $action ) {

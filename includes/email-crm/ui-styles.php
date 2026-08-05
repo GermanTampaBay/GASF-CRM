@@ -296,6 +296,7 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .prow2 .prad{width:74px}
 .prow2 .pct{color:var(--gasf-muted);font-size:11px}
 .prow2 button{font-size:12px;padding:4px 8px}
+.prow2 .pmove{width:30px;min-width:30px;padding:4px 0;font-weight:700}
 .prow2 .pdel{color:#b02d2e}
 .pnew{border-top:1px solid var(--gasf-border);margin-top:12px;padding-top:12px}
 .phome{background:var(--s-tint);font-size:10px;padding:1px 5px;border-radius:3px;font-weight:600}

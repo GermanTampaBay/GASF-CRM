@@ -653,10 +653,20 @@ JS;
 		$terms = get_terms( array( 'taxonomy' => 'gasf_photo_place', 'hide_empty' => false ) );
 		if ( is_wp_error( $terms ) || ! $terms ) { return array(); }
 
+		$sorts = array();
+		foreach ( $terms as $t ) {
+			$sorts[ (int) $t->term_id ] = (int) get_term_meta( (int) $t->term_id, 'gasf_sort', true );
+		}
+
 		$by_parent = array();
 		foreach ( $terms as $t ) { $by_parent[ (int) $t->parent ][] = $t; }
 		foreach ( $by_parent as &$kids ) {
-			usort( $kids, function ( $a, $b ) { return strnatcasecmp( $a->name, $b->name ); } );
+			usort( $kids, function ( $a, $b ) use ( $sorts ) {
+				$sa = (int) ( $sorts[ (int) $a->term_id ] ?? 0 );
+				$sb = (int) ( $sorts[ (int) $b->term_id ] ?? 0 );
+				if ( $sa !== $sb ) { return $sa < $sb ? -1 : 1; }
+				return strnatcasecmp( $a->name, $b->name );
+			} );
 		}
 		unset( $kids );
 

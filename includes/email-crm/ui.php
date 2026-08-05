@@ -544,13 +544,16 @@ function gasf_crm_render_inbox() {
 	?>
 	<div class="card pad lplacespanel" id="lplacespanel" hidden>
 		<h3 style="margin:0 0 4px">Places</h3>
-		<p class="muted" style="margin:0 0 10px">Where photos were taken. Places nest &mdash; the Bierhaus sits inside the Biergarten, which sits inside the Society &mdash; and filtering by the outer one finds everything within it.</p>
+		<p class="muted" style="margin:0 0 10px">Where photos were taken. Places nest &mdash; the Bierhaus sits inside the Biergarten, which sits inside the Society &mdash; and filtering by the outer one finds everything within it. Use the arrow handles to reorder places within each level.</p>
 		<div id="lplaceslist"><span class="muted">Loading&hellip;</span></div>
 		<div class="pnew">
 			<strong>Add a place</strong>
 			<div class="prow" style="margin-top:6px">
 				<label class="pf"><span>Name</span><input type="text" id="pnewname" maxlength="120" placeholder="Bierhaus"></label>
 				<label class="pf"><span>Inside</span><select id="pnewparent"></select></label>
+				<label class="pf"><span>Latitude</span><input type="text" id="pnewlat" inputmode="decimal" placeholder="27.8756"></label>
+				<label class="pf"><span>Longitude</span><input type="text" id="pnewlon" inputmode="decimal" placeholder="-82.7784"></label>
+				<label class="pf"><span>Radius (m)</span><input type="number" id="pnewradius" inputmode="numeric" placeholder="150"></label>
 				<button class="btn" id="pnewgo" type="button">Add</button>
 			</div>
 			<span class="p-msg muted" id="pnewmsg"></span>
