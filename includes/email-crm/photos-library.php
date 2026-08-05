@@ -225,7 +225,8 @@ function gasf_crm_photo_library_filter( array $ids, array $f ) {
 			if ( false === strpos( $hay, strtolower( $q ) ) ) { return false; }
 		}
 		if ( 'none' === $desc && '' !== trim( (string) get_post_field( 'post_excerpt', $id ) ) ) { return false; }
-		if ( 'face' === $review && ( ! function_exists( 'gasf_crm_faces_for' ) || ! gasf_crm_faces_for( $id ) ) ) { return false; }
+		$want_pending_faces = in_array( $review, array( 'face', 'pending', 'pending_matches' ), true );
+		if ( $want_pending_faces && ( ! function_exists( 'gasf_crm_faces_for' ) || ! gasf_crm_faces_for( $id ) ) ) { return false; }
 
 		return true;
 	} ) );

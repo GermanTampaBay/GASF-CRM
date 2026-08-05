@@ -454,7 +454,8 @@ function gasf_crm_render_inbox() {
 			</select></label>
 			<label class="lf"><span>Review</span><select id="lreview">
 				<option value="">Any</option>
-				<option value="face">Needs face match review</option>
+				<option value="pending_matches">Pending face matches</option>
+				<option value="face">Needs face match review (legacy)</option>
 			</select></label>
 			<label class="lf"><span>Sort</span><select id="lsort">
 				<option value="upload_desc">Upload date: newest first</option>
