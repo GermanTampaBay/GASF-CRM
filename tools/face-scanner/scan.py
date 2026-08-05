@@ -787,7 +787,8 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
     <div class="stage"><div class="frame" id="frame"><img id="photo" alt=""><div id="ov"></div></div></div>
     <div class="side">
       <div class="muted">People already on this photo</div><div class="people" id="people"></div>
-      <datalist id="peopleList"></datalist>
+        <datalist id="peopleListLocal"></datalist>
+        <datalist id="peopleListGlobal"></datalist>
       <div class="rows" id="rows"></div>
       <div class="acts">
         <button id="back">Back</button>
@@ -814,9 +815,15 @@ function addName(n){
   if(!nameSet.has(k)){ nameSet.set(k,name); }
 }
 function refreshNameList(){
-  const dl=document.getElementById('peopleList');
+  const dl=document.getElementById('peopleListGlobal');
   const vals=Array.from(nameSet.values()).sort((a,b)=>a.localeCompare(b));
   dl.innerHTML=vals.map(n=>`<option value="${esc(n)}"></option>`).join('');
+}
+function setupLocalNames(p){
+  const local=(p.people||[]).map(n=>(n||'').trim()).filter(Boolean);
+  const dlocal=document.getElementById('peopleListLocal');
+  dlocal.innerHTML=local.map(n=>`<option value="${esc(n)}"></option>`).join('');
+  return local;
 }
 function drawBoxes(p){
   const ov=document.getElementById('ov'); ov.innerHTML='';
@@ -843,12 +850,15 @@ function render(p){
   const ppl=document.getElementById('people');
   ppl.innerHTML=(p.people||[]).map(n=>`<span class="pchip">${esc(n)}</span>`).join('');
   (p.people||[]).forEach(addName);
+  const localNames = setupLocalNames(p);
+  const localFold = localNames.map(n=>n.toLocaleLowerCase());
   const rows=document.getElementById('rows'); rows.innerHTML='';
   (p.boxes||[]).forEach((b,i)=>{
     const hint=(p.hints||[]).find(h=>h.index===i) || {name:'',confidence:0};
     const val=(p.prefill && p.prefill[String(i)]) || '';
     const row=document.createElement('div'); row.className='row';
-    row.innerHTML=`<label>Face ${i+1}</label><input list="peopleList" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`;
+    const listId = localNames.length ? "peopleListLocal" : "peopleListGlobal";
+    row.innerHTML=`<label>Face ${i+1}</label><input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`;
     rows.appendChild(row);
     if(val){ addName(val); }
   });
@@ -857,6 +867,15 @@ function render(p){
     const hint=(p.hints||[]).find(h=>String(h.index)===String(i));
     const inp=rows.querySelector(`input[data-i="${i}"]`);
     if(inp && hint && hint.name){inp.value=hint.name; inp.focus();}
+  });
+  rows.querySelectorAll('input[data-i]').forEach(inp=>{
+    inp.addEventListener('input', ()=>{
+      if(!localNames.length){ inp.setAttribute('list','peopleListGlobal'); return; }
+      const v=(inp.value||'').trim().toLocaleLowerCase();
+      if(!v){ inp.setAttribute('list','peopleListLocal'); return; }
+      const matchesLocal = localFold.some(n=>n.startsWith(v) || v.startsWith(n));
+      inp.setAttribute('list', matchesLocal ? 'peopleListLocal' : 'peopleListGlobal');
+    });
   });
   document.getElementById('back').disabled = idx <= 0;
   document.getElementById('next').disabled = idx >= count - 1;
