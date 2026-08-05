@@ -499,7 +499,11 @@ final class GASF_CRM_Selftest {
 		update_post_meta( $learn, '_gasf_face_labels', array(
 			array( 'name' => 'Label Only', 'box' => array( 12, 14, 30, 32 ) ),
 		) );
-		$feed = $this->rest_get( '/gasf/v1/crm/photos/faces/confirmed', array( 'since' => 0, 'limit' => 200 ) );
+		$feed = $this->rest_get( '/gasf/v1/crm/photos/faces/confirmed', array(
+			'since' => 0,
+			'limit' => 200,
+			'after' => gmdate( 'Y-m-d H:i:s', time() - 10 * MINUTE_IN_SECONDS ),
+		) );
 		$ids = array();
 		foreach ( (array) ( $feed['photos'] ?? array() ) as $p ) { $ids[] = (int) ( $p['id'] ?? 0 ); }
 		$this->ok( in_array( $learn, $ids, true ), 'faces: confirmed feed includes label-only photos for learning' );

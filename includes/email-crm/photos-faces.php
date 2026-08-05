@@ -288,12 +288,10 @@ function gasf_crm_face_person_terms_ensure( array $names ) {
 	foreach ( $names as $n ) {
 		$n = trim( sanitize_text_field( (string) $n ) );
 		if ( '' === $n ) { continue; }
-		$keys = function_exists( 'gasf_photo_person_keys' )
-			? gasf_photo_person_keys( $n )
-			: array( strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( $n, ENT_QUOTES ) ) ) );
-		foreach ( $keys as $k ) {
-			if ( '' !== $k ) { $want[ $k ] = $n; }
-		}
+		$k = function_exists( 'gasf_photo_person_key' )
+			? gasf_photo_person_key( $n, true )
+			: strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( $n, ENT_QUOTES ) ) );
+		if ( '' !== $k && ! isset( $want[ $k ] ) ) { $want[ $k ] = $n; }
 	}
 	if ( ! $want ) { return 0; }
 
@@ -314,16 +312,23 @@ function gasf_crm_face_person_terms_ensure( array $names ) {
 	}
 
 	$added = 0;
-	foreach ( $want as $key => $name ) {
-		if ( isset( $have[ $key ] ) ) { continue; }
+	foreach ( $want as $name ) {
+		$keys = function_exists( 'gasf_photo_person_keys' )
+			? gasf_photo_person_keys( $name )
+			: array( strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( (string) $name, ENT_QUOTES ) ) ) );
+		$exists = false;
+		foreach ( $keys as $k ) {
+			if ( isset( $have[ $k ] ) ) { $exists = true; break; }
+		}
+		if ( $exists ) { continue; }
 		$r = wp_insert_term( $name, 'gasf_photo_person' );
 		if ( is_wp_error( $r ) ) {
 			if ( 'term_exists' === $r->get_error_code() ) {
-				$have[ $key ] = true;
+				foreach ( $keys as $k ) { $have[ $k ] = true; }
 			}
 			continue;
 		}
-		$have[ $key ] = true;
+		foreach ( $keys as $k ) { $have[ $k ] = true; }
 		$added++;
 	}
 	return $added;
