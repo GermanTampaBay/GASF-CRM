@@ -828,6 +828,12 @@ function gasf_crm_render_inbox_script() {
 	// Clones a box onto the end and puts the cursor in it, so adding three
 	// people is three clicks and three names rather than a guess about commas.
 	function wirePeople(root){
+		if (!root || root.__gasfPeopleWired) {
+			loadPeople();
+			return;
+		}
+		root.__gasfPeopleWired = true;
+
 		/*
 		 * A chip fills the first EMPTY name box, or adds one if every box is
 		 * taken — so clicking three suggestions in a row names three people
@@ -881,25 +887,30 @@ function gasf_crm_render_inbox_script() {
 			if (!empty) { return; }
 			chip.classList.add('used');
 			empty.focus();
+			return;
 		});
 
-		Array.prototype.forEach.call(root.querySelectorAll('.addp'), function(b){
-			b.onclick = function(){
-				var box = b.previousElementSibling;
-				if (!box || !box.classList.contains('p-people')) { return; }
-				box.insertAdjacentHTML('beforeend', personBox(''));
-				var input = box.lastElementChild.querySelector('.p-person');
-				if (input) { input.focus(); }
-			};
-		});
-		Array.prototype.forEach.call(root.querySelectorAll('.addg'), function(b){
-			b.onclick = function(){
-				var box = b.previousElementSibling;
-				if (!box || !box.classList.contains('p-groups')) { return; }
-				box.insertAdjacentHTML('beforeend', groupRow(''));
-				var pick = box.lastElementChild.querySelector('.p-group');
-				if (pick) { pick.focus(); }
-			};
+		root.addEventListener('click', function(ev){
+			var addp = ev.target.closest ? ev.target.closest('.addp') : null;
+			if (addp && root.contains(addp)) {
+				ev.preventDefault();
+				var pbox = addp.previousElementSibling;
+				if (!pbox || !pbox.classList.contains('p-people')) { return; }
+				pbox.insertAdjacentHTML('beforeend', personBox(''));
+				var pinput = pbox.lastElementChild.querySelector('.p-person');
+				if (pinput) { pinput.focus(); }
+				return;
+			}
+
+			var addg = ev.target.closest ? ev.target.closest('.addg') : null;
+			if (addg && root.contains(addg)) {
+				ev.preventDefault();
+				var gbox = addg.previousElementSibling;
+				if (!gbox || !gbox.classList.contains('p-groups')) { return; }
+				gbox.insertAdjacentHTML('beforeend', groupRow(''));
+				var gpick = gbox.lastElementChild.querySelector('.p-group');
+				if (gpick) { gpick.focus(); }
+			}
 		});
 		root.addEventListener('click', function(ev){
 			var del = ev.target.closest ? ev.target.closest('.pdelperson') : null;
