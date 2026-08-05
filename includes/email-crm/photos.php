@@ -3709,6 +3709,7 @@ function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts =
 	$id = (int) $attachment_id;
 	$opts = wp_parse_args( $opts, array(
 		'clear_people_when_empty'  => true,
+		'clear_groups_when_empty'  => true,
 		'place_require_existing'   => false,
 		'clear_place_when_empty'   => true,
 		'set_event_term'           => true,
@@ -3731,6 +3732,16 @@ function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts =
 	$people = array_slice( array_values( array_unique( $people ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
 	if ( $people || $opts['clear_people_when_empty'] ) {
 		wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
+	}
+
+	$groups = array();
+	foreach ( (array) ( $in['groups'] ?? array() ) as $g ) {
+		$g = trim( sanitize_text_field( (string) $g ) );
+		if ( '' !== $g ) { $groups[] = $g; }
+	}
+	$groups = array_slice( array_values( array_unique( $groups ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
+	if ( $groups || $opts['clear_groups_when_empty'] ) {
+		wp_set_object_terms( $id, $groups, 'gasf_photo_group', false );
 	}
 
 	$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
@@ -3810,6 +3821,7 @@ function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts =
 
 	return array(
 		'people'   => $people,
+		'groups'   => $groups,
 		'place'    => $place,
 		'event'    => $event,
 		'event_id' => $event_ok ? $event_id : 0,
@@ -4201,6 +4213,7 @@ add_action( 'rest_api_init', function () {
 			}
 			$ok = gasf_crm_photo_confirm( $aid, array(
 				'people'   => (array) $req->get_param( 'people' ),
+				'groups'   => (array) $req->get_param( 'groups' ),
 				'place'    => (string) $req->get_param( 'place' ),
 				'event'    => (string) $req->get_param( 'event' ),
 				'event_id' => (int) $req->get_param( 'event_id' ),
@@ -4353,6 +4366,7 @@ add_action( 'rest_api_init', function () {
 
 			$ok = gasf_crm_photo_confirm( $aid, array(
 				'people'   => (array) $req->get_param( 'people' ),
+				'groups'   => (array) $req->get_param( 'groups' ),
 				'place'    => (string) $req->get_param( 'place' ),
 				'event'    => (string) $req->get_param( 'event' ),
 				'event_id' => (int) $req->get_param( 'event_id' ),
@@ -4443,6 +4457,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 		'guess'   => ( ! empty( $info['place_guess'] ) && ! is_wp_error( $info['place_guess'] ) ) ? $info['place_guess']->name : '',
 		'alts'    => ! empty( $info['place_alts'] ) ? wp_list_pluck( $info['place_alts'], 'name' ) : array(),
 		'people'  => $info['people'] ?? array(),
+		'groups'  => $info['groups'] ?? array(),
 		'places'  => $info['places'] ?? array(),
 		'events'  => $info['events'] ?? array(),
 		'caption' => $info['caption'] ?? '',
@@ -4467,6 +4482,7 @@ function gasf_crm_photo_card( $attachment_id ) {
 		 */
 		'saved'     => array(
 			'people'   => array_map( 'strval', (array) wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) ) ),
+			'groups'   => array_map( 'strval', (array) wp_get_object_terms( $id, 'gasf_photo_group', array( 'fields' => 'names' ) ) ),
 			'place'    => (string) ( wp_get_object_terms( $id, 'gasf_photo_place', array( 'fields' => 'names' ) )[0] ?? '' ),
 			'event'    => (string) ( wp_get_object_terms( $id, 'gasf_photo_event', array( 'fields' => 'names' ) )[0] ?? '' ),
 			'event_id' => (int) get_post_meta( $id, '_gasf_photo_event_id', true ),

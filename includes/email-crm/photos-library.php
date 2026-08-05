@@ -191,19 +191,21 @@ function gasf_crm_photo_library_filter( array $ids, array $f ) {
 	}
 
 	$person = trim( (string) ( $f['person'] ?? '' ) );
+	$group  = trim( (string) ( $f['group'] ?? '' ) );
 	$event  = trim( (string) ( $f['event'] ?? '' ) );
 	$year   = preg_replace( '~\D~', '', (string) ( $f['year'] ?? '' ) );
 	$q      = trim( (string) ( $f['q'] ?? '' ) );
 	$desc   = trim( (string) ( $f['desc'] ?? '' ) );
 	$review = trim( (string) ( $f['review'] ?? '' ) );
 
-	if ( '' === $person && '' === $event && '' === $year && '' === $q && '' === $desc && '' === $review && ! $places ) { return $ids; }
+	if ( '' === $person && '' === $group && '' === $event && '' === $year && '' === $q && '' === $desc && '' === $review && ! $places ) { return $ids; }
 
-	return array_values( array_filter( $ids, function ( $id ) use ( $places, $person, $event, $year, $q, $desc, $review ) {
+	return array_values( array_filter( $ids, function ( $id ) use ( $places, $person, $group, $event, $year, $q, $desc, $review ) {
 		$names = function ( $tax ) use ( $id ) { return gasf_crm_photo_term_names( $id, $tax ); };
 
 		if ( $places && ! array_intersect( $places, $names( 'gasf_photo_place' ) ) ) { return false; }
 		if ( '' !== $person && ! in_array( $person, $names( 'gasf_photo_person' ), true ) ) { return false; }
+		if ( '' !== $group && ! in_array( $group, $names( 'gasf_photo_group' ), true ) ) { return false; }
 		if ( '' !== $event && ! in_array( $event, $names( 'gasf_photo_event' ), true ) ) { return false; }
 
 		if ( '' !== $year ) {
@@ -217,7 +219,7 @@ function gasf_crm_photo_library_filter( array $ids, array $f ) {
 		if ( '' !== $q ) {
 			$hay = strtolower( implode( ' ', array_merge(
 				array( get_the_title( $id ), get_post_field( 'post_excerpt', $id ) ),
-				$names( 'gasf_photo_person' ), $names( 'gasf_photo_place' ), $names( 'gasf_photo_event' )
+				$names( 'gasf_photo_person' ), $names( 'gasf_photo_group' ), $names( 'gasf_photo_place' ), $names( 'gasf_photo_event' )
 			) ) );
 			if ( false === strpos( $hay, strtolower( $q ) ) ) { return false; }
 		}
@@ -349,6 +351,7 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		// original" offerable honestly rather than as a button that might work.
 		'edited'  => (bool) get_post_meta( $id, '_gasf_photo_edit', true ),
 		'people'  => (array) ( $info['people'] ?? array() ),
+		'groups'  => (array) ( $info['groups'] ?? array() ),
 		'places'  => (array) ( $info['places'] ?? array() ),
 		'events'  => (array) ( $info['events'] ?? array() ),
 		'w'       => (int) ( $meta['width'] ?? 0 ),
@@ -393,6 +396,7 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		'auto'     => (bool) get_post_meta( $id, '_gasf_photo_autotag', true ),
 		'saved'    => array(
 			'people'   => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
+			'groups'   => gasf_crm_photo_term_names( $id, 'gasf_photo_group' ),
 			'place'    => (string) ( gasf_crm_photo_term_names( $id, 'gasf_photo_place' )[0] ?? '' ),
 			'event'    => (string) ( gasf_crm_photo_term_names( $id, 'gasf_photo_event' )[0] ?? '' ),
 			'event_id' => (int) get_post_meta( $id, '_gasf_photo_event_id', true ),
@@ -425,10 +429,10 @@ function gasf_crm_photo_library_card( $attachment_id ) {
  * tagged Kitchen wastes a click and makes the whole bar less trustworthy.
  */
 function gasf_crm_photo_library_facets( array $ids ) {
-	$out = array( 'people' => array(), 'places' => array(), 'events' => array(), 'years' => array() );
+	$out = array( 'people' => array(), 'groups' => array(), 'places' => array(), 'events' => array(), 'years' => array() );
 
 	foreach ( $ids as $id ) {
-		foreach ( array( 'people' => 'gasf_photo_person', 'places' => 'gasf_photo_place', 'events' => 'gasf_photo_event' ) as $k => $tax ) {
+		foreach ( array( 'people' => 'gasf_photo_person', 'groups' => 'gasf_photo_group', 'places' => 'gasf_photo_place', 'events' => 'gasf_photo_event' ) as $k => $tax ) {
 			foreach ( gasf_crm_photo_term_names( $id, $tax ) as $name ) {
 				$label = function_exists( 'gasf_photo_label' ) ? gasf_photo_label( $name ) : $name;
 				if ( ! isset( $out[ $k ][ $name ] ) ) { $out[ $k ][ $name ] = array( 'value' => $name, 'label' => $label, 'n' => 0 ); }
@@ -443,7 +447,7 @@ function gasf_crm_photo_library_facets( array $ids ) {
 		}
 	}
 
-	foreach ( array( 'people', 'places', 'events' ) as $k ) {
+	foreach ( array( 'people', 'groups', 'places', 'events' ) as $k ) {
 		usort( $out[ $k ], function ( $a, $b ) { return strnatcasecmp( $a['label'], $b['label'] ); } );
 		$out[ $k ] = array_values( $out[ $k ] );
 	}
@@ -773,6 +777,7 @@ add_action( 'rest_api_init', function () {
 		'callback'            => function ( WP_REST_Request $req ) {
 			$filters = array(
 				'person' => (string) $req->get_param( 'person' ),
+				'group'  => (string) $req->get_param( 'group' ),
 				'place'  => (string) $req->get_param( 'place' ),
 				'event'  => (string) $req->get_param( 'event' ),
 				'year'   => (string) $req->get_param( 'year' ),
@@ -786,11 +791,13 @@ add_action( 'rest_api_init', function () {
 			$ordered  = gasf_crm_photo_library_ids( array( 'sort' => $filters['sort'] ) );
 			$matching = gasf_crm_photo_library_filter( $ordered, $filters );
 			$for_who  = $filters; $for_who['person'] = '';
+			$for_group = $filters; $for_group['group'] = '';
 			$for_where = $filters; $for_where['place'] = '';
 			$for_event = $filters; $for_event['event'] = '';
 			$for_year = $filters; $for_year['year'] = '';
 
 			$f_who   = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_who ) );
+			$f_group = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_group ) );
 			$f_where = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_where ) );
 			$f_event = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_event ) );
 			$f_year  = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_year ) );
@@ -812,6 +819,7 @@ add_action( 'rest_api_init', function () {
 				'pages'   => max( 1, (int) ceil( count( $matching ) / GASF_CRM_LIB_PER_PAGE ) ),
 				'facets'  => array(
 					'people' => $f_who['people'],
+					'groups' => $f_group['groups'],
 					'places' => $f_where['places'],
 					'events' => $f_event['events'],
 					'years'  => $f_year['years'],
@@ -953,6 +961,36 @@ add_action( 'rest_api_init', function () {
 			} );
 
 			return array( 'people' => $out );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/groups', array(
+		'methods'             => 'GET',
+		'permission_callback' => $lib_guard,
+		'callback'            => function () {
+			$terms = get_terms( array( 'taxonomy' => 'gasf_photo_group', 'hide_empty' => false ) );
+			if ( is_wp_error( $terms ) ) { return array( 'groups' => array() ); }
+
+			$counts = array();
+			foreach ( $terms as $t ) {
+				$ids = get_objects_in_term( array( (int) $t->term_id ), 'gasf_photo_group' );
+				$counts[ (int) $t->term_id ] = is_wp_error( $ids ) ? 0 : count( (array) $ids );
+			}
+
+			$out = array();
+			foreach ( $terms as $t ) {
+				$out[] = array(
+					'value' => $t->name,
+					'label' => function_exists( 'gasf_photo_label' ) ? gasf_photo_label( $t->name ) : $t->name,
+					'n'     => (int) ( $counts[ (int) $t->term_id ] ?? 0 ),
+					'id'    => (int) $t->term_id,
+				);
+			}
+			usort( $out, function ( $a, $b ) {
+				return $b['n'] <=> $a['n'] ?: $b['id'] <=> $a['id'];
+			} );
+
+			return array( 'groups' => $out );
 		},
 	) );
 
@@ -1236,6 +1274,7 @@ add_action( 'rest_api_init', function () {
 		'callback'            => function ( WP_REST_Request $req ) {
 			return gasf_crm_photo_library_save( (int) $req->get_param( 'photo' ), array(
 				'people'   => (array) $req->get_param( 'people' ),
+				'groups'   => (array) $req->get_param( 'groups' ),
 				'place'    => (string) $req->get_param( 'place' ),
 				'event'    => (string) $req->get_param( 'event' ),
 				'event_id' => (int) $req->get_param( 'event_id' ),

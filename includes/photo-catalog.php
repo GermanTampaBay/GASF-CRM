@@ -85,7 +85,12 @@ if ( true ) {
 			'labels' => gasf_photo_labels( __( 'Event', 'gasf' ), __( 'Events', 'gasf' ) ),
 		) ) );
 
+		register_taxonomy( 'gasf_photo_group', array( 'attachment' ), array_merge( $common, array(
+			'labels' => gasf_photo_labels( __( 'Group', 'gasf' ), __( 'Groups', 'gasf' ) ),
+		) ) );
+
 		gasf_photo_seed_home_place();
+		gasf_photo_seed_groups();
 	}, 5 );
 
 	function gasf_photo_labels( $single, $plural ) {
@@ -122,6 +127,17 @@ if ( true ) {
 	/** The default place — what the tagging form pre-selects. 0 if unset. */
 	function gasf_photo_home_place() {
 		return (int) get_option( 'gasf_photo_home_place', 0 );
+	}
+
+	/** Seed default group names once so the picker starts useful on day one. */
+	function gasf_photo_seed_groups() {
+		if ( get_option( 'gasf_photo_seeded_groups' ) ) { return; }
+		update_option( 'gasf_photo_seeded_groups', 1, false );
+
+		foreach ( array( 'Bayen Munich', 'Krampus', 'Schuhplattlers' ) as $name ) {
+			if ( term_exists( $name, 'gasf_photo_group' ) ) { continue; }
+			wp_insert_term( $name, 'gasf_photo_group' );
+		}
 	}
 
 	/* ---------------------------------------------------------------------
@@ -1085,7 +1101,7 @@ JS;
 		$id = (int) $attachment_id;
 
 		$terms = array();
-		foreach ( array( 'person' => 'gasf_photo_person', 'place' => 'gasf_photo_place', 'event' => 'gasf_photo_event' ) as $k => $tax ) {
+		foreach ( array( 'person' => 'gasf_photo_person', 'group' => 'gasf_photo_group', 'place' => 'gasf_photo_place', 'event' => 'gasf_photo_event' ) as $k => $tax ) {
 			// get_the_terms, so a caller that primed the term cache for a whole
 			// page — the library grid does — gets array lookups rather than three
 			// more queries per photo. wp_get_object_terms would ignore that cache
@@ -1119,6 +1135,7 @@ JS;
 			'place_alts'  => $alts,
 			'caption'     => (string) get_post_field( 'post_excerpt', $id ),
 			'people'      => $terms['person'],
+			'groups'      => $terms['group'],
 			'places'      => $terms['place'],
 			'events'      => $terms['event'],
 		);

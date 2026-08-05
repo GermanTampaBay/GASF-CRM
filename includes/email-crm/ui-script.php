@@ -587,9 +587,22 @@ function gasf_crm_render_inbox_script() {
 		return s + '</div><button type="button" class="addp">+ Add another person</button>';
 	}
 
+	function groupsField(names){
+		var list = (names || []).filter(Boolean);
+		if (!list.length) { list = ['']; }
+		var s = '<div class="p-groups">';
+		list.forEach(function(n){ s += groupBox(n); });
+		return s + '</div><button type="button" class="addg">+ Add another group</button>';
+	}
+
 	function personBox(v){
 		return '<span class="pwrap"><input type="text" class="p-person" maxlength="80" value="' + esc(v || '') +
 			'" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="pdelperson" aria-label="Remove this person">×</button></span>';
+	}
+
+	function groupBox(v){
+		return '<span class="pwrap"><input type="text" class="p-group" maxlength="80" value="' + esc(v || '') +
+			'" placeholder="Group" autocomplete="off" spellcheck="false"><button type="button" class="pdelgroup" aria-label="Remove this group">×</button></span>';
 	}
 
 	/* ============ face suggestions ============
@@ -734,6 +747,7 @@ function gasf_crm_render_inbox_script() {
 	 * Suggesting the existing spelling is what keeps them one.
 	 */
 	var PEOPLE = null, peopleLoading = null;
+	var GROUPS = null, groupsLoading = null;
 
 	function loadPeople(force){
 		if (PEOPLE && !force) { return Promise.resolve(PEOPLE); }
@@ -747,6 +761,17 @@ function gasf_crm_render_inbox_script() {
 			return PEOPLE;
 		}).catch(function(){ PEOPLE = []; peopleLoading = null; return PEOPLE; });
 		return peopleLoading;
+	}
+
+	function loadGroups(force){
+		if (GROUPS && !force) { return Promise.resolve(GROUPS); }
+		if (groupsLoading && !force) { return groupsLoading; }
+		groupsLoading = api('/photos/groups').then(function(r){
+			GROUPS = gasfPrepare(r.groups || []);
+			groupsLoading = null;
+			return GROUPS;
+		}).catch(function(){ GROUPS = []; groupsLoading = null; return GROUPS; });
+		return groupsLoading;
 	}
 
 	/* Two normalised forms per name, because German has two conventions and
@@ -769,14 +794,17 @@ function gasf_crm_render_inbox_script() {
 	// Every non-empty box, in the order they appear. Trimmed and de-duplicated,
 	// because "Hans" typed twice is one person and the taxonomy would otherwise
 	// be asked to hold him twice.
-	function peopleValues(root){
+	function termValues(root, selector){
 		var out = [];
-		Array.prototype.forEach.call(root.querySelectorAll('.p-person'), function(el){
+		Array.prototype.forEach.call(root.querySelectorAll(selector), function(el){
 			var v = el.value.trim();
 			if (v && out.indexOf(v) === -1) { out.push(v); }
 		});
 		return out;
 	}
+
+	function peopleValues(root){ return termValues(root, '.p-person'); }
+	function groupValues(root){ return termValues(root, '.p-group'); }
 
 	// Clones a box onto the end and puts the cursor in it, so adding three
 	// people is three clicks and three names rather than a guess about commas.
@@ -845,6 +873,15 @@ function gasf_crm_render_inbox_script() {
 				if (input) { input.focus(); }
 			};
 		});
+		Array.prototype.forEach.call(root.querySelectorAll('.addg'), function(b){
+			b.onclick = function(){
+				var box = b.previousElementSibling;
+				if (!box || !box.classList.contains('p-groups')) { return; }
+				box.insertAdjacentHTML('beforeend', groupBox(''));
+				var input = box.lastElementChild.querySelector('.p-group');
+				if (input) { input.focus(); }
+			};
+		});
 		root.addEventListener('click', function(ev){
 			var del = ev.target.closest ? ev.target.closest('.pdelperson') : null;
 			if (!del || !root.contains(del)) { return; }
@@ -863,7 +900,26 @@ function gasf_crm_render_inbox_script() {
 			var focus = next ? next.querySelector('.p-person') : null;
 			if (focus) { focus.focus(); }
 		});
+		root.addEventListener('click', function(ev){
+			var del = ev.target.closest ? ev.target.closest('.pdelgroup') : null;
+			if (!del || !root.contains(del)) { return; }
+			ev.preventDefault();
+			var wrap = del.closest('.pwrap');
+			var box = wrap ? wrap.parentNode : null;
+			if (!box || !box.classList || !box.classList.contains('p-groups')) { return; }
+			var rows = box.querySelectorAll('.pwrap');
+			if (rows.length <= 1) {
+				var only = rows[0] ? rows[0].querySelector('.p-group') : null;
+				if (only) { only.value = ''; only.focus(); }
+				return;
+			}
+			var next = wrap.nextElementSibling || wrap.previousElementSibling;
+			wrap.remove();
+			var focus = next ? next.querySelector('.p-group') : null;
+			if (focus) { focus.focus(); }
+		});
 		loadPeople();
+		loadGroups();
 	}
 
 	/* The suggestion list.
@@ -874,20 +930,23 @@ function gasf_crm_render_inbox_script() {
 	 * worse than none, because you stop trusting it.
 	 */
 	(function(){
-		var open = null, items = [], sel = -1;
+		var open = null, items = [], sel = -1, openClass = '';
 
 		function close(){
-			if (open) { open.remove(); open = null; items = []; sel = -1; }
+			if (open) { open.remove(); open = null; items = []; sel = -1; openClass = ''; }
 		}
 
 		function paint(input){
 			var q = input.value.trim();
+			var isPerson = input.classList.contains('p-person');
+			var inputClass = isPerson ? 'p-person' : (input.classList.contains('p-group') ? 'p-group' : '');
+			if (!inputClass) { return; }
 			// Names already on THIS photo are dropped from the list — offering
 			// somebody who is visibly in the boxes above is just noise.
 			var taken = [];
-			var wrap = input.closest('.p-people');
+			var wrap = input.closest(isPerson ? '.p-people' : '.p-groups');
 			if (wrap) {
-				Array.prototype.forEach.call(wrap.querySelectorAll('.p-person'), function(o){
+				Array.prototype.forEach.call(wrap.querySelectorAll('.' + inputClass), function(o){
 					if (o !== input && o.value.trim()) { taken.push(o.value.trim()); }
 				});
 			}
@@ -897,7 +956,8 @@ function gasf_crm_render_inbox_script() {
 			// keystroke after the one that opened the list: type "Mü" and you got
 			// suggestions, type "Mül" and they vanished and never came back.
 			close();
-			items = gasfPeopleMatch(q, PEOPLE, taken);
+			var source = isPerson ? PEOPLE : GROUPS;
+			items = gasfPeopleMatch(q, source, taken);
 			if (!items.length) { return; }
 
 			var box = document.createElement('div');
@@ -907,7 +967,7 @@ function gasf_crm_render_inbox_script() {
 					esc(p.label) + '<span class="psugn">' + p.n + '</span></button>';
 			}).join('');
 			input.parentNode.appendChild(box);
-			open = box; sel = 0;
+			open = box; sel = 0; openClass = inputClass;
 
 			box.addEventListener('mousedown', function(ev){
 				// mousedown, not click: blur fires first on click and would close
@@ -935,18 +995,23 @@ function gasf_crm_render_inbox_script() {
 		}
 
 		document.addEventListener('input', function(ev){
-			if (!ev.target.classList || !ev.target.classList.contains('p-person')) { return; }
-			loadPeople().then(function(){ paint(ev.target); });
+			if (!ev.target.classList || (!ev.target.classList.contains('p-person') && !ev.target.classList.contains('p-group'))) { return; }
+			(ev.target.classList.contains('p-person') ? loadPeople() : loadGroups()).then(function(){ paint(ev.target); });
 		});
 
 		document.addEventListener('keydown', function(ev){
-			if (!ev.target.classList || !ev.target.classList.contains('p-person')) { return; }
+			if (!ev.target.classList || (!ev.target.classList.contains('p-person') && !ev.target.classList.contains('p-group'))) { return; }
+			var currentClass = ev.target.classList.contains('p-person') ? 'p-person' : 'p-group';
 			if (!open) {
 				// Down on an empty-but-focused box offers the most-photographed
 				// people, which is a reasonable place to start.
-				if (ev.key === 'ArrowDown') { loadPeople().then(function(){ paint(ev.target); }); ev.preventDefault(); }
+				if (ev.key === 'ArrowDown') {
+					(currentClass === 'p-person' ? loadPeople() : loadGroups()).then(function(){ paint(ev.target); });
+					ev.preventDefault();
+				}
 				return;
 			}
+			if (openClass && openClass !== currentClass) { return; }
 			if (ev.key === 'ArrowDown') { move(1); ev.preventDefault(); }
 			else if (ev.key === 'ArrowUp') { move(-1); ev.preventDefault(); }
 			else if (ev.key === 'Enter' || ev.key === 'Tab') {
@@ -956,7 +1021,7 @@ function gasf_crm_render_inbox_script() {
 		}, true);
 
 		document.addEventListener('focusout', function(ev){
-			if (ev.target.classList && ev.target.classList.contains('p-person')) { setTimeout(close, 120); }
+			if (ev.target.classList && (ev.target.classList.contains('p-person') || ev.target.classList.contains('p-group'))) { setTimeout(close, 120); }
 		});
 	}());
 
@@ -997,6 +1062,7 @@ function gasf_crm_render_inbox_script() {
 		var sum = summaryChip(p.summary, q.caption || p.caption || '');
 
 		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces) + peopleField(q.people || []) + '</div>' +
+			'<div class="pf"><span>Group</span>' + groupsField(q.groups || []) + '</div>' +
 			'<label class="pf"><span>' + (opts.big ? 'Notes — what is happening, anything worth remembering' : 'What is happening') + '</span>' +
 			sum +
 			note + '</label>' +
@@ -1179,6 +1245,7 @@ function gasf_crm_render_inbox_script() {
 					id: id,
 					photo: parseInt(card.dataset.photo, 10),
 					people: peopleValues(card),
+					groups: groupValues(card),
 					place: placeValue(card), event: v('.p-event'),
 					flyer: !!(card.querySelector('.p-flyer') && card.querySelector('.p-flyer').checked),
 					// Set only when the occasion was picked from the calendar, so
@@ -1187,7 +1254,7 @@ function gasf_crm_render_inbox_script() {
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					face_map: faceAssignments(card.querySelector('.pfaceov')),
 					revision: v('.p-rev')
-				})}).then(function(){ loadPeople(true); open(id); })
+				})}).then(function(){ loadPeople(true); loadGroups(true); open(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
 		});
@@ -2206,12 +2273,13 @@ function gasf_crm_render_inbox_script() {
 				api('/photos/save', { method:'POST', body: JSON.stringify({
 					photo: id,
 					people: peopleValues(ppane),
+					groups: groupValues(ppane),
 					place: placeValue(ppane), event: v('.p-event'),
 					flyer: !!(ppane.querySelector('.p-flyer') && ppane.querySelector('.p-flyer').checked),
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					revision: v('.p-rev')
-				})}).then(function(){ loadPeople(true); loadPhotos(); openPhoto(id); })
+				})}).then(function(){ loadPeople(true); loadGroups(true); loadPhotos(); openPhoto(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
 		}
@@ -2380,7 +2448,7 @@ function gasf_crm_render_inbox_script() {
 	function lval(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 
 	function lfilters(){
-		return { q: lval('lq'), person: lval('lperson'), place: lval('lplace'),
+		return { q: lval('lq'), person: lval('lperson'), group: lval('lgroup'), place: lval('lplace'),
 		         event: lval('levent'), year: lval('lyear'), desc: lval('ldesc'), review: lval('lreview'),
 		         sort: lval('lsort') || 'upload_desc' };
 	}
@@ -2446,6 +2514,7 @@ function gasf_crm_render_inbox_script() {
 			lfacets = r.facets;
 
 			lfill('lperson', r.facets.people, 'Anyone');
+			lfill('lgroup',  r.facets.groups, 'Any');
 			lfill('lplace',  r.facets.places, 'Anywhere');
 			lfill('levent',  r.facets.events, 'Any');
 			lfill('lyear',   r.facets.years,  'Any');
@@ -2514,7 +2583,7 @@ function gasf_crm_render_inbox_script() {
 	// pages shows an empty grid and looks broken.
 	function lrefilter(){ lpage = 1; loadLib(); }
 
-	['lperson','lplace','levent','lyear','ldesc','lreview','lsort'].forEach(function(id){
+	['lperson','lgroup','lplace','levent','lyear','ldesc','lreview','lsort'].forEach(function(id){
 		var e = document.getElementById(id);
 		if (e) { e.onchange = lrefilter; }
 	});
@@ -2525,7 +2594,7 @@ function gasf_crm_render_inbox_script() {
 	var lclear = document.getElementById('lclear');
 	if (lclear) {
 		lclear.onclick = function(){
-			['lq','lperson','lplace','levent','lyear','ldesc','lreview'].forEach(function(id){
+			['lq','lperson','lgroup','lplace','levent','lyear','ldesc','lreview'].forEach(function(id){
 				var e = document.getElementById(id); if (e) { e.value = ''; }
 			});
 			lrefilter();
@@ -3364,6 +3433,7 @@ function gasf_crm_render_inbox_script() {
 			api('/photos/edit', { method:'POST', body: JSON.stringify({
 				photo: p.id,
 				people: peopleValues(edit),
+				groups: groupValues(edit),
 				place: placeValue(edit), event: v('.p-event'),
 				flyer: !!(edit.querySelector('.p-flyer') && edit.querySelector('.p-flyer').checked),
 				event_id: parseInt(v('.p-evid'), 10) || 0,
@@ -3378,6 +3448,7 @@ function gasf_crm_render_inbox_script() {
 				// Without this the second photo of the same person is spelled
 				// from memory, which is exactly what the suggestions prevent.
 				loadPeople(true);
+				loadGroups(true);
 				lbOpen(card.id, null, card);
 				loadLib();
 			}).catch(function(e){

@@ -444,6 +444,7 @@ function gasf_crm_render_inbox() {
 			<label class="lf"><span>Search</span>
 				<input type="search" id="lq" placeholder="A name, a place, anything in the caption" autocomplete="off"></label>
 			<label class="lf"><span>Who</span><select id="lperson"><option value="">Anyone</option></select></label>
+			<label class="lf"><span>Group</span><select id="lgroup"><option value="">Any</option></select></label>
 			<label class="lf"><span>Where</span><select id="lplace"><option value="">Anywhere</option></select></label>
 			<label class="lf"><span>Occasion</span><select id="levent"><option value="">Any</option></select></label>
 			<label class="lf"><span>Year</span><select id="lyear"><option value="">Any</option></select></label>
