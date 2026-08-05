@@ -250,7 +250,53 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels ) {
 	foreach ( $next as $k => $v ) { $all[ $k ] = $v; }
 
 	update_post_meta( $id, '_gasf_face_labels', array_values( $all ) );
+	gasf_crm_face_person_terms_ensure( wp_list_pluck( $next, 'name' ) );
 	return count( $next );
+}
+
+/**
+ * Ensure typed face-label names exist in the person taxonomy.
+ *
+ * Labeling a box is training data, not a photo tag — the photo terms stay
+ * untouched here — but a new spelling entered in the scanner should still be
+ * available the next time a volunteer starts typing a name.
+ */
+function gasf_crm_face_person_terms_ensure( array $names ) {
+	$want = array();
+	foreach ( $names as $n ) {
+		$n = trim( sanitize_text_field( (string) $n ) );
+		if ( '' === $n ) { continue; }
+		$key = strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( $n, ENT_QUOTES ) ) );
+		if ( '' !== $key ) { $want[ $key ] = $n; }
+	}
+	if ( ! $want ) { return 0; }
+
+	$have = array();
+	$terms = get_terms( array(
+		'taxonomy'   => 'gasf_photo_person',
+		'hide_empty' => false,
+	) );
+	if ( ! is_wp_error( $terms ) ) {
+		foreach ( $terms as $t ) {
+			$key = strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( (string) $t->name, ENT_QUOTES ) ) );
+			if ( '' !== $key ) { $have[ $key ] = true; }
+		}
+	}
+
+	$added = 0;
+	foreach ( $want as $key => $name ) {
+		if ( isset( $have[ $key ] ) ) { continue; }
+		$r = wp_insert_term( $name, 'gasf_photo_person' );
+		if ( is_wp_error( $r ) ) {
+			if ( 'term_exists' === $r->get_error_code() ) {
+				$have[ $key ] = true;
+			}
+			continue;
+		}
+		$have[ $key ] = true;
+		$added++;
+	}
+	return $added;
 }
 
 function gasf_crm_face_labels_record( $attachment_id, array $map ) {
