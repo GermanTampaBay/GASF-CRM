@@ -505,7 +505,7 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'GET',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			$limit = min( 100, max( 1, (int) $req->get_param( 'limit' ) ?: 25 ) );
+			$limit = min( 1000, max( 1, (int) $req->get_param( 'limit' ) ?: 25 ) );
 			$ids = get_posts( array(
 				'post_type'      => 'attachment',
 				'post_status'    => 'inherit',
@@ -518,9 +518,6 @@ add_action( 'rest_api_init', function () {
 				'meta_query'     => array(
 					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 				),
-				'tax_query'      => array(
-					array( 'taxonomy' => 'gasf_photo_person', 'operator' => 'EXISTS' ),
-				),
 			) );
 
 			$out = array();
@@ -528,7 +525,6 @@ add_action( 'rest_api_init', function () {
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
-				if ( ! $people ) { continue; }
 				$out[] = array(
 					'id'     => (int) $id,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),

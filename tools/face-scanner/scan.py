@@ -650,7 +650,7 @@ def _mime_for_image(image_bytes):
 
 
 def _collect_label_items(api, conn, backend, tolerance, limit):
-    limit = max(1, min(100, int(limit)))
+    limit = max(1, min(1000, int(limit)))
     try:
         data = api.get("/label-queue", limit=limit)
     except requests.HTTPError as e:
@@ -958,7 +958,7 @@ init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e))
 </script></body></html>"""
 
 
-def local_label(api, conn, backend, tolerance, limit=150):
+def local_label(api, conn, backend, tolerance, limit=500):
     """Interactive local browser UI: tag faces and step next in one page."""
     items, people_names = _collect_label_items(api, conn, backend, tolerance, limit)
     if not items:
@@ -1550,8 +1550,8 @@ def main():
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
     ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
-    ap.add_argument("--label-limit", type=int, default=150, metavar="N",
-                    help="how many recent confirmed photos to load in --label mode (default: 150)")
+    ap.add_argument("--label-limit", type=int, default=500, metavar="N",
+                    help="how many recent confirmed photos to load in --label mode (default: 500)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
     ap.add_argument("--status", action="store_true", help="show what is known and what is waiting")
     ap.add_argument("--check", action="store_true", help="preflight: backend, config, database, and server")
