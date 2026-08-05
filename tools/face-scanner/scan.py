@@ -659,7 +659,7 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
             raise
         data = api.get("/confirmed", limit=limit)
 
-    photos = [p for p in data.get("photos", []) if (p.get("people") or [])]
+    photos = list(data.get("photos", []) or [])
     people_names = []
     try:
         pd = api.get("/people")
@@ -678,8 +678,6 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
     for p in photos:
         photo_id = int(p["id"])
         people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
-        if not people:
-            continue
         try:
             image_bytes = api.image(p["url"])
             found = backend.embed(image_bytes)
@@ -716,6 +714,14 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
                 used.add(best_i)
                 prefill[str(best_i)] = name
 
+        labeled = len(prefill)
+        if labeled <= 0:
+            status = "untagged"
+        elif labeled < len(boxes):
+            status = "partial"
+        else:
+            status = "full"
+
         mime = _mime_for_image(image_bytes)
         data_uri = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
         items.append(
@@ -725,6 +731,7 @@ def _collect_label_items(api, conn, backend, tolerance, limit):
                 "boxes": boxes,
                 "hints": hints,
                 "prefill": prefill,
+                "status": status,
                 "image": data_uri,
             }
         )
@@ -750,7 +757,9 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 .view{display:none}
 .view.on{display:block}
 .gallery{border:1px solid #2d3748;border-radius:10px;background:#111827;padding:12px}
-.gallery h3{margin:0 0 10px 0;font-size:15px}
+.ghead{display:flex;gap:10px;justify-content:space-between;align-items:center;margin:0 0 10px 0}
+.gallery h3{margin:0;font-size:15px}
+.ghead select{background:#0b1220;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:5px 8px}
 .glist{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
 .gbtn{border:1px solid #334155;background:#0b1220;color:#cbd5e1;border-radius:8px;padding:6px;cursor:pointer;text-align:left}
 .gbtn.on{border-color:#60a5fa;box-shadow:0 0 0 1px #60a5fa inset}
@@ -780,7 +789,13 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 <div class="top"><div><strong id="title">Loading…</strong><div class="muted" id="sub"></div></div><div id="stat" class="muted"></div></div>
 <div class="main">
   <section class="view gallery on" id="galleryView">
-    <h3>Photo gallery</h3>
+    <div class="ghead"><h3>Photo gallery</h3><label class="muted">Show
+      <select id="gfilter">
+        <option value="all">All photos</option>
+        <option value="partial">Partially tagged</option>
+        <option value="untagged">Untagged</option>
+      </select>
+    </label></div>
     <div class="glist" id="glist"></div>
   </section>
   <section class="view detail" id="detailView">
@@ -801,13 +816,20 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
   </section>
 </div>
 <script>
-let count=0, idx=0, current=null;
+let count=0, pos=0, current=null, activeGallery=[], allGallery=[];
 const nameSet = new Map();
 async function j(url,opt){ const r=await fetch(url,opt); if(!r.ok){throw new Error(await r.text()||r.statusText);} return r.json(); }
 function setText(id,t){document.getElementById(id).textContent=t;}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function showGallery(){ document.getElementById('galleryView').classList.add('on'); document.getElementById('detailView').classList.remove('on'); }
 function showDetail(){ document.getElementById('galleryView').classList.remove('on'); document.getElementById('detailView').classList.add('on'); }
+function gallerySub(){
+  const f = (document.getElementById('gfilter')||{}).value || 'all';
+  const nouns = {all:'photo', partial:'partially tagged photo', untagged:'untagged photo'};
+  const noun = nouns[f] || 'photo';
+  if(!count){ return `No ${noun}s in this batch.`; }
+  return `Click a photo to open it (${count} ${noun}${count===1?'':'s'} in this view).`;
+}
 function addName(n){
   const name=(n||'').trim();
   if(!name){return;}
@@ -844,7 +866,7 @@ function render(p){
   showDetail();
   setText('title', `Photo #${p.id}`);
   setText('sub', `${p.boxes.length} face box(es)`);
-  setText('stat', `${idx+1} / ${count}`);
+  setText('stat', `${pos+1} / ${count}`);
   const img=document.getElementById('photo');
   img.onload=()=>drawBoxes(p); img.src=p.image;
   const ppl=document.getElementById('people');
@@ -877,28 +899,43 @@ function render(p){
       inp.setAttribute('list', matchesLocal ? 'peopleListLocal' : 'peopleListGlobal');
     });
   });
-  document.getElementById('back').disabled = idx <= 0;
-  document.getElementById('next').disabled = idx >= count - 1;
-  document.querySelectorAll('#glist .gbtn').forEach((b,bi)=>b.classList.toggle('on', bi===idx));
+  document.getElementById('back').disabled = pos <= 0;
+  document.getElementById('next').disabled = pos >= count - 1;
+  document.querySelectorAll('#glist .gbtn').forEach((b,bi)=>b.classList.toggle('on', bi===pos));
   refreshNameList();
 }
-async function load(i){
-  idx=i;
-  const p = await j(`/api/photo?i=${i}`);
+async function load(globalIndex){
+  const p = await j(`/api/photo?i=${globalIndex}`);
   render(p);
 }
-async function init(){
-  const m=await j('/api/meta'); count=m.count||0;
-  (m.people||[]).forEach(addName);
+function paintGallery(){
   const gl=document.getElementById('glist');
-  gl.innerHTML=(m.gallery||[]).map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}"><img src="${g.thumb}" alt=""><span class="gmeta">#${g.id}</span></button>`).join('');
-  gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{ await load(parseInt(b.getAttribute('data-i'),10)||0); });
-  refreshNameList();
+  gl.innerHTML=activeGallery.map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}"><img src="${g.thumb}" alt=""><span class="gmeta">#${g.id}</span></button>`).join('');
+  gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{
+    pos = parseInt(b.getAttribute('data-i'),10)||0;
+    await load(activeGallery[pos].global_i);
+  });
+}
+function applyFilter(){
+  const f = (document.getElementById('gfilter')||{}).value || 'all';
+  activeGallery = allGallery.filter(g => f === 'all' ? true : g.status === f);
+  count = activeGallery.length;
+  pos = 0;
+  paintGallery();
   showGallery();
-  if(!count){ setText('title','Nothing to label'); setText('sub','No confirmed photos with detectable faces in this batch.'); return; }
   setText('title','Photo gallery');
-  setText('sub',`Click a photo to open it (${count} total in this batch).`);
+  setText('sub', gallerySub());
   setText('stat','');
+}
+async function init(){
+  const m=await j('/api/meta');
+  allGallery = (m.gallery||[]);
+  (m.people||[]).forEach(addName);
+  const gf=document.getElementById('gfilter');
+  if (gf) { gf.onchange = applyFilter; }
+  refreshNameList();
+  applyFilter();
+  if(!count){ setText('title','Nothing to label'); return; }
 }
 async function saveAndNext(){
   if(!current){return;}
@@ -910,12 +947,12 @@ async function saveAndNext(){
   });
   refreshNameList();
   if(labels.length){ await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})}); }
-  if(idx+1 < count){ await load(idx+1); } else { setText('sub','Saved. End of batch.'); }
+  if(pos+1 < count){ pos += 1; await load(activeGallery[pos].global_i); } else { setText('sub','Saved. End of batch.'); }
 }
 document.getElementById('save').onclick=saveAndNext;
-document.getElementById('back').onclick=async()=>{ if(idx>0){ await load(idx-1); } };
-document.getElementById('next').onclick=async()=>{ if(idx+1 < count){ await load(idx+1); } };
-document.getElementById('exit').onclick=()=>{ showGallery(); setText('title','Photo gallery'); setText('sub',`Click a photo to open it (${count} total in this batch).`); setText('stat',''); };
+document.getElementById('back').onclick=async()=>{ if(pos>0){ pos -= 1; await load(activeGallery[pos].global_i); } };
+document.getElementById('next').onclick=async()=>{ if(pos+1 < count){ pos += 1; await load(activeGallery[pos].global_i); } };
+document.getElementById('exit').onclick=()=>{ showGallery(); setText('title','Photo gallery'); setText('sub', gallerySub()); setText('stat',''); };
 document.getElementById('done').onclick=async()=>{ await j('/api/done',{method:'POST'}); setText('sub','Done. You can close this tab.'); };
 init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e)); });
 </script></body></html>"""
@@ -925,7 +962,7 @@ def local_label(api, conn, backend, tolerance, limit=150):
     """Interactive local browser UI: tag faces and step next in one page."""
     items, people_names = _collect_label_items(api, conn, backend, tolerance, limit)
     if not items:
-        print("No confirmed, named photos are waiting for local labeling.")
+        print("No confirmed photos with detectable faces are available for local labeling.")
         return 0
 
     state = {"items": items, "saved": 0, "done": threading.Event(), "people": people_names}
@@ -945,7 +982,10 @@ def local_label(api, conn, backend, tolerance, limit=150):
             if u.path == "/":
                 return self._write(200, _label_ui_html(), "text/html; charset=utf-8")
             if u.path == "/api/meta":
-                gallery = [{"id": it["id"], "thumb": it["image"]} for it in state["items"]]
+                gallery = [
+                    {"id": it["id"], "thumb": it["image"], "status": it.get("status", "untagged"), "global_i": i}
+                    for i, it in enumerate(state["items"])
+                ]
                 return self._write(200, json.dumps({
                     "count": len(state["items"]),
                     "saved": state["saved"],
