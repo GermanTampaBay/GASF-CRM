@@ -639,9 +639,7 @@ add_action( 'rest_api_init', function () {
 				'meta_query'     => array(
 					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 				),
-				'tax_query'      => array(
-					array( 'taxonomy' => 'gasf_photo_person', 'operator' => 'EXISTS' ),
-				),
+				'tax_query'      => array(),
 				'date_query'     => '' !== $after
 					? array(
 						array(
@@ -666,9 +664,9 @@ add_action( 'rest_api_init', function () {
 				}
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
-				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
-				if ( ! $people ) { continue; }
 				$labels = gasf_crm_face_labels_for( $id );
+				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+				if ( ! $labels && ! $people ) { continue; }
 				$out[] = array(
 					'id'     => (int) $id,
 					'modified' => $modified,
