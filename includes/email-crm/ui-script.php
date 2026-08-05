@@ -41,6 +41,20 @@ function gasf_crm_render_inbox_script() {
 		}
 		echo wp_json_encode( $pl );
 	?>;
+	var UP_GROUP_OPTIONS = <?php
+		$groups = array();
+		foreach ( (array) get_terms( array( 'taxonomy' => 'gasf_photo_group', 'hide_empty' => false ) ) as $t ) {
+			if ( ! $t || is_wp_error( $t ) ) { continue; }
+			$groups[] = array(
+				'name'  => (string) $t->name,
+				'label' => function_exists( 'gasf_photo_label' ) ? gasf_photo_label( $t->name ) : (string) $t->name,
+			);
+		}
+		usort( $groups, function ( $a, $b ) {
+			return strnatcasecmp( (string) $a['label'], (string) $b['label'] );
+		} );
+		echo wp_json_encode( $groups );
+	?>;
 
 	var stream = ''; // '' = every stream this user can see
 	var list = document.getElementById('list'), pane = document.getElementById('pane');
@@ -1700,6 +1714,7 @@ function gasf_crm_render_inbox_script() {
 			consent: !!(upEl('upconsent') && upEl('upconsent').checked),
 			note: upEl('upnote') ? upEl('upnote').value : '',
 			date: upEl('update') ? upEl('update').value : '',
+			group: upEl('upgroup') ? upEl('upgroup').value : '',
 			place: upEl('upplace') ? upEl('upplace').value : '',
 			event: upEl('upevent') ? upEl('upevent').value : '',
 			eventId: upEl('upeventid') ? upEl('upeventid').value : '',
@@ -1715,6 +1730,7 @@ function gasf_crm_render_inbox_script() {
 		if (upEl('upconsent')) { upEl('upconsent').checked = !!upDefaults.consent; }
 		if (upEl('upnote'))    { upEl('upnote').value = upDefaults.note; }
 		if (upEl('update'))    { upEl('update').value = upDefaults.date; }
+		if (upEl('upgroup'))   { upEl('upgroup').value = upDefaults.group; }
 		if (upEl('upplace'))   { upEl('upplace').value = upDefaults.place; }
 		if (upEl('upevent'))   { upEl('upevent').value = upDefaults.event; }
 		if (upEl('upeventid')) { upEl('upeventid').value = upDefaults.eventId; }
@@ -1730,6 +1746,16 @@ function gasf_crm_render_inbox_script() {
 	}
 
 	function upFill(){
+		var gsel = upEl('upgroup');
+		if (gsel && gsel.options.length < 2) {
+			UP_GROUP_OPTIONS.forEach(function(g){
+				var o = document.createElement('option');
+				o.value = g.name;
+				o.textContent = g.label || g.name;
+				gsel.appendChild(o);
+			});
+		}
+
 		// Places, from the same list the rest of the app already holds.
 		var sel = upEl('upplace');
 		if (sel && sel.options.length < 2) {
@@ -1880,6 +1906,7 @@ function gasf_crm_render_inbox_script() {
 		fd.append('consent', upEl('upconsent').checked ? '1' : '0');
 		fd.append('note', upEl('upnote').value);
 		fd.append('taken', upEl('update').value);
+		fd.append('group', upEl('upgroup').value);
 		fd.append('place', upEl('upplace').value);
 		fd.append('event', upEl('upevent').value);
 		fd.append('event_id', String(upEventId()));

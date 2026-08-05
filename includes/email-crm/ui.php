@@ -599,6 +599,7 @@ function gasf_crm_render_inbox() {
 		<h3>What they all have in common</h3>
 		<div class="lfrow">
 			<label class="lf"><span>Date or year</span><input type="text" id="update" inputmode="numeric" placeholder="YYYY or YYYY-MM-DD"></label>
+			<label class="lf"><span>Group (optional)</span><select id="upgroup"><option value="">&mdash; none &mdash;</option></select></label>
 			<label class="lf"><span>Where</span><select id="upplace"><option value="">&mdash; not sure &mdash;</option></select></label>
 			<?php
 			/*

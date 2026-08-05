@@ -142,7 +142,7 @@ define( 'GASF_CRM_UPLOAD_MAX_VIDEO_BYTES', 96 * MB_IN_BYTES );
  * Take one uploaded file into the collection, tagged with the batch's answers.
  *
  * @param array $f  One $_FILES entry.
- * @param array $in Batch fields: taken, place, event, event_id, note.
+ * @param array $in Batch fields: taken, group(s), place, event, event_id, note.
  * @return array|WP_Error The library card on success.
  */
 function gasf_crm_photo_upload_one( array $f, array $in ) {
@@ -623,6 +623,9 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	if ( '' === $place && $own_place && ! is_wp_error( $own_place ) ) { $place = $own_place->name; }
 	$meta_in = array(
 		'people'   => (array) ( $in['people'] ?? array() ),
+		'groups'   => array_values( array_filter( array_map( 'strval',
+			(array) ( $in['groups'] ?? ( '' !== (string) ( $in['group'] ?? '' ) ? array( (string) $in['group'] ) : array() ) )
+		), 'strlen' ) ),
 		'place'    => $place,
 		'event'    => trim( (string) ( $in['event'] ?? '' ) ),
 		'event_id' => (int) ( $in['event_id'] ?? 0 ),
@@ -673,6 +676,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		 */
 		$meta = gasf_crm_photo_apply_metadata( $id, $meta_in, array(
 			'clear_people_when_empty'  => false,
+			'clear_groups_when_empty'  => false,
 			'place_require_existing'   => true,
 			'clear_place_when_empty'   => false,
 			'set_event_term'           => false,
@@ -693,6 +697,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			'from'    => (string) ( $anon['from'] ?? '' ),
 			'place'   => (string) $meta['place'],
 			'people'  => (array) $meta['people'],
+			'groups'  => (array) $meta['groups'],
 			'at'      => current_time( 'mysql', true ),
 		) );
 
@@ -727,6 +732,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		 */
 		gasf_crm_photo_apply_metadata( $id, $meta_in, array(
 			'clear_people_when_empty'  => false,
+			'clear_groups_when_empty'  => false,
 			'place_require_existing'   => true,
 			'clear_place_when_empty'   => false,
 			'set_event_term'           => true,
@@ -742,6 +748,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	} else {
 		$saved = gasf_crm_photo_library_save( $id, array(
 			'people'   => $meta_in['people'],
+			'groups'   => $meta_in['groups'],
 			'place'    => $meta_in['place'],
 			'event'    => $meta_in['event'],
 			'event_id' => $meta_in['event_id'],
@@ -786,6 +793,8 @@ add_action( 'rest_api_init', function () {
 
 			$card = gasf_crm_photo_upload_one( $files['file'], array(
 				'taken'    => (string) $req->get_param( 'taken' ),
+				'group'    => (string) $req->get_param( 'group' ),
+				'groups'   => (array) $req->get_param( 'groups' ),
 				'place'    => (string) $req->get_param( 'place' ),
 				'event'    => (string) $req->get_param( 'event' ),
 				'event_id' => (int) $req->get_param( 'event_id' ),
