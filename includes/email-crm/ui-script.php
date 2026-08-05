@@ -605,7 +605,7 @@ function gasf_crm_render_inbox_script() {
 		var list = (names || []).filter(Boolean);
 		if (!list.length) { list = ['']; }
 		var s = '<div class="p-groups">';
-		list.forEach(function(n){ s += groupBox(n); });
+		list.forEach(function(n){ s += groupRow(n); });
 		return s + '</div><button type="button" class="addg">+ Add another group</button>';
 	}
 
@@ -614,9 +614,26 @@ function gasf_crm_render_inbox_script() {
 			'" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="pdelperson" aria-label="Remove this person">×</button></span>';
 	}
 
-	function groupBox(v){
-		return '<span class="pwrap"><input type="text" class="p-group" maxlength="80" value="' + esc(v || '') +
-			'" placeholder="Group" autocomplete="off" spellcheck="false"><button type="button" class="pdelgroup" aria-label="Remove this group">×</button></span>';
+	function groupOptions(selected){
+		var have = false;
+		var opts = ['<option value="">&mdash; none &mdash;</option>'];
+		UP_GROUP_OPTIONS.forEach(function(g){
+			var raw = (g && g.name) ? String(g.name) : '';
+			if (!raw) { return; }
+			var on = raw === selected;
+			if (on) { have = true; }
+			opts.push('<option value="' + esc(raw) + '"' + (on ? ' selected' : '') + '>' + esc((g && g.label) || raw) + '</option>');
+		});
+		if (selected && !have) {
+			opts.push('<option value="' + esc(selected) + '" selected>' + esc(selected) + '</option>');
+		}
+		return opts.join('');
+	}
+
+	function groupRow(v){
+		var selected = (v || '').trim();
+		return '<span class="pwrap"><select class="p-group">' + groupOptions(selected) +
+			'</select><button type="button" class="pdelgroup" aria-label="Remove this group">×</button></span>';
 	}
 
 	/* ============ face suggestions ============
@@ -761,7 +778,6 @@ function gasf_crm_render_inbox_script() {
 	 * Suggesting the existing spelling is what keeps them one.
 	 */
 	var PEOPLE = null, peopleLoading = null;
-	var GROUPS = null, groupsLoading = null;
 
 	function loadPeople(force){
 		if (PEOPLE && !force) { return Promise.resolve(PEOPLE); }
@@ -775,17 +791,6 @@ function gasf_crm_render_inbox_script() {
 			return PEOPLE;
 		}).catch(function(){ PEOPLE = []; peopleLoading = null; return PEOPLE; });
 		return peopleLoading;
-	}
-
-	function loadGroups(force){
-		if (GROUPS && !force) { return Promise.resolve(GROUPS); }
-		if (groupsLoading && !force) { return groupsLoading; }
-		groupsLoading = api('/photos/groups').then(function(r){
-			GROUPS = gasfPrepare(r.groups || []);
-			groupsLoading = null;
-			return GROUPS;
-		}).catch(function(){ GROUPS = []; groupsLoading = null; return GROUPS; });
-		return groupsLoading;
 	}
 
 	/* Two normalised forms per name, because German has two conventions and
@@ -891,9 +896,9 @@ function gasf_crm_render_inbox_script() {
 			b.onclick = function(){
 				var box = b.previousElementSibling;
 				if (!box || !box.classList.contains('p-groups')) { return; }
-				box.insertAdjacentHTML('beforeend', groupBox(''));
-				var input = box.lastElementChild.querySelector('.p-group');
-				if (input) { input.focus(); }
+				box.insertAdjacentHTML('beforeend', groupRow(''));
+				var pick = box.lastElementChild.querySelector('.p-group');
+				if (pick) { pick.focus(); }
 			};
 		});
 		root.addEventListener('click', function(ev){
@@ -933,7 +938,6 @@ function gasf_crm_render_inbox_script() {
 			if (focus) { focus.focus(); }
 		});
 		loadPeople();
-		loadGroups();
 	}
 
 	/* The suggestion list.
@@ -944,23 +948,21 @@ function gasf_crm_render_inbox_script() {
 	 * worse than none, because you stop trusting it.
 	 */
 	(function(){
-		var open = null, items = [], sel = -1, openClass = '';
+		var open = null, items = [], sel = -1;
 
 		function close(){
-			if (open) { open.remove(); open = null; items = []; sel = -1; openClass = ''; }
+			if (open) { open.remove(); open = null; items = []; sel = -1; }
 		}
 
 		function paint(input){
 			var q = input.value.trim();
-			var isPerson = input.classList.contains('p-person');
-			var inputClass = isPerson ? 'p-person' : (input.classList.contains('p-group') ? 'p-group' : '');
-			if (!inputClass) { return; }
+			if (!input.classList.contains('p-person')) { return; }
 			// Names already on THIS photo are dropped from the list — offering
 			// somebody who is visibly in the boxes above is just noise.
 			var taken = [];
-			var wrap = input.closest(isPerson ? '.p-people' : '.p-groups');
+			var wrap = input.closest('.p-people');
 			if (wrap) {
-				Array.prototype.forEach.call(wrap.querySelectorAll('.' + inputClass), function(o){
+				Array.prototype.forEach.call(wrap.querySelectorAll('.p-person'), function(o){
 					if (o !== input && o.value.trim()) { taken.push(o.value.trim()); }
 				});
 			}
@@ -970,8 +972,7 @@ function gasf_crm_render_inbox_script() {
 			// keystroke after the one that opened the list: type "Mü" and you got
 			// suggestions, type "Mül" and they vanished and never came back.
 			close();
-			var source = isPerson ? PEOPLE : GROUPS;
-			items = gasfPeopleMatch(q, source, taken);
+			items = gasfPeopleMatch(q, PEOPLE, taken);
 			if (!items.length) { return; }
 
 			var box = document.createElement('div');
@@ -981,7 +982,7 @@ function gasf_crm_render_inbox_script() {
 					esc(p.label) + '<span class="psugn">' + p.n + '</span></button>';
 			}).join('');
 			input.parentNode.appendChild(box);
-			open = box; sel = 0; openClass = inputClass;
+			open = box; sel = 0;
 
 			box.addEventListener('mousedown', function(ev){
 				// mousedown, not click: blur fires first on click and would close
@@ -1009,23 +1010,21 @@ function gasf_crm_render_inbox_script() {
 		}
 
 		document.addEventListener('input', function(ev){
-			if (!ev.target.classList || (!ev.target.classList.contains('p-person') && !ev.target.classList.contains('p-group'))) { return; }
-			(ev.target.classList.contains('p-person') ? loadPeople() : loadGroups()).then(function(){ paint(ev.target); });
+			if (!ev.target.classList || !ev.target.classList.contains('p-person')) { return; }
+			loadPeople().then(function(){ paint(ev.target); });
 		});
 
 		document.addEventListener('keydown', function(ev){
-			if (!ev.target.classList || (!ev.target.classList.contains('p-person') && !ev.target.classList.contains('p-group'))) { return; }
-			var currentClass = ev.target.classList.contains('p-person') ? 'p-person' : 'p-group';
+			if (!ev.target.classList || !ev.target.classList.contains('p-person')) { return; }
 			if (!open) {
 				// Down on an empty-but-focused box offers the most-photographed
 				// people, which is a reasonable place to start.
 				if (ev.key === 'ArrowDown') {
-					(currentClass === 'p-person' ? loadPeople() : loadGroups()).then(function(){ paint(ev.target); });
+					loadPeople().then(function(){ paint(ev.target); });
 					ev.preventDefault();
 				}
 				return;
 			}
-			if (openClass && openClass !== currentClass) { return; }
 			if (ev.key === 'ArrowDown') { move(1); ev.preventDefault(); }
 			else if (ev.key === 'ArrowUp') { move(-1); ev.preventDefault(); }
 			else if (ev.key === 'Enter' || ev.key === 'Tab') {
@@ -1035,7 +1034,7 @@ function gasf_crm_render_inbox_script() {
 		}, true);
 
 		document.addEventListener('focusout', function(ev){
-			if (ev.target.classList && (ev.target.classList.contains('p-person') || ev.target.classList.contains('p-group'))) { setTimeout(close, 120); }
+			if (ev.target.classList && ev.target.classList.contains('p-person')) { setTimeout(close, 120); }
 		});
 	}());
 
@@ -1268,7 +1267,7 @@ function gasf_crm_render_inbox_script() {
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					face_map: faceAssignments(card.querySelector('.pfaceov')),
 					revision: v('.p-rev')
-				})}).then(function(){ loadPeople(true); loadGroups(true); open(id); })
+				})}).then(function(){ loadPeople(true); open(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
 		});
@@ -1458,7 +1457,6 @@ function gasf_crm_render_inbox_script() {
 				});
 			}
 			syncFlyerCreate();
-			if (picker) { picker.search(); }
 		});
 	}
 
@@ -2306,7 +2304,7 @@ function gasf_crm_render_inbox_script() {
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					revision: v('.p-rev')
-				})}).then(function(){ loadPeople(true); loadGroups(true); loadPhotos(); openPhoto(id); })
+				})}).then(function(){ loadPeople(true); loadPhotos(); openPhoto(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
 		}
@@ -3475,7 +3473,6 @@ function gasf_crm_render_inbox_script() {
 				// Without this the second photo of the same person is spelled
 				// from memory, which is exactly what the suggestions prevent.
 				loadPeople(true);
-				loadGroups(true);
 				lbOpen(card.id, null, card);
 				loadLib();
 			}).catch(function(e){
