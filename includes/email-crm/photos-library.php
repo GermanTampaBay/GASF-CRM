@@ -897,7 +897,7 @@ add_action( 'rest_api_init', function () {
 				'event' => (string) $event,
 				'eid'   => (int) $eid,
 				'taken' => (string) $taken,
-			) ), $req, 20 * MINUTE_IN_SECONDS );
+			) ) ), $req, 20 * MINUTE_IN_SECONDS );
 			if ( is_wp_error( $op ) ) { return $op; }
 			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true, 'updated' => 0, 'skipped' => array() ); }
 
