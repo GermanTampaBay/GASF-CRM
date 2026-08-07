@@ -1332,11 +1332,18 @@ add_action( 'rest_api_init', function () {
 			$in = (array) $req->get_json_params();
 			$id = (int) ( $in['id'] ?? 0 );
 			$ok = ! empty( $in['approve'] );
+			$op = gasf_crm_op_start( 'photo-held-decide:' . $id . ':' . ( $ok ? 'keep' : 'drop' ), $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true, 'id' => $id );
+			}
 
 			if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
 			if ( ! gasf_crm_photo_awaits_review( $id ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_done', 'Somebody has already dealt with that one.', array( 'status' => 409 ) );
 			}
 
@@ -1350,6 +1357,7 @@ add_action( 'rest_api_init', function () {
 			$have = gasf_crm_photo_revision( $id );
 			$want = $in['revision'] ?? null;
 			if ( null !== $want && '' !== $want && (int) $want !== $have ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_stale',
 					'Somebody else has already dealt with this photo. Reload to see where it got to.',
 					array( 'status' => 409 ) );
@@ -1362,16 +1370,23 @@ add_action( 'rest_api_init', function () {
 			 * claim — exactly one caller wins it, the other is told.
 			 */
 			if ( ! update_post_meta( $id, '_gasf_photo_rev', $have + 1, $have ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_stale',
 					'Somebody else was deciding this at the same moment. Reload to see where it got to.',
 					array( 'status' => 409 ) );
 			}
 
 			$who = gasf_crm_display_name( get_current_user_id() );
+			$src_thread_id = function_exists( 'gasf_crm_photo_source_thread_id' ) ? gasf_crm_photo_source_thread_id( $id ) : 0;
 
 			if ( ! $ok ) {
 				gasf_crm_log( sprintf( 'CRM held: media #%d rejected by %s — deleted', $id, $who ) );
 				wp_delete_attachment( $id, true );
+				if ( $src_thread_id > 0 ) {
+					gasf_crm_case_resolve_exceptions_by_thread( $src_thread_id, 'photo_held_publish_failed' );
+					gasf_crm_case_set_state_by_thread( $src_thread_id, 'active', 'case.held_photo_rejected', array( 'photo_id' => $id ), get_current_user_id() );
+				}
+				gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'deleted' => true );
 			}
 
@@ -1379,7 +1394,13 @@ add_action( 'rest_api_init', function () {
 			// the review folder. Confirmed goes on AFTERWARDS, so a photo that
 			// fails to scrub is never marked approved.
 			$pub = gasf_crm_photo_publish( $id );
-			if ( is_wp_error( $pub ) ) { return $pub; }
+			if ( is_wp_error( $pub ) ) {
+				gasf_crm_op_finish( $op, false );
+				if ( $src_thread_id > 0 ) {
+					gasf_crm_case_open_exception_by_thread( $src_thread_id, 'photo_held_publish_failed', $pub->get_error_message(), array( 'photo_id' => $id ) );
+				}
+				return $pub;
+			}
 
 			update_post_meta( $id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
 
@@ -1389,7 +1410,12 @@ add_action( 'rest_api_init', function () {
 			update_post_meta( $id, '_gasf_photo_source', $src );
 
 			gasf_crm_log( sprintf( 'CRM held: media #%d approved by %s', $id, $who ) );
+			if ( $src_thread_id > 0 ) {
+				gasf_crm_case_resolve_exceptions_by_thread( $src_thread_id, 'photo_held_publish_failed' );
+				gasf_crm_case_set_state_by_thread( $src_thread_id, 'ready_to_publish', 'case.held_photo_approved', array( 'photo_id' => $id ), get_current_user_id() );
+			}
 
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 			return array( 'ok' => true, 'id' => $id );
 		},
 	) );

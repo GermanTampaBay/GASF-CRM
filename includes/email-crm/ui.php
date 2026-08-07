@@ -210,6 +210,9 @@ function gasf_crm_render_help() {
 		<li><strong>Answered</strong> — dealt with. Things you replied to land here, and so do things you forwarded to somebody else. If that person writes to us again, it pops back into Open by itself.</li>
 		<li><strong>Ignored</strong> — spam and junk. These stay gone even if the sender emails again.</li>
 	</ul>
+	<?php if ( function_exists( 'gasf_crm_case_workflow_enabled' ) && gasf_crm_case_workflow_enabled() ) : ?>
+	<p>Inside <strong>Open</strong> there is a second row for work queues: <em>Unassigned</em>, <em>Active</em>, <em>Waiting</em>, <em>Blocked</em>, <em>Ready</em>, and <em>Exceptions</em>. It is still one inbox; the queue row just groups what needs which kind of attention.</p>
+	<?php endif; ?>
 
 	<h3>Answering something</h3>
 	<ul>
@@ -701,6 +704,7 @@ function gasf_crm_render_inbox() {
 		// stream. A volunteer granted photos alone sees no switcher at all — the
 		// existence of a general inbox is not their business.
 		$my_streams = gasf_crm_user_streams();
+		$workflow_on = function_exists( 'gasf_crm_case_workflow_enabled' ) ? gasf_crm_case_workflow_enabled() : true;
 		if ( count( $my_streams ) > 1 ) : ?>
 		<div class="tabs streams">
 			<button class="on" data-stream="">All</button>
@@ -709,11 +713,23 @@ function gasf_crm_render_inbox() {
 			<?php endforeach; ?>
 		</div>
 		<?php endif; ?>
-		<div class="tabs">
+		<div class="tabs mstatus">
 			<button class="on" data-status="open">Open</button>
 			<button data-status="addressed">Answered</button>
 			<button data-status="ignored">Ignored</button>
 		</div>
+		<?php if ( $workflow_on ) : ?>
+		<div class="tabs mqueue" id="qtabs">
+			<button class="on" data-queue="all" data-label="All open">All open</button>
+			<button data-queue="unassigned" data-label="Unassigned">Unassigned</button>
+			<button data-queue="active" data-label="Active">Active</button>
+			<button data-queue="waiting_external" data-label="Waiting">Waiting</button>
+			<button data-queue="blocked" data-label="Blocked">Blocked</button>
+			<button data-queue="ready_to_publish" data-label="Ready">Ready</button>
+			<button data-queue="exceptions" data-label="Exceptions">Exceptions</button>
+		</div>
+		<div class="casekpis" id="casekpis" hidden></div>
+		<?php endif; ?>
 		<div class="list" id="list"><div class="pane muted">Loading…</div></div>
 	</div>
 	<div class="card"><div class="pane" id="pane">

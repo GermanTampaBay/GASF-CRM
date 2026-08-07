@@ -143,6 +143,14 @@ header.bar .hbtn:hover{background:rgba(255,255,255,.26)}
 .tabs:not(.streams) button{flex:1;padding:9px 6px;border:0;background:none;cursor:pointer;font:inherit;font-size:13px;color:var(--gasf-muted);border-bottom:2px solid transparent}
 .tabs:not(.streams) button:hover{color:var(--gasf-text)}
 .tabs:not(.streams) button.on{color:var(--s-ink);border-bottom-color:var(--s-accent);font-weight:600}
+.tabs.mqueue{gap:6px;padding:6px;background:var(--s-wash);flex-wrap:wrap}
+.tabs.mqueue button{flex:0 0 auto;padding:4px 10px;border:1px solid var(--gasf-border);border-radius:999px;font-size:11px;line-height:1.3;border-bottom-color:var(--gasf-border)}
+.tabs.mqueue button.on{background:var(--s-ink);color:#fff;border-color:var(--s-ink);border-bottom-color:var(--s-ink)}
+.casekpis{display:flex;gap:6px;flex-wrap:wrap;padding:6px;border-bottom:1px solid var(--gasf-border);background:var(--s-wash)}
+.casekpis button{border:1px solid var(--gasf-border);background:var(--gasf-surface);border-radius:999px;padding:3px 9px;font:inherit;font-size:11px;color:var(--gasf-muted);cursor:pointer}
+.casekpis button:hover{color:var(--gasf-text)}
+.casekpis button.on{background:var(--s-ink);border-color:var(--s-ink);color:#fff}
+.casekpis .warn{background:#f6e3df;color:var(--danger);border-color:#d6b4ae}
 
 .streamtag{display:inline-block;font-size:10px;font-weight:600;letter-spacing:.02em;padding:1px 7px;border-radius:9px;background:var(--s-tint);color:var(--s-ink);margin-left:6px;vertical-align:middle}
 /* Every row wears its own mailbox's colour on the left edge. In the All view
@@ -156,6 +164,10 @@ header.bar .hbtn:hover{background:rgba(255,255,255,.26)}
 .item.on{background:var(--s-wash);box-shadow:inset 0 0 0 1px var(--s-tint)}
 .item .who{font-weight:600;font-size:13px;display:flex;justify-content:space-between;gap:8px;color:var(--gasf-text)}
 .item .subj{font-size:13px;margin:2px 0 0;color:#3d342a}
+.qtag{display:inline-block;margin-left:6px;padding:1px 6px;border:1px solid var(--gasf-border);border-radius:999px;font-size:10px;line-height:1.3;background:var(--s-tint);color:var(--s-ink);vertical-align:middle}
+.qtag.ex{background:#f6e3df;color:var(--danger);border-color:#d6b4ae}
+.qtag.bl{background:#f6ecd2;color:#8a6508;border-color:#ddc895}
+.qtag.wp{background:#eaf0ff;color:#274b9a;border-color:#b8c5ea}
 .item .meta{font-size:11px;color:var(--gasf-muted);margin-top:4px;font-weight:400}
 .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#d63638;margin-right:6px;vertical-align:middle}
 .pane{padding:20px;min-height:300px}
@@ -205,6 +217,21 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 /* Green, not blue: "this is answered" is a settled-good state, and blue is now
    a stream colour rather than a status one. */
 .note.ok{background:#f0f6ec;border-left:4px solid var(--ok)}
+.casebox{margin:12px 0;padding:10px 12px;border:1px solid var(--gasf-border);border-radius:5px;background:var(--s-wash)}
+.casebox h3{margin:0 0 8px;font-size:13px}
+.casemeta{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--gasf-muted)}
+.casestate{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.casestate .btn{padding:5px 10px;font-size:12px}
+.casestate .btn.on{background:var(--s-ink);color:#fff;border-color:var(--s-ink)}
+.casetasks{margin-top:10px;border-top:1px solid var(--gasf-border);padding-top:8px}
+.casetask{display:flex;justify-content:space-between;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid var(--hair)}
+.casetask:last-child{border-bottom:0}
+.casetask .btn{padding:4px 8px;font-size:11px}
+.caseevents{margin-top:10px;border-top:1px solid var(--gasf-border);padding-top:8px}
+.caseevents h4{margin:0 0 6px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--gasf-muted)}
+.caseevents ul{list-style:none;margin:0;padding:0}
+.caseevents li{font-size:12px;color:#4a4034;padding:5px 0;border-bottom:1px solid var(--hair)}
+.caseevents li:last-child{border-bottom:0}
 .muted{color:var(--gasf-muted);font-size:13px}
 .att{display:inline-block;margin:4px 8px 0 0;padding:4px 10px;background:var(--gasf-chip);border:1px solid var(--gasf-border);border-radius:4px;font-size:12px;text-decoration:none;color:var(--s-ink)}
 .att:hover{background:var(--s-tint)}

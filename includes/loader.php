@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.18.0' );
+	define( 'GASF_CRM_SCHEMA', '1.19.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -59,6 +59,7 @@ if ( true ) {
 	 * year and a half.
 	 */
 	define( 'GASF_CRM_SECRET_WARN_DAYS', 61 );
+	define( 'GASF_CRM_CASE_OWNER_TIMEOUT_MINUTES', 1440 );
 
 	require_once GASF_CRM_DIR . '/db.php';
 	require_once GASF_CRM_DIR . '/graph.php';
@@ -251,6 +252,27 @@ if ( true ) {
 		global $wpdb;
 		$wpdb->query( "UPDATE " . gasf_crm_table( 'threads' ) . " SET stream = 'general' WHERE stream = '' OR stream IS NULL" ); // phpcs:ignore
 		$wpdb->query( "UPDATE " . gasf_crm_table( 'contacts' ) . " SET stream = 'general' WHERE stream = '' OR stream IS NULL" ); // phpcs:ignore
+		$wpdb->query(
+			"INSERT IGNORE INTO " . gasf_crm_table( 'cases' ) . "
+			(thread_id, source_type, source_key, state, priority, owner_user_id, owner_claimed_at, last_activity_at, closed_at, created_at, updated_at)
+			SELECT t.id,
+			       'email',
+			       CONCAT('email:', t.stream, ':', t.conversation_id),
+			       CASE t.status
+			         WHEN 'addressed' THEN 'resolved'
+			         WHEN 'ignored' THEN 'cancelled'
+			         WHEN 'claimed' THEN 'active'
+			         ELSE 'new'
+			       END,
+			       'normal',
+			       t.locked_by,
+			       t.locked_at,
+			       COALESCE(t.last_message_at, UTC_TIMESTAMP()),
+			       CASE WHEN t.status IN ('addressed','ignored') THEN COALESCE(t.last_status_change_at, UTC_TIMESTAMP()) ELSE NULL END,
+			       COALESCE(t.first_received_at, UTC_TIMESTAMP()),
+			       UTC_TIMESTAMP()
+			  FROM " . gasf_crm_table( 'threads' ) . " t"
+		); // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.PreparedSQL.NotPrepared
 
 		/*
 		 * Retire the old global unique keys.
@@ -442,6 +464,11 @@ if ( true ) {
 	 */
 	add_action( 'gasf_crm_sync_event', 'gasf_crm_photo_autoprocess', 15 );
 	add_action( 'gasf_crm_sync_event', 'gasf_crm_photo_chase', 20 );
+	add_action( 'gasf_crm_sync_event', function () {
+		if ( function_exists( 'gasf_crm_case_release_stale_owners' ) ) {
+			gasf_crm_case_release_stale_owners( (int) GASF_CRM_CASE_OWNER_TIMEOUT_MINUTES );
+		}
+	}, 25 );
 
 	/**
 	 * The intake also runs on its OWN schedule, not only as a passenger on the

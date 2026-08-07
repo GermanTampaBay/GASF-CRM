@@ -43,6 +43,50 @@ function gasf_crm_rest_thread( $thread_id ) {
 	return $thread;
 }
 
+function gasf_crm_rest_require_case_workflow() {
+	if ( ! function_exists( 'gasf_crm_case_workflow_enabled' ) || gasf_crm_case_workflow_enabled() ) {
+		return true;
+	}
+	return new WP_Error( 'gasf_crm_case_workflow_disabled', 'Case workflow is disabled.', array( 'status' => 404 ) );
+}
+
+function gasf_crm_op_id_from_request( WP_REST_Request $req ) {
+	$raw = (string) $req->get_param( 'op_id' );
+	if ( '' === $raw ) {
+		$raw = (string) $req->get_header( 'x-gasf-op-id' );
+	}
+	$raw = preg_replace( '~[^A-Za-z0-9._:-]~', '', $raw );
+	return '' === $raw ? '' : substr( $raw, 0, 120 );
+}
+
+function gasf_crm_op_start( $scope, WP_REST_Request $req, $running_ttl = 900 ) {
+	$op_id = gasf_crm_op_id_from_request( $req );
+	if ( '' === $op_id ) {
+		return array( 'enabled' => false, 'duplicate' => false, 'key' => '' );
+	}
+
+	$key   = 'gasf_crm_op_' . md5( (string) $scope . '|' . $op_id . '|' . get_current_user_id() );
+	$state = get_transient( $key );
+	if ( 'done' === $state ) {
+		return array( 'enabled' => true, 'duplicate' => true, 'key' => $key );
+	}
+	if ( 'running' === $state ) {
+		return new WP_Error( 'gasf_crm_inflight', 'That action is already in progress.', array( 'status' => 409 ) );
+	}
+
+	set_transient( $key, 'running', max( 30, (int) $running_ttl ) );
+	return array( 'enabled' => true, 'duplicate' => false, 'key' => $key );
+}
+
+function gasf_crm_op_finish( array $token, $ok = true, $done_ttl = 3600 ) {
+	if ( empty( $token['enabled'] ) || empty( $token['key'] ) ) { return; }
+	if ( $ok ) {
+		set_transient( (string) $token['key'], 'done', max( 60, (int) $done_ttl ) );
+		return;
+	}
+	delete_transient( (string) $token['key'] );
+}
+
 add_action( 'rest_api_init', function () {
 	$guard = 'gasf_crm_rest_guard';
 
@@ -63,6 +107,17 @@ add_action( 'rest_api_init', function () {
 
 			return array_map( function ( $t ) {
 				$holder = $t['locked_by'] ? get_userdata( (int) $t['locked_by'] ) : null;
+				$case   = gasf_crm_case_by_thread( (int) $t['id'] );
+				$owner  = ( $case && ! empty( $case['owner_user_id'] ) ) ? get_userdata( (int) $case['owner_user_id'] ) : null;
+				$exc    = $case ? gasf_crm_case_exception_count( (int) $case['id'] ) : 0;
+				$queue  = 'active';
+				if ( $exc > 0 ) {
+					$queue = 'exceptions';
+				} elseif ( $case && 'new' === (string) $case['state'] && empty( $case['owner_user_id'] ) ) {
+					$queue = 'unassigned';
+				} elseif ( $case && in_array( (string) $case['state'], array( 'waiting_external', 'blocked', 'ready_to_publish' ), true ) ) {
+					$queue = (string) $case['state'];
+				}
 				return array(
 					'id'         => (int) $t['id'],
 					'subject'    => (string) $t['subject'],
@@ -73,6 +128,11 @@ add_action( 'rest_api_init', function () {
 					'last'       => (string) $t['last_message_at'],
 					'locked_by'  => $holder ? gasf_crm_display_name( $holder->ID ) : null,
 					'locked_mine' => (int) $t['locked_by'] === get_current_user_id(),
+					'case_state' => $case ? (string) $case['state'] : 'new',
+					'owner_user_id' => $case ? (int) $case['owner_user_id'] : 0,
+					'owner_name' => $owner ? gasf_crm_display_name( (int) $owner->ID ) : '',
+					'exception_count' => $exc,
+					'queue' => $queue,
 				);
 			}, $threads );
 		},
@@ -111,6 +171,10 @@ add_action( 'rest_api_init', function () {
 			}, gasf_crm_thread_messages( $id ) );
 
 			$thread = gasf_crm_get_thread( $id ); // re-read: the claim changed it
+			$case   = gasf_crm_case_by_thread( $id );
+			$tasks  = $case ? gasf_crm_case_tasks( (int) $case['id'] ) : array();
+			$cevs   = $case ? gasf_crm_case_events( (int) $case['id'], 24 ) : array();
+			$owner  = ( $case && ! empty( $case['owner_user_id'] ) ) ? get_userdata( (int) $case['owner_user_id'] ) : null;
 			$holder = $thread['locked_by'] ? get_userdata( (int) $thread['locked_by'] ) : null;
 
 			return array(
@@ -125,6 +189,31 @@ add_action( 'rest_api_init', function () {
 				'photos'    => function_exists( 'gasf_crm_photo_thread_block' ) ? gasf_crm_photo_thread_block( $id ) : array(),
 				'can_reply' => (bool) $mine,
 				'locked_by' => ( ! $mine && $holder ) ? gasf_crm_display_name( $holder->ID ) : null,
+				'case'      => array(
+					'state'         => $case ? (string) $case['state'] : 'new',
+					'owner_user_id' => $case ? (int) $case['owner_user_id'] : 0,
+					'owner_name'    => $owner ? gasf_crm_display_name( (int) $owner->ID ) : '',
+					'exception_count' => $case ? gasf_crm_case_exception_count( (int) $case['id'] ) : 0,
+					'tasks' => array_map( function ( $t ) {
+						return array(
+							'id' => (int) $t['id'],
+							'type' => (string) $t['type'],
+							'state' => (string) $t['state'],
+							'reason_code' => (string) $t['reason_code'],
+							'details_json' => (string) $t['details_json'],
+							'created_at' => (string) $t['created_at'],
+							'resolved_at' => (string) $t['resolved_at'],
+						);
+					}, $tasks ),
+					'events' => array_map( function ( $e ) {
+						return array(
+							'actor' => (string) $e['actor'],
+							'action' => (string) $e['action'],
+							'detail' => (string) $e['detail_json'],
+							'at' => (string) $e['created_at'],
+						);
+					}, $cevs ),
+				),
 				'messages'  => $messages,
 				'events'    => array_map( function ( $e ) {
 					return array(
@@ -149,6 +238,172 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	register_rest_route( 'gasf/v1', '/crm/threads/(?P<id>\d+)/takeover', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$id     = (int) $req['id'];
+			$thread = gasf_crm_rest_thread( $id );
+			if ( is_wp_error( $thread ) ) { return $thread; }
+			$op = gasf_crm_op_start( 'thread-takeover:' . $id, $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true ); }
+			if ( ! gasf_crm_claim_thread( $id, get_current_user_id(), 15, true ) ) {
+				gasf_crm_op_finish( $op, false );
+				return new WP_Error( 'gasf_crm_takeover_failed', 'Thread takeover failed.', array( 'status' => 409 ) );
+			}
+			gasf_crm_log_event( $id, 'takeover', 'Thread was taken over by another approved admin' );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+			return array( 'ok' => true );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/cases', array(
+		'methods'             => 'GET',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$wf = gasf_crm_rest_require_case_workflow();
+			if ( is_wp_error( $wf ) ) { return $wf; }
+			if ( function_exists( 'gasf_crm_case_release_stale_owners' ) ) {
+				gasf_crm_case_release_stale_owners( defined( 'GASF_CRM_CASE_OWNER_TIMEOUT_MINUTES' ) ? (int) GASF_CRM_CASE_OWNER_TIMEOUT_MINUTES : 1440 );
+			}
+			$queue = sanitize_key( (string) $req->get_param( 'queue' ) );
+			if ( '' === $queue ) { $queue = 'active'; }
+			$allowed = array( 'unassigned', 'active', 'waiting_external', 'blocked', 'ready_to_publish', 'exceptions', 'all' );
+			if ( ! in_array( $queue, $allowed, true ) ) {
+				return new WP_Error( 'gasf_crm_badqueue', 'Unknown queue.', array( 'status' => 400 ) );
+			}
+			$streams = gasf_crm_user_streams();
+			if ( empty( $streams ) ) {
+				return array( 'queue' => $queue, 'cases' => array() );
+			}
+			$rows = gasf_crm_case_list( $queue, 200, $streams );
+			return array( 'queue' => $queue, 'cases' => $rows );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/threads/(?P<id>\d+)/case-state', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$wf = gasf_crm_rest_require_case_workflow();
+			if ( is_wp_error( $wf ) ) { return $wf; }
+			$thread = gasf_crm_rest_thread( (int) $req['id'] );
+			if ( is_wp_error( $thread ) ) { return $thread; }
+			$state = sanitize_key( (string) $req->get_param( 'state' ) );
+			$allowed = array( 'active', 'waiting_external', 'blocked', 'ready_to_publish' );
+			if ( ! in_array( $state, $allowed, true ) ) {
+				return new WP_Error( 'gasf_crm_badstate', 'That case state cannot be set here.', array( 'status' => 400 ) );
+			}
+			$op = gasf_crm_op_start( 'case-state:' . (int) $thread['id'] . ':' . $state, $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true ); }
+			$ok = gasf_crm_case_set_state_by_thread(
+				(int) $thread['id'],
+				$state,
+				'case.state_set',
+				array( 'via' => 'api' ),
+				get_current_user_id()
+			);
+			if ( ! $ok ) {
+				gasf_crm_op_finish( $op, false );
+				return new WP_Error( 'gasf_crm_transition', 'Case transition is not allowed from its current state.', array( 'status' => 409 ) );
+			}
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+			return array( 'ok' => true );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/threads/(?P<id>\d+)/case', array(
+		'methods'             => 'GET',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$wf = gasf_crm_rest_require_case_workflow();
+			if ( is_wp_error( $wf ) ) { return $wf; }
+			$thread = gasf_crm_rest_thread( (int) $req['id'] );
+			if ( is_wp_error( $thread ) ) { return $thread; }
+			$case = gasf_crm_case_by_thread( (int) $thread['id'] );
+			if ( ! $case ) {
+				return new WP_Error( 'gasf_crm_nocase', 'No case exists for this thread yet.', array( 'status' => 404 ) );
+			}
+			return array(
+				'case' => $case,
+				'tasks' => gasf_crm_case_tasks( (int) $case['id'] ),
+				'events' => gasf_crm_case_events( (int) $case['id'] ),
+			);
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/threads/(?P<id>\d+)/exceptions/resolve', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$wf = gasf_crm_rest_require_case_workflow();
+			if ( is_wp_error( $wf ) ) { return $wf; }
+			$thread = gasf_crm_rest_thread( (int) $req['id'] );
+			if ( is_wp_error( $thread ) ) { return $thread; }
+			$task_id = (int) $req->get_param( 'task_id' );
+			$case = gasf_crm_case_by_thread( (int) $thread['id'] );
+			if ( ! $case ) {
+				return new WP_Error( 'gasf_crm_nocase', 'No case exists for this thread yet.', array( 'status' => 404 ) );
+			}
+			$reason = sanitize_key( (string) $req->get_param( 'reason_code' ) );
+			$op_scope = ( $task_id > 0 )
+				? 'case-resolve-task:' . (int) $thread['id'] . ':' . $task_id
+				: 'case-resolve-reason:' . (int) $thread['id'] . ':' . $reason;
+			$op = gasf_crm_op_start( $op_scope, $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true, 'resolved' => 0 );
+			}
+
+			if ( $task_id > 0 ) {
+				$ok = gasf_crm_case_resolve_task( (int) $case['id'], $task_id );
+				if ( ! $ok ) {
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error( 'gasf_crm_notask', 'That exception task was not found.', array( 'status' => 404 ) );
+				}
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+				return array( 'ok' => true, 'resolved' => 1 );
+			}
+
+			$done = gasf_crm_case_resolve_exceptions_by_thread( (int) $thread['id'], $reason );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+			return array( 'ok' => true, 'resolved' => (int) $done );
+		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/threads/(?P<id>\d+)/case-owner', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$wf = gasf_crm_rest_require_case_workflow();
+			if ( is_wp_error( $wf ) ) { return $wf; }
+			$thread = gasf_crm_rest_thread( (int) $req['id'] );
+			if ( is_wp_error( $thread ) ) { return $thread; }
+			$mode = sanitize_key( (string) $req->get_param( 'mode' ) );
+			if ( '' === $mode ) { $mode = 'claim'; }
+			if ( ! in_array( $mode, array( 'claim', 'release', 'takeover' ), true ) ) {
+				return new WP_Error( 'gasf_crm_badowner', 'Unknown ownership action.', array( 'status' => 400 ) );
+			}
+			$op = gasf_crm_op_start( 'case-owner:' . (int) $thread['id'] . ':' . $mode, $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true );
+			}
+
+			$actor = get_current_user_id();
+			$owner = ( 'release' === $mode ) ? 0 : $actor;
+			$ok = gasf_crm_case_set_owner_by_thread( (int) $thread['id'], $owner, 'case-owner:' . $mode, $actor );
+			if ( ! $ok ) {
+				gasf_crm_op_finish( $op, false );
+				return new WP_Error( 'gasf_crm_ownerfail', 'Could not update case ownership.', array( 'status' => 500 ) );
+			}
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+			return array( 'ok' => true, 'owner_user_id' => $owner );
+		},
+	) );
+
 	// Closing a thread by hand, three ways. Separate routes rather than one
 	// taking a status parameter, so the audit log records the operator's actual
 	// intent — "answered elsewhere" and "this is spam" are different claims
@@ -160,8 +415,12 @@ add_action( 'rest_api_init', function () {
 			$id     = (int) $req['id'];
 			$thread = gasf_crm_rest_thread( $id );
 			if ( is_wp_error( $thread ) ) { return $thread; }
+			$op = gasf_crm_op_start( 'thread-addressed:' . $id, $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true ); }
 			gasf_crm_set_status( $id, 'addressed' );
 			gasf_crm_log_event( $id, 'addressed', 'Marked answered without sending a reply' );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 			return array( 'ok' => true );
 		},
 	) );
@@ -185,9 +444,13 @@ add_action( 'rest_api_init', function () {
 			if ( mb_strlen( $reason ) > 120 ) {
 				$reason = mb_substr( $reason, 0, 120 ) . '…';
 			}
+			$op = gasf_crm_op_start( 'thread-ignore:' . $id . ':' . md5( $reason ), $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true ); }
 
 			gasf_crm_set_status( $id, 'ignored' );
 			gasf_crm_log_event( $id, 'ignored', $reason );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 			return array( 'ok' => true );
 		},
 	) );
@@ -199,8 +462,12 @@ add_action( 'rest_api_init', function () {
 			$id     = (int) $req['id'];
 			$thread = gasf_crm_rest_thread( $id );
 			if ( is_wp_error( $thread ) ) { return $thread; }
+			$op = gasf_crm_op_start( 'thread-restore:' . $id, $req, 10 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true ); }
 			gasf_crm_set_status( $id, 'new' );
 			gasf_crm_log_event( $id, 'restored', 'Returned to the open queue' );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 			return array( 'ok' => true );
 		},
 	) );
@@ -209,23 +476,40 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
+			$id = (int) $req['id'];
+			$op = gasf_crm_op_start( 'thread-draft:' . $id, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				$cached = get_transient( $op['key'] . ':draft' );
+				if ( is_string( $cached ) && '' !== $cached ) {
+					return array( 'draft' => $cached, 'duplicate' => true );
+				}
+			}
+
 			// Rate limit per user: the draft endpoint is the only one that costs
 			// money, and a stuck retry loop in a browser tab should not be able
 			// to run up a bill.
 			$k = 'gasf_crm_draft_' . get_current_user_id();
 			$n = (int) get_transient( $k );
 			if ( $n >= 20 ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_rate', 'Too many drafts in the last hour. Try again later.', array( 'status' => 429 ) );
 			}
 			set_transient( $k, $n + 1, HOUR_IN_SECONDS );
 
-			$thread = gasf_crm_rest_thread( (int) $req['id'] );
-			if ( is_wp_error( $thread ) ) { return $thread; }
+			$thread = gasf_crm_rest_thread( $id );
+			if ( is_wp_error( $thread ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $thread;
+			}
 
-			$text = gasf_crm_draft_reply( (int) $req['id'] );
+			$text = gasf_crm_draft_reply( $id );
 			if ( is_wp_error( $text ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_draft', $text->get_error_message(), array( 'status' => 400 ) );
 			}
+			set_transient( $op['key'] . ':draft', (string) $text, HOUR_IN_SECONDS );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 			return array( 'draft' => $text );
 		},
 	) );
@@ -245,13 +529,19 @@ add_action( 'rest_api_init', function () {
 	register_rest_route( 'gasf/v1', '/crm/sync', array(
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
-		'callback'            => function () {
+		'callback'            => function ( WP_REST_Request $req ) {
+			$op = gasf_crm_op_start( 'mail-sync', $req, 2 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'throttled' => true, 'new' => 0, 'reopened' => 0, 'duplicate' => true );
+			}
 			// Shared cooldown across all users, not per-user. The expensive thing
 			// is the round trip to Microsoft, and it costs the same whether one
 			// person presses this ten times or ten people press it once. The sync
 			// lock already stops overlapping runs; this stops a queue of
 			// back-to-back runs each fetching the same nothing.
 			if ( get_transient( 'gasf_crm_manual_sync' ) ) {
+				gasf_crm_op_finish( $op, true );
 				return array( 'throttled' => true, 'new' => 0, 'reopened' => 0 );
 			}
 			set_transient( 'gasf_crm_manual_sync', time(), MINUTE_IN_SECONDS );
@@ -262,9 +552,11 @@ add_action( 'rest_api_init', function () {
 			// new" — otherwise a broken mailbox connection looks identical to a
 			// quiet morning, which is the worst possible failure mode here.
 			if ( ! empty( $r['errors'] ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_sync', implode( '; ', $r['errors'] ), array( 'status' => 502 ) );
 			}
 
+			gasf_crm_op_finish( $op, true );
 			return array(
 				'throttled' => false,
 				'new'       => (int) $r['new'],
@@ -442,9 +734,17 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 	$comment = ( '' !== $note ? wpautop( esc_html( $note ) ) : '' )
 		. '<p>--<br>Forwarded by ' . esc_html( $name ) . '<br>' . esc_html( $cfg['signature_org'] ) . '</p>';
 
+	$op = gasf_crm_op_start( 'thread-forward:' . $thread_id, $req, 20 * MINUTE_IN_SECONDS );
+	if ( is_wp_error( $op ) ) { return $op; }
+	if ( ! empty( $op['duplicate'] ) ) {
+		return array( 'ok' => true, 'duplicate' => true, 'to' => $to );
+	}
+
 	$sent = gasf_crm_graph_forward( $target['graph_message_id'], $to, $comment, $stream );
 	if ( is_wp_error( $sent ) ) {
+		gasf_crm_op_finish( $op, false );
 		gasf_crm_log( 'CRM forward failed (thread ' . $thread_id . '): ' . $sent->get_error_message() );
+		gasf_crm_case_open_exception_by_thread( $thread_id, 'forward_send_failed', $sent->get_error_message(), array( 'to' => $to ) );
 		return new WP_Error( 'gasf_crm_send', $sent->get_error_message(), array( 'status' => 502 ) );
 	}
 
@@ -481,7 +781,9 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 
 	gasf_crm_log_event( $thread_id, 'forwarded', 'Forwarded to ' . implode( ', ', $to ) . ' — closed as answered' );
 	gasf_crm_set_status( $thread_id, 'addressed' );
+	gasf_crm_case_resolve_exceptions_by_thread( $thread_id, 'forward_send_failed' );
 	gasf_crm_log( 'CRM: thread ' . $thread_id . ' forwarded to ' . implode( ', ', $to ) . ' by user ' . $user_id );
+	gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 
 	return array( 'ok' => true, 'to' => $to );
 }
@@ -579,6 +881,12 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 		$html .= '<p><em>Attached: ' . esc_html( implode( ', ', $names ) ) . '</em></p>';
 	}
 
+	$op = gasf_crm_op_start( 'thread-reply:' . $thread_id, $req, 20 * MINUTE_IN_SECONDS );
+	if ( is_wp_error( $op ) ) { return $op; }
+	if ( ! empty( $op['duplicate'] ) ) {
+		return array( 'ok' => true, 'duplicate' => true );
+	}
+
 	// Sent from the thread's OWN mailbox — somebody who wrote to photos@ gets a
 	// reply from photos@, not from info@. This is the single strongest argument
 	// for real mailboxes over aliases, and it is one argument wide.
@@ -587,7 +895,11 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 		: gasf_crm_graph_reply( $target['graph_message_id'], $html, $stream );
 
 	if ( is_wp_error( $sent ) ) {
+		gasf_crm_op_finish( $op, false );
 		gasf_crm_log( 'CRM reply failed (thread ' . $thread_id . '): ' . $sent->get_error_message() );
+		gasf_crm_case_open_exception_by_thread( $thread_id, 'reply_send_failed', $sent->get_error_message(), array(
+			'to' => (string) $thread['last_from_addr'],
+		) );
 		return new WP_Error( 'gasf_crm_send', $sent->get_error_message(), array( 'status' => 502 ) );
 	}
 
@@ -613,8 +925,10 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 
 	gasf_crm_touch_contact( $thread['last_from_addr'], $thread['last_from_name'], 'out', (string) $thread['subject'], (string) $thread['stream'] );
 	gasf_crm_set_status( $thread_id, 'addressed' );
+	gasf_crm_case_resolve_exceptions_by_thread( $thread_id, 'reply_send_failed' );
 	gasf_crm_log_event( $thread_id, 'replied', 'Replied to ' . $thread['last_from_addr'] );
 	gasf_crm_log( 'CRM: thread ' . $thread_id . ' answered by user ' . $user_id );
+	gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 
 	return array( 'ok' => true );
 }

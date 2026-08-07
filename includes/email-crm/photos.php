@@ -433,13 +433,21 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 
 	$note = trim( sanitize_text_field( (string) $note ) );
 	$user = wp_get_current_user();
+	$src_thread_id = gasf_crm_photo_source_thread_id( $id );
 
 	if ( 'clear' === $decision ) {
 		delete_post_meta( $id, '_gasf_photo_consent' );
 		$sync = gasf_crm_photo_enforce_web_boundary( $id, true );
 		if ( is_wp_error( $sync ) ) {
 			gasf_crm_log( 'CRM photos: consent cleared on #' . $id . ' but visibility sync failed — ' . $sync->get_error_message() );
+			if ( $src_thread_id > 0 ) {
+				gasf_crm_case_open_exception_by_thread( $src_thread_id, 'photo_consent_sync_failed', $sync->get_error_message(), array( 'photo_id' => $id, 'decision' => 'clear' ) );
+			}
 			return $sync;
+		}
+		if ( $src_thread_id > 0 ) {
+			gasf_crm_case_resolve_exceptions_by_thread( $src_thread_id, 'photo_consent_sync_failed' );
+			gasf_crm_case_set_state_by_thread( $src_thread_id, 'active', 'case.photo_consent_cleared', array( 'photo_id' => $id ), get_current_user_id() );
 		}
 		gasf_crm_log( sprintf( 'CRM photos: permission record cleared on media #%d by %s', $id, gasf_crm_display_name( $user->ID ) ) );
 		gasf_crm_log_event( 0, 'photo_consent', 'media #' . $id . ' permission record cleared' );
@@ -475,7 +483,23 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 	$sync = gasf_crm_photo_enforce_web_boundary( $id, true );
 	if ( is_wp_error( $sync ) ) {
 		gasf_crm_log( 'CRM photos: consent set on #' . $id . ' but visibility sync failed — ' . $sync->get_error_message() );
+		if ( $src_thread_id > 0 ) {
+			gasf_crm_case_open_exception_by_thread( $src_thread_id, 'photo_consent_sync_failed', $sync->get_error_message(), array(
+				'photo_id' => $id,
+				'decision' => (string) $decision,
+			) );
+		}
 		return $sync;
+	}
+	if ( $src_thread_id > 0 ) {
+		gasf_crm_case_resolve_exceptions_by_thread( $src_thread_id, 'photo_consent_sync_failed' );
+		gasf_crm_case_set_state_by_thread(
+			$src_thread_id,
+			'grant' === $decision ? 'ready_to_publish' : 'active',
+			'case.photo_consent_recorded',
+			array( 'photo_id' => $id, 'decision' => (string) $decision ),
+			get_current_user_id()
+		);
 	}
 
 	gasf_crm_log( sprintf( 'CRM photos: permission %s on media #%d by %s — %s',
@@ -1705,6 +1729,13 @@ function gasf_crm_photo_for_thread( $thread_id ) {
 		) ),
 	) );
 	return array_map( 'intval', $q->posts );
+}
+
+/** Thread id this photo came from, or 0 when it was not submission-backed. */
+function gasf_crm_photo_source_thread_id( $attachment_id ) {
+	$src = get_post_meta( (int) $attachment_id, '_gasf_photo_source', true );
+	if ( ! is_array( $src ) || empty( $src['thread'] ) ) { return 0; }
+	return max( 0, (int) $src['thread'] );
 }
 
 /* =====================================================================
@@ -4147,13 +4178,36 @@ add_action( 'rest_api_init', function () {
 		'callback'            => function ( WP_REST_Request $req ) {
 			$thread = gasf_crm_rest_thread( (int) $req->get_param( 'id' ) );
 			if ( is_wp_error( $thread ) ) { return $thread; }
+			$msg_id = (string) $req->get_param( 'msg' );
+			$att_id = (string) $req->get_param( 'att' );
+
+			$op = gasf_crm_op_start(
+				'photo-approve:' . (int) $thread['id'] . ':' . md5( $msg_id . '|' . $att_id ),
+				$req,
+				20 * MINUTE_IN_SECONDS
+			);
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array(
+					'ok'        => true,
+					'duplicate' => true,
+					'count'     => count( gasf_crm_photo_for_thread( (int) $thread['id'] ) ),
+				);
+			}
 
 			$id = gasf_crm_photo_keep(
 				$thread,
-				(string) $req->get_param( 'msg' ),
-				(string) $req->get_param( 'att' )
+				$msg_id,
+				$att_id
 			);
-			if ( is_wp_error( $id ) ) { return $id; }
+			if ( is_wp_error( $id ) ) {
+				gasf_crm_op_finish( $op, false );
+				gasf_crm_case_open_exception_by_thread( (int) $thread['id'], 'photo_keep_failed', $id->get_error_message() );
+				return $id;
+			}
+			gasf_crm_case_resolve_exceptions_by_thread( (int) $thread['id'], 'photo_keep_failed' );
+			gasf_crm_case_set_state_by_thread( (int) $thread['id'], 'active', 'case.photo_kept', array( 'photo_id' => (int) $id ), get_current_user_id() );
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 
 			return array(
 				'id'    => $id,
@@ -4184,6 +4238,17 @@ add_action( 'rest_api_init', function () {
 				return new WP_Error( 'gasf_crm_nosender', 'These photos have no recorded sender to ask.', array( 'status' => 409 ) );
 			}
 
+			$op = gasf_crm_op_start( 'photo-invite:' . (int) $thread['id'], $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array(
+					'sent'      => true,
+					'duplicate' => true,
+					'to'        => $to_addr,
+					'photos'    => count( $ids ),
+				);
+			}
+
 			$inv = gasf_crm_photo_invite_create(
 				(int) $thread['id'],
 				$to_addr,
@@ -4192,7 +4257,11 @@ add_action( 'rest_api_init', function () {
 				(string) $thread['stream'],
 				(string) ( $src['graph_msg'] ?? '' )
 			);
-			if ( is_wp_error( $inv ) ) { return $inv; }
+			if ( is_wp_error( $inv ) ) {
+				gasf_crm_op_finish( $op, false );
+				gasf_crm_case_open_exception_by_thread( (int) $thread['id'], 'photo_invite_create_failed', $inv->get_error_message() );
+				return $inv;
+			}
 
 			$sent = gasf_crm_photo_invite_send( array(
 				'thread_id' => (int) $thread['id'],
@@ -4201,12 +4270,18 @@ add_action( 'rest_api_init', function () {
 			), $inv['token'], (string) $thread['stream'] );
 
 			if ( is_wp_error( $sent ) ) {
+				gasf_crm_op_finish( $op, false );
+				gasf_crm_case_open_exception_by_thread( (int) $thread['id'], 'photo_invite_send_failed', $sent->get_error_message() );
 				return new WP_Error(
 					'gasf_crm_sendfail',
 					'The link was created but the email did not go out: ' . $sent->get_error_message(),
 					array( 'status' => 502 )
 				);
 			}
+			gasf_crm_case_resolve_exceptions_by_thread( (int) $thread['id'], 'photo_invite_create_failed' );
+			gasf_crm_case_resolve_exceptions_by_thread( (int) $thread['id'], 'photo_invite_send_failed' );
+			gasf_crm_case_set_state_by_thread( (int) $thread['id'], 'waiting_external', 'case.awaiting_sender_labels', array(), get_current_user_id() );
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 
 			return array( 'sent' => true, 'to' => $to_addr, 'photos' => count( $ids ) );
 		},
@@ -4269,6 +4344,11 @@ add_action( 'rest_api_init', function () {
 			if ( ! gasf_crm_photo_card( $aid ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
+			$op = gasf_crm_op_start( 'photo-save:' . $aid, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true, 'photo' => $aid );
+			}
 			$ok = gasf_crm_photo_confirm( $aid, array(
 				'people'   => (array) $req->get_param( 'people' ),
 				'groups'   => (array) $req->get_param( 'groups' ),
@@ -4281,7 +4361,12 @@ add_action( 'rest_api_init', function () {
 				'face_map' => (array) $req->get_param( 'face_map' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
-			return is_wp_error( $ok ) ? $ok : gasf_crm_photo_card( $aid );
+			if ( is_wp_error( $ok ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $ok;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return gasf_crm_photo_card( $aid );
 		},
 	) );
 
@@ -4290,8 +4375,16 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $photo_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$aid  = (int) $req->get_param( 'photo' );
+			$op = gasf_crm_op_start( 'photo-reject:' . $aid, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true, 'photo' => $aid );
+			}
 			$card = gasf_crm_photo_card( $aid );
-			if ( ! $card ) { return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) ); }
+			if ( ! $card ) {
+				gasf_crm_op_finish( $op, false );
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
 
 			/*
 			 * Only ever a photo that came in through a submission. Without this
@@ -4306,6 +4399,7 @@ add_action( 'rest_api_init', function () {
 			 */
 			$src = get_post_meta( $aid, '_gasf_photo_source', true );
 			if ( ! is_array( $src ) || ( empty( $src['email'] ) && empty( $src['upload'] ) ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_403', 'That is not a submitted photo.', array( 'status' => 403 ) );
 			}
 
@@ -4327,6 +4421,7 @@ add_action( 'rest_api_init', function () {
 			$have = gasf_crm_photo_revision( $aid );
 			$want = $req->get_param( 'revision' );
 			if ( null !== $want && '' !== $want && (int) $want !== $have ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error(
 					'gasf_crm_stale',
 					'Somebody else has already dealt with this photo. Reload to see where it got to.',
@@ -4334,6 +4429,7 @@ add_action( 'rest_api_init', function () {
 				);
 			}
 			if ( ! update_post_meta( $aid, '_gasf_photo_rev', $have + 1, $have ) ) {
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error(
 					'gasf_crm_stale',
 					'Somebody else was deciding about this at the same moment. Reload to see where it got to.',
@@ -4360,6 +4456,10 @@ add_action( 'rest_api_init', function () {
 				if ( ! $moved ) {
 					update_post_meta( $aid, '_gasf_photo_rev', $have ); // hand the revision back
 					gasf_crm_log( 'CRM photos: NOT deleting media #' . $aid . ' — its record would not move to rejected' );
+					if ( ! empty( $src['thread'] ) ) {
+						gasf_crm_case_open_exception_by_thread( (int) $src['thread'], 'photo_reject_move_failed', 'Photo item could not move to rejected before delete.', array( 'photo_id' => $aid ) );
+					}
+					gasf_crm_op_finish( $op, false );
 					return new WP_Error(
 						'gasf_crm_reject',
 						'The photo has not been deleted: its record could not be updated, and deleting it now would have it fetched again.',
@@ -4369,6 +4469,11 @@ add_action( 'rest_api_init', function () {
 			}
 
 			wp_delete_attachment( $aid, true );
+			if ( ! empty( $src['thread'] ) ) {
+				gasf_crm_case_resolve_exceptions_by_thread( (int) $src['thread'], 'photo_reject_move_failed' );
+				gasf_crm_case_set_state_by_thread( (int) $src['thread'], 'active', 'case.photo_rejected', array( 'photo_id' => $aid ), get_current_user_id() );
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 			return array( 'ok' => true, 'photo' => $aid );
 		},
 	) );
@@ -4398,12 +4503,29 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			return gasf_crm_photo_event_from_flyer( array(
+			$payload = array(
 				'title' => (string) $req->get_param( 'title' ),
 				'date'  => (string) $req->get_param( 'date' ),
 				'start' => (string) $req->get_param( 'start' ),
 				'end'   => (string) $req->get_param( 'end' ),
-			) );
+			);
+			$op = gasf_crm_op_start(
+				'photo-event-create:' . md5( wp_json_encode( $payload ) ),
+				$req,
+				20 * MINUTE_IN_SECONDS
+			);
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				$res = gasf_crm_photo_event_from_flyer( $payload );
+				return is_wp_error( $res ) ? array( 'ok' => true, 'duplicate' => true ) : $res;
+			}
+			$res = gasf_crm_photo_event_from_flyer( $payload );
+			if ( is_wp_error( $res ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $res;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return $res;
 		},
 	) );
 
@@ -4421,6 +4543,11 @@ add_action( 'rest_api_init', function () {
 			if ( ! in_array( $aid, gasf_crm_photo_for_thread( (int) $thread['id'] ), true ) ) {
 				return new WP_Error( 'gasf_crm_404', 'That photo is not part of this submission.', array( 'status' => 404 ) );
 			}
+			$op = gasf_crm_op_start( 'photo-confirm:' . (int) $thread['id'] . ':' . $aid, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true, 'photo' => $aid );
+			}
 
 			$ok = gasf_crm_photo_confirm( $aid, array(
 				'people'   => (array) $req->get_param( 'people' ),
@@ -4434,9 +4561,16 @@ add_action( 'rest_api_init', function () {
 				'face_map' => (array) $req->get_param( 'face_map' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
-			if ( is_wp_error( $ok ) ) { return $ok; }
+			if ( is_wp_error( $ok ) ) {
+				gasf_crm_op_finish( $op, false );
+				gasf_crm_case_open_exception_by_thread( (int) $thread['id'], 'photo_confirm_failed', $ok->get_error_message(), array( 'photo_id' => $aid ) );
+				return $ok;
+			}
 
+			gasf_crm_case_resolve_exceptions_by_thread( (int) $thread['id'], 'photo_confirm_failed' );
+			gasf_crm_case_set_state_by_thread( (int) $thread['id'], 'active', 'case.photo_confirmed', array( 'photo_id' => $aid ), get_current_user_id() );
 			gasf_crm_log_event( (int) $thread['id'], 'photo_confirmed', 'tags approved for media #' . $aid );
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 			return array( 'ok' => true, 'photo' => $aid );
 		},
 	) );

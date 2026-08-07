@@ -491,6 +491,7 @@ define( 'GASF_CRM_LIB_NOTE_MAX', 600 );
  */
 function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	$id = (int) $attachment_id;
+	$src_thread_id = function_exists( 'gasf_crm_photo_source_thread_id' ) ? gasf_crm_photo_source_thread_id( $id ) : 0;
 	if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
 		return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 	}
@@ -568,6 +569,9 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	}
 
 	gasf_crm_log_event( 0, 'photo_edited', 'media #' . $id . ' retagged in the library by user ' . get_current_user_id() );
+	if ( $src_thread_id > 0 ) {
+		gasf_crm_case_set_state_by_thread( $src_thread_id, 'active', 'case.library_photo_edited', array( 'photo_id' => $id ), get_current_user_id() );
+	}
 
 	return gasf_crm_photo_library_card( $id );
 }
@@ -579,6 +583,7 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
  */
 function gasf_crm_photo_library_delete( $attachment_id, $revision = null ) {
 	$id = (int) $attachment_id;
+	$src_thread_id = function_exists( 'gasf_crm_photo_source_thread_id' ) ? gasf_crm_photo_source_thread_id( $id ) : 0;
 	if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
 		return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 	}
@@ -604,10 +609,17 @@ function gasf_crm_photo_library_delete( $attachment_id, $revision = null ) {
 
 	$name = gasf_crm_photo_display_title( $id );
 	if ( ! wp_delete_attachment( $id, true ) ) {
+		if ( $src_thread_id > 0 ) {
+			gasf_crm_case_open_exception_by_thread( $src_thread_id, 'library_photo_delete_failed', 'Could not delete photo from library.', array( 'photo_id' => $id ) );
+		}
 		return new WP_Error( 'gasf_crm_delete', 'Could not delete that photo from the library.', array( 'status' => 500 ) );
 	}
 
 	gasf_crm_log_event( 0, 'photo_deleted', 'media #' . $id . ' deleted from the library by user ' . get_current_user_id() );
+	if ( $src_thread_id > 0 ) {
+		gasf_crm_case_resolve_exceptions_by_thread( $src_thread_id, 'library_photo_delete_failed' );
+		gasf_crm_case_set_state_by_thread( $src_thread_id, 'active', 'case.library_photo_deleted', array( 'photo_id' => $id ), get_current_user_id() );
+	}
 	return array( 'ok' => true, 'id' => $id, 'title' => $name );
 }
 
@@ -878,6 +890,16 @@ add_action( 'rest_api_init', function () {
 			if ( ! $adds && '' === $place && '' === $event && '' === $taken ) {
 				return new WP_Error( 'gasf_crm_noop', 'Nothing to apply — add a name, a place, an event or a date.', array( 'status' => 400 ) );
 			}
+			$op = gasf_crm_op_start( 'photo-bulk-tag:' . md5( wp_json_encode( array(
+				'ids'   => array_map( 'intval', $ids ),
+				'adds'  => array_values( $adds ),
+				'place' => (string) $place,
+				'event' => (string) $event,
+				'eid'   => (int) $eid,
+				'taken' => (string) $taken,
+			) ), $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) { return array( 'ok' => true, 'duplicate' => true, 'updated' => 0, 'skipped' => array() ); }
 
 			$updated = 0;
 			$skipped = array();
@@ -919,6 +941,7 @@ add_action( 'rest_api_init', function () {
 				'' !== $place ? '; place: ' . $place : '',
 				'' !== $event ? '; event: ' . $event : '' ) );
 
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 			return array( 'ok' => true, 'updated' => $updated, 'skipped' => $skipped );
 		},
 	) );
@@ -1052,9 +1075,34 @@ add_action( 'rest_api_init', function () {
 
 			$action = (string) $req->get_param( 'action' );
 			$name   = trim( (string) $req->get_param( 'name' ) );
+			$into   = trim( (string) $req->get_param( 'into' ) );
 			$term   = $find_person_term( $name );
 
 			if ( ! $term || is_wp_error( $term ) ) {
+				$scope = '';
+				if ( 'rename' === $action ) {
+					$scope = 'photo-person:rename:' . md5( $name . '|' . trim( sanitize_text_field( $into ) ) );
+				} elseif ( 'merge' === $action ) {
+					$scope = 'photo-person:merge:' . md5( $name . '|' . $into );
+				} elseif ( 'delete' === $action ) {
+					$scope = 'photo-person:delete:' . md5( $name );
+				}
+				if ( '' !== $scope ) {
+					$op = gasf_crm_op_start( $scope, $req, 20 * MINUTE_IN_SECONDS );
+					if ( is_array( $op ) && ! empty( $op['duplicate'] ) ) {
+						return array(
+							'ok'        => true,
+							'duplicate' => true,
+							'action'    => $action,
+							'from'      => $name,
+							'to'        => 'delete' === $action ? '(removed)' : $into,
+							'photos'    => 0,
+						);
+					}
+					if ( is_array( $op ) ) {
+						gasf_crm_op_finish( $op, false );
+					}
+				}
 				return new WP_Error( 'gasf_crm_404', 'No such person in the collection.', array( 'status' => 404 ) );
 			}
 
@@ -1073,6 +1121,11 @@ add_action( 'rest_api_init', function () {
 						array( 'status' => 409 )
 					);
 				}
+				$op = gasf_crm_op_start( 'photo-person:rename:' . md5( $name . '|' . $to ), $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => 0 );
+				}
 
 				$res = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
 					'name' => $to,
@@ -1080,7 +1133,10 @@ add_action( 'rest_api_init', function () {
 					// answering to the old one in URLs and exports forever.
 					'slug' => sanitize_title( gasf_photo_translit( $to ) ),
 				) );
-				if ( is_wp_error( $res ) ) { return $res; }
+				if ( is_wp_error( $res ) ) {
+					gasf_crm_op_finish( $op, false );
+					return $res;
+				}
 
 				// Same $term->count trap as the panel had. Worse here: this one
 				// was writing "across 0 photo(s)" into the audit log, where a
@@ -1091,6 +1147,7 @@ add_action( 'rest_api_init', function () {
 				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s) — user %d',
 					$term->name, $to, $n, get_current_user_id() ) );
 
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => $n );
 			}
 
@@ -1102,6 +1159,11 @@ add_action( 'rest_api_init', function () {
 				}
 				if ( (int) $dest->term_id === (int) $term->term_id ) {
 					return new WP_Error( 'gasf_crm_bad', 'Those are the same person already.', array( 'status' => 400 ) );
+				}
+				$op = gasf_crm_op_start( 'photo-person:merge:' . md5( $name . '|' . $into ), $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'action' => 'merge', 'from' => $term->name, 'to' => $dest->name, 'photos' => 0 );
 				}
 
 				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
@@ -1120,10 +1182,16 @@ add_action( 'rest_api_init', function () {
 				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s) — user %d',
 					$term->name, $dest->name, count( $posts ), get_current_user_id() ) );
 
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'action' => 'merge', 'from' => $term->name, 'to' => $dest->name, 'photos' => count( $posts ) );
 			}
 
 			if ( 'delete' === $action ) {
+				$op = gasf_crm_op_start( 'photo-person:delete:' . md5( $name ), $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => 0 );
+				}
 				/*
 				 * Removes the NAME, not the photos.
 				 *
@@ -1147,6 +1215,7 @@ add_action( 'rest_api_init', function () {
 				gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s) — user %d',
 					$term->name, count( $posts ), get_current_user_id() ) );
 
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => count( $posts ) );
 			}
 
@@ -1249,8 +1318,14 @@ add_action( 'rest_api_init', function () {
 
 			if ( 'add' === $action ) {
 				if ( '' === $name ) { return new WP_Error( 'gasf_crm_bad', 'A name is needed.', array( 'status' => 400 ) ); }
+				$op = gasf_crm_op_start( 'photo-place:add:' . md5( $name . '|' . (string) $parent ), $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'name' => $name );
+				}
 				$r = wp_insert_term( $name, 'gasf_photo_place', array( 'parent' => $parent ) );
 				if ( is_wp_error( $r ) ) {
+					gasf_crm_op_finish( $op, false );
 					return new WP_Error( 'gasf_crm_bad',
 						'term_exists' === $r->get_error_code() ? 'There is already a place with that name.' : $r->get_error_message(),
 						array( 'status' => 409 ) );
@@ -1260,10 +1335,18 @@ add_action( 'rest_api_init', function () {
 				$write_geo( (int) $term->term_id, $geo );
 				gasf_crm_log( sprintf( 'Photo places: added "%s"%s — user %d', $name,
 					$parent ? ' under ' . get_term( $parent, 'gasf_photo_place' )->name : '', get_current_user_id() ) );
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'name' => $term->name );
 			}
 
 			if ( ! $term || is_wp_error( $term ) ) {
+				if ( 'delete' === $action && $tid > 0 ) {
+					$op = gasf_crm_op_start( 'photo-place:delete:' . $tid, $req, 20 * MINUTE_IN_SECONDS );
+					if ( is_array( $op ) && ! empty( $op['duplicate'] ) ) {
+						return array( 'ok' => true, 'duplicate' => true, 'term' => $tid, 'deleted' => $name );
+					}
+					if ( is_array( $op ) ) { gasf_crm_op_finish( $op, false ); }
+				}
 				return new WP_Error( 'gasf_crm_404', 'No such place.', array( 'status' => 404 ) );
 			}
 
@@ -1276,6 +1359,11 @@ add_action( 'rest_api_init', function () {
 					|| in_array( (int) $term->term_id, array_map( 'intval', (array) get_ancestors( $parent, 'gasf_photo_place', 'taxonomy' ) ), true ) ) ) {
 					return new WP_Error( 'gasf_crm_bad', 'A place cannot sit inside itself.', array( 'status' => 400 ) );
 				}
+				$op = gasf_crm_op_start( 'photo-place:save:' . md5( (string) $tid . '|' . $name . '|' . (string) $parent . '|' . wp_json_encode( $geo ) ), $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'term' => (int) $term->term_id, 'name' => $name ?: $term->name );
+				}
 
 				$up = array( 'parent' => $parent );
 				if ( '' !== $name && $name !== $term->name ) {
@@ -1283,7 +1371,10 @@ add_action( 'rest_api_init', function () {
 					$up['slug'] = sanitize_title( gasf_photo_translit( $name ) );
 				}
 				$r = wp_update_term( (int) $term->term_id, 'gasf_photo_place', $up );
-				if ( is_wp_error( $r ) ) { return new WP_Error( 'gasf_crm_bad', $r->get_error_message(), array( 'status' => 409 ) ); }
+				if ( is_wp_error( $r ) ) {
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error( 'gasf_crm_bad', $r->get_error_message(), array( 'status' => 409 ) );
+				}
 				if ( $old_parent !== $parent ) { $append_sort( (int) $term->term_id, $parent ); }
 
 				/*
@@ -1297,6 +1388,7 @@ add_action( 'rest_api_init', function () {
 
 				gasf_crm_log( sprintf( 'Photo places: saved "%s" — user %d', $name ?: $term->name, get_current_user_id() ) );
 				$term = get_term( (int) $term->term_id, 'gasf_photo_place' );
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'name' => $term->name );
 			}
 
@@ -1305,16 +1397,28 @@ add_action( 'rest_api_init', function () {
 				if ( 'up' !== $dir && 'down' !== $dir ) {
 					return new WP_Error( 'gasf_crm_bad', 'Unknown move direction.', array( 'status' => 400 ) );
 				}
+				$op = gasf_crm_op_start( 'photo-place:move:' . (int) $term->term_id . ':' . $dir, $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'term' => (int) $term->term_id, 'moved' => false );
+				}
 
 				$siblings = $siblings_for( (int) $term->parent );
-				if ( ! $siblings ) { return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false ); }
+				if ( ! $siblings ) {
+					gasf_crm_op_finish( $op, true );
+					return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false );
+				}
 
 				$ids = array_values( array_map( 'intval', wp_list_pluck( $siblings, 'term_id' ) ) );
 				$idx = array_search( (int) $term->term_id, $ids, true );
-				if ( false === $idx ) { return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false ); }
+				if ( false === $idx ) {
+					gasf_crm_op_finish( $op, true );
+					return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false );
+				}
 
 				$swap = 'up' === $dir ? $idx - 1 : $idx + 1;
 				if ( $swap < 0 || $swap >= count( $ids ) ) {
+					gasf_crm_op_finish( $op, true );
 					return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => false );
 				}
 
@@ -1326,10 +1430,16 @@ add_action( 'rest_api_init', function () {
 				}
 
 				gasf_crm_log( sprintf( 'Photo places: moved "%s" %s — user %d', $term->name, $dir, get_current_user_id() ) );
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'term' => (int) $term->term_id, 'moved' => true );
 			}
 
 			if ( 'delete' === $action ) {
+				$op = gasf_crm_op_start( 'photo-place:delete:' . (int) $term->term_id, $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array( 'ok' => true, 'duplicate' => true, 'term' => (int) $term->term_id, 'deleted' => $term->name );
+				}
 				// Children are lifted to this place's own parent, not deleted
 				// with it: losing the Bierhaus because somebody tidied away the
 				// Biergarten is a surprise nobody asked for.
@@ -1347,6 +1457,7 @@ add_action( 'rest_api_init', function () {
 				wp_delete_term( (int) $term->term_id, 'gasf_photo_place' );
 				gasf_crm_log( sprintf( 'Photo places: deleted "%s" (was on %d photo(s); %d child place(s) moved up) — user %d',
 					$nm, $n, count( $kids ), get_current_user_id() ) );
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'deleted' => $nm, 'photos' => $n, 'moved' => count( $kids ) );
 			}
 
@@ -1358,11 +1469,24 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $lib_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			return gasf_crm_photo_consent_record(
-				(int) $req->get_param( 'photo' ),
-				(string) $req->get_param( 'decision' ),
+			$photo_id = (int) $req->get_param( 'photo' );
+			$decision = (string) $req->get_param( 'decision' );
+			$op = gasf_crm_op_start( 'photo-consent:' . $photo_id . ':' . $decision, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return gasf_crm_photo_consent_state( $photo_id );
+			}
+			$res = gasf_crm_photo_consent_record(
+				$photo_id,
+				$decision,
 				(string) $req->get_param( 'note' )
 			);
+			if ( is_wp_error( $res ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $res;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return $res;
 		},
 	) );
 
@@ -1370,7 +1494,14 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $lib_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			return gasf_crm_photo_library_save( (int) $req->get_param( 'photo' ), array(
+			$photo_id = (int) $req->get_param( 'photo' );
+			$op = gasf_crm_op_start( 'photo-library-edit:' . $photo_id, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				$card = gasf_crm_photo_library_card( $photo_id );
+				return $card ? $card : array( 'ok' => true, 'duplicate' => true, 'id' => $photo_id );
+			}
+			$res = gasf_crm_photo_library_save( $photo_id, array(
 				'people'   => (array) $req->get_param( 'people' ),
 				'groups'   => (array) $req->get_param( 'groups' ),
 				'place'    => (string) $req->get_param( 'place' ),
@@ -1382,6 +1513,12 @@ add_action( 'rest_api_init', function () {
 				'face_map' => (array) $req->get_param( 'face_map' ),
 				'revision' => $req->get_param( 'revision' ),
 			) );
+			if ( is_wp_error( $res ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $res;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return $res;
 		},
 	) );
 
@@ -1389,10 +1526,22 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $lib_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			return gasf_crm_photo_library_delete(
-				(int) $req->get_param( 'photo' ),
+			$photo_id = (int) $req->get_param( 'photo' );
+			$op = gasf_crm_op_start( 'photo-library-delete:' . $photo_id, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true, 'id' => $photo_id );
+			}
+			$res = gasf_crm_photo_library_delete(
+				$photo_id,
 				$req->get_param( 'revision' )
 			);
+			if ( is_wp_error( $res ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $res;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return $res;
 		},
 	) );
 
@@ -1401,13 +1550,26 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $lib_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$ids = (array) $req->get_param( 'ids' );
+			$op = gasf_crm_op_start( 'photo-zip:' . md5( wp_json_encode( array_values( array_map( 'intval', $ids ) ) ) ), $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				$cached = get_transient( $op['key'] . ':result' );
+				if ( is_array( $cached ) ) {
+					return $cached;
+				}
+			}
 			$res = gasf_crm_photo_zip_build( $ids );
-			if ( is_wp_error( $res ) ) { return $res; }
+			if ( is_wp_error( $res ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $res;
+			}
 
 			$res['url'] = add_query_arg( array(
 				'token'    => $res['token'],
 				'_wpnonce' => wp_create_nonce( 'wp_rest' ),
 			), rest_url( 'gasf/v1/crm/photos/zipfile' ) );
+			set_transient( $op['key'] . ':result', $res, HOUR_IN_SECONDS );
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 
 			return $res;
 		},

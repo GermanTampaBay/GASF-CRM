@@ -790,6 +790,13 @@ add_action( 'rest_api_init', function () {
 			if ( empty( $files['file'] ) ) {
 				return new WP_Error( 'gasf_crm_nofile', 'No file arrived with that request.', array( 'status' => 400 ) );
 			}
+			$f = (array) $files['file'];
+			$sig = (string) ( $f['name'] ?? '' ) . '|' . (string) ( $f['size'] ?? '' );
+			$op = gasf_crm_op_start( 'photo-upload:' . md5( $sig ), $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true );
+			}
 
 			$card = gasf_crm_photo_upload_one( $files['file'], array(
 				'taken'    => (string) $req->get_param( 'taken' ),
@@ -803,7 +810,11 @@ add_action( 'rest_api_init', function () {
 				'note'     => (string) $req->get_param( 'note' ),
 			) );
 
-			if ( is_wp_error( $card ) ) { return $card; }
+			if ( is_wp_error( $card ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $card;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 			return array( 'ok' => true, 'photo' => $card );
 		},
 	) );

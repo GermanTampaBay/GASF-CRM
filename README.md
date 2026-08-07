@@ -8,6 +8,14 @@ answer the club's mail, take in photo submissions, record permissions, tag
 people and places, and pull finished photos back out for newsletters and
 posters. The full design contract is in
 [docs/EMAIL-CRM-SPEC.md](docs/EMAIL-CRM-SPEC.md).
+The current workflow re-platform contract is in
+[docs/WORKFLOW-CONTRACT-PHASE1.md](docs/WORKFLOW-CONTRACT-PHASE1.md).
+Phase 4/5 hardening and rollout contract is in
+[docs/WORKFLOW-CONTRACT-PHASE4-5.md](docs/WORKFLOW-CONTRACT-PHASE4-5.md).
+Phase 6 duplicate-action hardening contract is in
+[docs/WORKFLOW-CONTRACT-PHASE6.md](docs/WORKFLOW-CONTRACT-PHASE6.md).
+Phase 7 replay-safety completion contract is in
+[docs/WORKFLOW-CONTRACT-PHASE7.md](docs/WORKFLOW-CONTRACT-PHASE7.md).
 
 ## History
 

@@ -220,11 +220,28 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) use ( $open ) {
+			$id_req = (int) $req->get_param( 'id' );
+			$op = gasf_crm_op_start( 'photo-edit-image:' . $id_req, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array(
+					'ok'        => true,
+					'duplicate' => true,
+					'photo'     => function_exists( 'gasf_crm_photo_library_card' ) ? gasf_crm_photo_library_card( $id_req ) : null,
+				);
+			}
+
 			$id = $open( $req );
-			if ( is_wp_error( $id ) ) { return $id; }
+			if ( is_wp_error( $id ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $id;
+			}
 
 			$p = gasf_crm_photo_edit_params( (array) $req->get_json_params() );
-			if ( is_wp_error( $p ) ) { return $p; }
+			if ( is_wp_error( $p ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $p;
+			}
 
 			/*
 			 * Identity params are not an edit. With a sidecar on disk they can
@@ -236,13 +253,23 @@ add_action( 'rest_api_init', function () {
 			$path = get_attached_file( $id );
 			if ( $p['identity'] ) {
 				if ( is_file( gasf_crm_photo_edit_sidecar( $path ) ) ) {
-					return gasf_crm_photo_edit_do_restore( $id );
+					$res = gasf_crm_photo_edit_do_restore( $id );
+					if ( is_wp_error( $res ) ) {
+						gasf_crm_op_finish( $op, false );
+						return $res;
+					}
+					gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+					return $res;
 				}
+				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_noop', 'That is the whole photo with no adjustment — there is nothing to apply.', array( 'status' => 400 ) );
 			}
 
 			$r = gasf_crm_photo_edit_render( $id, $p );
-			if ( is_wp_error( $r ) ) { return $r; }
+			if ( is_wp_error( $r ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $r;
+			}
 
 			update_post_meta( $id, '_gasf_photo_edit', array(
 				'crop' => $p['crop'],
@@ -258,6 +285,7 @@ add_action( 'rest_api_init', function () {
 				gasf_crm_display_name( get_current_user_id() ) ) );
 			gasf_crm_log_event( 0, 'photo_edit', 'media #' . $id . ' image adjusted' );
 
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 			return array( 'ok' => true, 'photo' => gasf_crm_photo_library_card( $id ) );
 		},
 	) );
@@ -266,9 +294,28 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) use ( $open ) {
+			$id_req = (int) $req->get_param( 'id' );
+			$op = gasf_crm_op_start( 'photo-edit-image-restore:' . $id_req, $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array(
+					'ok'        => true,
+					'duplicate' => true,
+					'photo'     => function_exists( 'gasf_crm_photo_library_card' ) ? gasf_crm_photo_library_card( $id_req ) : null,
+				);
+			}
 			$id = $open( $req );
-			if ( is_wp_error( $id ) ) { return $id; }
-			return gasf_crm_photo_edit_do_restore( $id );
+			if ( is_wp_error( $id ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $id;
+			}
+			$res = gasf_crm_photo_edit_do_restore( $id );
+			if ( is_wp_error( $res ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $res;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return $res;
 		},
 	) );
 } );

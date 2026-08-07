@@ -11,6 +11,8 @@ function gasf_crm_render_inbox_script() {
 	var APP_BASE = <?php echo wp_json_encode( home_url( '/email' ) ); ?>;
 	var BOARD = <?php echo wp_json_encode( (string) gasf_crm_cfg()['board_address'] ); ?>;
 	var IGNORE_REASONS = <?php echo wp_json_encode( array_values( gasf_crm_ignore_reasons() ) ); ?>;
+	var CASE_WORKFLOW = <?php echo wp_json_encode( function_exists( 'gasf_crm_case_workflow_enabled' ) ? gasf_crm_case_workflow_enabled() : true ); ?>;
+	var ME = <?php echo (int) get_current_user_id(); ?>;
 	// Only the streams THIS user may see. The server intersects anyway, so this
 	// is for rendering, not for security.
 	var STREAMS = <?php
@@ -58,7 +60,7 @@ function gasf_crm_render_inbox_script() {
 
 	var stream = ''; // '' = every stream this user can see
 	var list = document.getElementById('list'), pane = document.getElementById('pane');
-	var status = 'open', current = null, currentStamp = null;
+	var status = 'open', queue = 'all', current = null, currentStamp = null;
 	var APP_BASE_PATH = (function(){
 		try {
 			var u = new URL(APP_BASE, window.location.origin);
@@ -96,6 +98,12 @@ function gasf_crm_render_inbox_script() {
 			.replace(/'/g, '&#39;');
 	}
 
+	var opSeq = 0;
+	function nextOpId(scope){
+		opSeq++;
+		return String(scope || 'op') + '-' + Date.now().toString(36) + '-' + opSeq.toString(36);
+	}
+
 	/* Save and Remove, as marks rather than words.
 	 *
 	 * In the names and places lists the content IS the text field — a person's
@@ -123,6 +131,217 @@ function gasf_crm_render_inbox_script() {
 		return isNaN(d) ? s : d.toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
 	}
 
+	function caseStateLabel(s){
+		return ({
+			new: 'New',
+			active: 'Active',
+			waiting_external: 'Waiting',
+			blocked: 'Blocked',
+			ready_to_publish: 'Ready to publish',
+			resolved: 'Resolved',
+			cancelled: 'Cancelled'
+		}[s] || s || 'New');
+	}
+
+	function queueLabel(q){
+		return ({
+			all: 'All open',
+			unassigned: 'Unassigned',
+			active: 'Active',
+			waiting_external: 'Waiting',
+			blocked: 'Blocked',
+			ready_to_publish: 'Ready',
+			exceptions: 'Exceptions'
+		}[q] || q || 'Active');
+	}
+
+	function caseTaskDetail(task){
+		var raw = task && task.details_json ? String(task.details_json) : '';
+		if (!raw) { return ''; }
+		try {
+			var v = JSON.parse(raw);
+			if (!v || typeof v !== 'object') { return ''; }
+			return String(v.message || v.detail || v.action || v.route || '').trim();
+		} catch (e) {
+			return '';
+		}
+	}
+
+	function caseEventLabel(action){
+		return String(action || 'update')
+			.replace(/^case[._]/, '')
+			.replace(/[._]/g, ' ')
+			.trim();
+	}
+
+	function caseEventDetail(event){
+		var raw = event && event.detail ? String(event.detail).trim() : '';
+		if (!raw) { return ''; }
+		try {
+			var v = JSON.parse(raw);
+			if (!v || typeof v !== 'object') { return raw; }
+			var bits = [];
+			['reason_code', 'reason', 'via', 'mode', 'state', 'to_state', 'from_state'].forEach(function(k){
+				if (v[k]) { bits.push(String(v[k]).replace(/_/g, ' ')); }
+			});
+			return bits.join(', ');
+		} catch (e) {
+			return raw;
+		}
+	}
+
+	function caseBlock(t){
+		if (!CASE_WORKFLOW) { return ''; }
+		var c = t && t.case ? t.case : null;
+		if (!c) { return ''; }
+		var ownerLine = 'Unassigned';
+		if (parseInt(c.owner_user_id, 10) === ME) { ownerLine = 'Owned by you'; }
+		else if (parseInt(c.owner_user_id, 10) > 0) { ownerLine = c.owner_name ? ('Owned by ' + c.owner_name) : 'Owned by another admin'; }
+
+		var ownerMode = 'claim', ownerLabel = 'Claim case';
+		if (parseInt(c.owner_user_id, 10) === ME) {
+			ownerMode = 'release'; ownerLabel = 'Release ownership';
+		} else if (parseInt(c.owner_user_id, 10) > 0) {
+			ownerMode = 'takeover'; ownerLabel = 'Take over case';
+		}
+		var editable = !!(t && t.status === 'open');
+
+		var stateButtons = ['active', 'waiting_external', 'blocked', 'ready_to_publish'].map(function(state){
+			var on = c.state === state;
+			return '<button type="button" class="btn sec cstate' + (on ? ' on' : '') + '" data-state="' + state + '"' +
+				(on ? ' disabled' : '') + '>' + esc(caseStateLabel(state)) + '</button>';
+		}).join('');
+
+		var tasks = (c.tasks || []).filter(function(task){
+			return task && task.type === 'exception' && task.state === 'open';
+		});
+		var taskRows = tasks.length ? tasks.map(function(task){
+			var reason = String(task.reason_code || 'exception').replace(/_/g, ' ');
+			var detail = caseTaskDetail(task);
+			return '<div class="casetask"><div><strong>' + esc(reason) + '</strong>' +
+				(detail ? '<div class="muted">' + esc(detail) + '</div>' : '') +
+				'</div>' + (editable
+					? '<button type="button" class="btn sec xresolve" data-task="' + parseInt(task.id, 10) + '">Resolve</button>'
+					: '') + '</div>';
+		}).join('') : '<p class="muted">No open exceptions.</p>';
+		var events = (c.events || []).slice(0, 6);
+		var eventRows = events.length ? '<div class="caseevents"><h4>Recent case activity</h4><ul>' +
+			events.map(function(ev){
+				var note = caseEventDetail(ev);
+				return '<li><strong>' + esc(caseEventLabel(ev.action)) + '</strong> &middot; ' +
+					esc(ev.actor || 'system') + ' &middot; ' + esc(when(ev.at)) +
+					(note ? '<br><span class="muted">' + esc(note) + '</span>' : '') + '</li>';
+			}).join('') + '</ul></div>' : '';
+
+		return '<div class="casebox">' +
+			'<h3>Case workflow</h3>' +
+			'<div class="casemeta"><span><strong>State:</strong> ' + esc(caseStateLabel(c.state)) + '</span>' +
+				'<span><strong>Owner:</strong> ' + esc(ownerLine) + '</span>' +
+				'<span><strong>Open exceptions:</strong> ' + parseInt(c.exception_count || 0, 10) + '</span></div>' +
+			(editable
+				? '<div class="actions"><button type="button" class="btn sec" id="caseowner" data-mode="' + esc(ownerMode) + '">' +
+					esc(ownerLabel) + '</button>' +
+					(tasks.length > 1 ? '<button type="button" class="btn sec" id="caseresolveall">Resolve all exceptions</button>' : '') +
+					'</div><div class="casestate">' + stateButtons + '</div>'
+				: '<p class="muted" style="margin:8px 0 0">Case controls unlock when this thread is in Open.</p>') +
+			'<div class="casetasks">' + taskRows + '</div>' + eventRows +
+			'</div>';
+	}
+
+	function queueTag(t){
+		if (!CASE_WORKFLOW || status !== 'open') { return ''; }
+		var q = (t && t.queue) ? String(t.queue) : 'active';
+		if (q === 'active') { return ''; }
+		if (q === 'exceptions') {
+			return '<span class="qtag ex">Exceptions' + (t.exception_count ? ' (' + parseInt(t.exception_count, 10) + ')' : '') + '</span>';
+		}
+		if (q === 'blocked') { return '<span class="qtag bl">Blocked</span>'; }
+		if (q === 'waiting_external') { return '<span class="qtag wp">Waiting</span>'; }
+		if (q === 'ready_to_publish') { return '<span class="qtag wp">Ready</span>'; }
+		return '<span class="qtag">' + esc(queueLabel(q)) + '</span>';
+	}
+
+	function applyQueueView(rows){
+		var bar = document.getElementById('qtabs');
+		if (!bar) { return rows; }
+		if (!CASE_WORKFLOW) {
+			bar.hidden = true;
+			return rows;
+		}
+		var show = (status === 'open');
+		bar.hidden = !show;
+		if (!show) { return rows; }
+
+		var counts = {
+			all: rows.length, unassigned: 0, active: 0, waiting_external: 0,
+			blocked: 0, ready_to_publish: 0, exceptions: 0
+		};
+		rows.forEach(function(t){
+			var q = (t && t.queue) ? String(t.queue) : 'active';
+			if (counts.hasOwnProperty(q)) { counts[q]++; }
+		});
+		if (!counts.hasOwnProperty(queue)) { queue = 'all'; }
+
+		Array.prototype.forEach.call(bar.querySelectorAll('button'), function(b){
+			var q = b.dataset.queue || 'all';
+			var base = b.dataset.label || queueLabel(q);
+			b.textContent = base + (counts[q] ? ' (' + counts[q] + ')' : '');
+			b.classList.toggle('on', q === queue);
+		});
+
+		if (queue === 'all') { return rows; }
+		return rows.filter(function(t){
+			return ((t && t.queue) ? String(t.queue) : 'active') === queue;
+		});
+	}
+
+	function loadCaseKpis(){
+		var box = document.getElementById('casekpis');
+		if (!box) { return Promise.resolve(); }
+		if (!CASE_WORKFLOW) { box.hidden = true; return Promise.resolve(); }
+		if (status !== 'open') { box.hidden = true; return Promise.resolve(); }
+
+		return api('/cases?queue=all').then(function(r){
+			var rows = (r && r.cases) ? r.cases : [];
+			var counts = {
+				all: rows.length, unassigned: 0, active: 0, waiting_external: 0,
+				blocked: 0, ready_to_publish: 0, exceptions: 0
+			};
+			var stale = 0;
+			var now = Date.now();
+			rows.forEach(function(c){
+				var q = c && c.queue ? String(c.queue) : '';
+				if (counts.hasOwnProperty(q)) { counts[q]++; }
+				if (parseInt(c.owner_user_id, 10) > 0 && c.owner_claimed_at) {
+					var d = new Date(String(c.owner_claimed_at).replace(' ', 'T') + 'Z');
+					if (!isNaN(d) && (now - d.getTime()) > 86400000) { stale++; }
+				}
+			});
+
+			var order = ['all', 'unassigned', 'active', 'waiting_external', 'blocked', 'ready_to_publish', 'exceptions'];
+			box.innerHTML = order.map(function(k){
+				var lbl = queueLabel(k);
+				var on = (k === queue) ? ' on' : '';
+				return '<button type="button" class="' + on.trim() + '" data-kpiq="' + k + '">' +
+					esc(lbl) + ': ' + counts[k] + '</button>';
+			}).join('') + (stale > 0
+				? '<button type="button" class="warn" title="Case ownership older than roughly one day">Stale owners: ' + stale + '</button>'
+				: '');
+			box.hidden = false;
+
+			Array.prototype.forEach.call(box.querySelectorAll('[data-kpiq]'), function(b){
+				b.onclick = function(){
+					setStatus('open');
+					setQueue(b.dataset.kpiq || 'all');
+					current = null;
+					currentStamp = null;
+					clearPane();
+					loadList();
+				};
+			});
+		}).catch(function(){ box.hidden = true; });
+	}
+
 	// Clearing the pane also drops its stream colour, so the empty state follows
 	// the page instead of keeping the tint of whatever was last open.
 	function clearPane(){
@@ -132,6 +351,7 @@ function gasf_crm_render_inbox_script() {
 
 	function loadList(){
 		return api('/threads?status=' + status + (stream ? '&stream=' + encodeURIComponent(stream) : '')).then(function(rows){
+			loadCaseKpis();
 			// If the thread on screen has grown a newer message, say so rather
 			// than reloading underneath someone who is mid-reply.
 			if(current){
@@ -142,10 +362,20 @@ function gasf_crm_render_inbox_script() {
 					}
 				}
 			}
-			if(!rows.length){ list.innerHTML = '<div class="pane muted">Nothing here.</div>'; return; }
-			list.innerHTML = rows.map(function(t){
+			var visible = applyQueueView(rows);
+			if(!visible.length){
+				list.innerHTML = '<div class="pane muted">' + (status === 'open' && queue !== 'all' ? 'Nothing in this queue.' : 'Nothing here.') + '</div>';
+				return;
+			}
+			list.innerHTML = visible.map(function(t){
 				var lock = t.locked_by && !t.locked_mine
 					? '<div class="meta">🔒 ' + esc(t.locked_by) + ' is replying</div>' : '';
+				var owner = '';
+				if (status === 'open' && parseInt(t.owner_user_id, 10) > 0) {
+					owner = (parseInt(t.owner_user_id, 10) === ME)
+						? 'Case owner: you'
+						: ('Case owner: ' + esc(t.owner_name || 'another admin'));
+				}
 				// Which inbox a thread came from, but only when the reader can see
 				// more than one — otherwise every row would carry a label that
 				// never varies.
@@ -161,7 +391,8 @@ function gasf_crm_render_inbox_script() {
 					'" data-stream="' + esc(t.stream) + '">' +
 					'<div class="who"><span>' + (t.status === 'new' ? '<span class="dot"></span>' : '') +
 					esc(t.from) + '</span><span class="meta">' + esc(when(t.last)) + '</span></div>' +
-					'<div class="subj">' + esc(t.subject || '(no subject)') + tag + '</div>' + lock + '</div>';
+					'<div class="subj">' + esc(t.subject || '(no subject)') + tag + queueTag(t) + '</div>' +
+					lock + (owner ? '<div class="meta">🗂 ' + owner + '</div>' : '') + '</div>';
 			}).join('');
 			Array.prototype.forEach.call(list.querySelectorAll('.item'), function(el){
 				el.onclick = function(){ open(parseInt(el.dataset.id, 10)); };
@@ -221,8 +452,10 @@ function gasf_crm_render_inbox_script() {
 			}
 
 			if(!t.can_reply && t.locked_by){
-				html += '<div class="note warn">' + esc(t.locked_by) + ' is replying to this. You can read it, but not send.</div>';
+				html += '<div class="note warn">' + esc(t.locked_by) + ' is replying to this. You can read it, but not send.' +
+					'<div class="actions"><button type="button" class="btn sec" id="threadtakeover">Take over reply lock</button></div></div>';
 			}
+			html += caseBlock(t);
 
 			// On a submission thread the photos ARE the job, so they go above the
 			// message and the reply box goes under it. The email on these is
@@ -368,7 +601,7 @@ function gasf_crm_render_inbox_script() {
 				a.target = '_blank';
 				a.rel = 'noopener noreferrer';
 			});
-			wire(id, t.status);
+			wire(id, t);
 			wireCopy();
 			wirePhotos(id, t);
 
@@ -1222,7 +1455,8 @@ function gasf_crm_render_inbox_script() {
 			b.onclick = function(){
 				b.disabled = true; b.textContent = 'Keeping…';
 				api('/photos/approve', { method:'POST', body: JSON.stringify({
-					id: id, msg: b.dataset.msg, att: b.dataset.att
+					id: id, msg: b.dataset.msg, att: b.dataset.att,
+					op_id: nextOpId('photo-approve-' + id + '-' + String(b.dataset.msg || '') + '-' + String(b.dataset.att || ''))
 				})}).then(function(){
 					b.textContent = '✓ Kept';
 					open(id); // redraw so the photo appears in the block below
@@ -1237,7 +1471,10 @@ function gasf_crm_render_inbox_script() {
 		if (ask) {
 			ask.onclick = function(){
 				ask.disabled = true; askmsg.textContent = 'Sending…';
-				api('/photos/invite', { method:'POST', body: JSON.stringify({ id: id }) })
+				api('/photos/invite', { method:'POST', body: JSON.stringify({
+					id: id,
+					op_id: nextOpId('photo-invite-' + id)
+				}) })
 					.then(function(r){
 						askmsg.textContent = 'Asked ' + r.to + ' about ' + r.photos + ' photo(s).';
 					})
@@ -1277,7 +1514,8 @@ function gasf_crm_render_inbox_script() {
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					face_map: faceAssignments(card.querySelector('.pfaceov')),
-					revision: v('.p-rev')
+					revision: v('.p-rev'),
+					op_id: nextOpId('photo-confirm-' + id + '-' + parseInt(card.dataset.photo, 10))
 				})}).then(function(){ loadPeople(true); open(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
@@ -1454,7 +1692,8 @@ function gasf_crm_render_inbox_script() {
 					api('/photos/events/create', { method:'POST', body: JSON.stringify({
 						title: title, date: date.value,
 						start: mkfrom.value || '18:00',
-						end: mkto.value || '22:00'
+						end: mkto.value || '22:00',
+						op_id: nextOpId('event-create-' + title + '-' + date.value)
 					}) }).then(function(ev){
 						name.value = ev.title || title;
 						if (evid) { evid.value = String(ev.id || ''); }
@@ -1471,7 +1710,7 @@ function gasf_crm_render_inbox_script() {
 		});
 	}
 
-	function wire(id, tstatus){
+	function wire(id, thread){
 		var out = document.getElementById('msg');
 		var ta = document.getElementById('reply');
 		if(ta){ setupEditor(ta); }
@@ -1483,18 +1722,102 @@ function gasf_crm_render_inbox_script() {
 		var fwdboard = document.getElementById('fwdboard'), boardArm = null;
 		var attopen = document.getElementById('attopen'), att = document.getElementById('att');
 		var atupload = document.getElementById('atupload'), atclose = document.getElementById('atclose');
+		var takeover = document.getElementById('threadtakeover');
+		var caseOwner = document.getElementById('caseowner');
+		var caseResolveAll = document.getElementById('caseresolveall');
 		var all = [send, draft, done, ignore, restore, fwdopen, fwdsend, fwdboard, attopen, atupload].filter(Boolean);
 
 		function busy(b, el){ all.forEach(function(x){ x.disabled = b; }); if(el){ el.classList.toggle('spin', b); } }
-		function fail(e, el){ out.innerHTML = '<div class="note err">' + esc(e.message) + '</div>'; busy(false, el); }
+		function showErr(message){
+			if (out) { out.innerHTML = '<div class="note err">' + esc(message) + '</div>'; }
+			else { pane.insertAdjacentHTML('afterbegin', '<div class="note err">' + esc(message) + '</div>'); }
+		}
+		function fail(e, el){ showErr(e.message); busy(false, el); }
 		function closed(word){ current = null; currentStamp = null;
 			pane.innerHTML = '<p class="muted">' + word + '</p>'; loadList(); }
+
+		if (takeover) {
+			takeover.onclick = function(){
+				takeover.disabled = true;
+				api('/threads/' + id + '/takeover', { method: 'POST', body: JSON.stringify({
+					op_id: nextOpId('thread-takeover-' + id)
+				}) })
+					.then(function(){ open(id); })
+					.catch(function(e){
+						takeover.disabled = false;
+						showErr(e.message);
+					});
+			};
+		}
+
+		if (caseOwner) {
+			caseOwner.onclick = function(){
+				var mode = caseOwner.dataset.mode || 'claim';
+				caseOwner.disabled = true;
+				api('/threads/' + id + '/case-owner', { method: 'POST', body: JSON.stringify({
+					mode: mode, op_id: nextOpId('case-owner-' + id + '-' + mode)
+				}) })
+					.then(function(){ open(id); })
+					.catch(function(e){
+						caseOwner.disabled = false;
+						showErr(e.message);
+					});
+			};
+		}
+
+		if (caseResolveAll) {
+			caseResolveAll.onclick = function(){
+				caseResolveAll.disabled = true;
+				api('/threads/' + id + '/exceptions/resolve', { method: 'POST', body: JSON.stringify({
+					op_id: nextOpId('case-resolve-all-' + id)
+				}) })
+					.then(function(){ open(id); })
+					.catch(function(e){
+						caseResolveAll.disabled = false;
+						showErr(e.message);
+					});
+			};
+		}
+
+		Array.prototype.forEach.call(pane.querySelectorAll('.cstate'), function(b){
+			b.onclick = function(){
+				b.disabled = true;
+				api('/threads/' + id + '/case-state', { method: 'POST', body: JSON.stringify({
+					state: b.dataset.state,
+					op_id: nextOpId('case-state-' + id + '-' + String(b.dataset.state || ''))
+				}) })
+					.then(function(){ open(id); })
+					.catch(function(e){
+						b.disabled = false;
+						showErr(e.message);
+					});
+			};
+		});
+
+		Array.prototype.forEach.call(pane.querySelectorAll('.xresolve'), function(b){
+			b.onclick = function(){
+				b.disabled = true;
+				api('/threads/' + id + '/exceptions/resolve', {
+					method: 'POST',
+					body: JSON.stringify({
+						task_id: parseInt(b.dataset.task, 10) || 0,
+						op_id: nextOpId('case-resolve-task-' + id + '-' + (parseInt(b.dataset.task, 10) || 0))
+					})
+				}).then(function(){ open(id); })
+					.catch(function(e){
+						b.disabled = false;
+						showErr(e.message);
+					});
+			};
+		});
 
 		if(draft){
 			draft.onclick = function(){
 				out.innerHTML = '<div class="note ok">Asking Claude…</div>';
 				busy(true, draft);
-				api('/threads/' + id + '/draft', {method:'POST'}).then(function(r){
+				api('/threads/' + id + '/draft', {method:'POST', body: JSON.stringify({
+					op_id: nextOpId('thread-draft-' + id)
+				})}).then(function(r){
 					edSet(ta, r.draft);
 					out.innerHTML = '<div class="note ok">Draft inserted — read it through before sending.</div>';
 					busy(false, draft);
@@ -1508,7 +1831,8 @@ function gasf_crm_render_inbox_script() {
 				busy(true, send);
 				api('/threads/' + id + '/reply', {method:'POST', body: JSON.stringify({
 					body: ta.innerHTML,
-					attachments: attached.map(function(a){ return a.id; })
+					attachments: attached.map(function(a){ return a.id; }),
+					op_id: nextOpId('reply-' + id)
 				})})
 					.then(function(){ open(id); })
 					.catch(function(e){ fail(e, send); });
@@ -1518,7 +1842,9 @@ function gasf_crm_render_inbox_script() {
 		if(done){
 			done.onclick = function(){
 				busy(true, done);
-				api('/threads/' + id + '/addressed', {method:'POST'})
+				api('/threads/' + id + '/addressed', {method:'POST', body: JSON.stringify({
+					op_id: nextOpId('thread-addressed-' + id)
+				})})
 					.then(function(){ closed('Marked answered.'); })
 					.catch(function(e){ fail(e, done); });
 			};
@@ -1530,7 +1856,10 @@ function gasf_crm_render_inbox_script() {
 
 			function doIgnore(reason, btn){
 				busy(true, btn);
-				api('/threads/' + id + '/ignore', {method:'POST', body: JSON.stringify({reason: reason})})
+				api('/threads/' + id + '/ignore', {method:'POST', body: JSON.stringify({
+					reason: reason,
+					op_id: nextOpId('thread-ignore-' + id + '-' + reason)
+				})})
 					.then(function(){ closed('Ignored — ' + esc(reason) + '.'); })
 					.catch(function(e){ fail(e, btn); });
 			}
@@ -1572,7 +1901,9 @@ function gasf_crm_render_inbox_script() {
 		if(restore){
 			restore.onclick = function(){
 				busy(true, restore);
-				api('/threads/' + id + '/restore', {method:'POST'})
+				api('/threads/' + id + '/restore', {method:'POST', body: JSON.stringify({
+					op_id: nextOpId('thread-restore-' + id)
+				})})
 					.then(function(){ closed('Put back in the Open list.'); })
 					.catch(function(e){ fail(e, restore); });
 			};
@@ -1632,7 +1963,7 @@ function gasf_crm_render_inbox_script() {
 					disarmBoard();
 					busy(true, fwdboard);
 					api('/threads/' + id + '/forward', {method:'POST', body: JSON.stringify({
-						to: BOARD, comment: document.getElementById('fwdnote').value
+						to: BOARD, comment: document.getElementById('fwdnote').value, op_id: nextOpId('forward-' + id)
 					})}).then(function(){
 						loadContacts();
 						closed('Sent to the Board — moved to Answered.');
@@ -1644,7 +1975,7 @@ function gasf_crm_render_inbox_script() {
 				if(!to){ out.innerHTML = '<div class="note err">Enter an address to forward to.</div>'; return; }
 				busy(true, fwdsend);
 				api('/threads/' + id + '/forward', {method:'POST', body: JSON.stringify({
-					to: to, comment: document.getElementById('fwdnote').value
+					to: to, comment: document.getElementById('fwdnote').value, op_id: nextOpId('forward-' + id)
 				})}).then(function(r){
 					loadContacts();
 					// Forwarding closes the thread now, so the view clears the same
@@ -1819,7 +2150,8 @@ function gasf_crm_render_inbox_script() {
 		btn.disabled = true;
 		msg.textContent = 'Creating event…';
 		api('/photos/events/create', { method: 'POST', body: JSON.stringify({
-			title: title, date: date, start: start, end: end
+			title: title, date: date, start: start, end: end,
+			op_id: nextOpId('event-create-' + title + '-' + date)
 		}) }).then(function(ev){
 			upEl('upevent').value = ev.title || title;
 			upEl('upeventid').value = String(ev.id || '');
@@ -1839,7 +2171,12 @@ function gasf_crm_render_inbox_script() {
 			// A dragged folder, a PDF, a .zip of the evening — skipped rather than
 			// sent, since the server would only turn them away one round trip later.
 			if (!/^(image|video)\//.test(f.type)) { return; }
-			upQueue.push({ file: f, state: 'waiting', msg: '' });
+			upQueue.push({
+				file: f,
+				state: 'waiting',
+				msg: '',
+				opId: nextOpId('upload-' + String(f && f.name ? f.name : 'file') + '-' + String(f && f.size ? f.size : 0))
+			});
 		});
 		upPaint();
 	}
@@ -1912,6 +2249,7 @@ function gasf_crm_render_inbox_script() {
 	function upSend(u, onProgress){
 		var fd = new FormData();
 		fd.append('file', u.file);
+		fd.append('op_id', String(u.opId || (u.opId = nextOpId('upload'))));
 		fd.append('consent', upEl('upconsent').checked ? '1' : '0');
 		fd.append('note', upEl('upnote').value);
 		fd.append('taken', upEl('update').value);
@@ -1929,10 +2267,11 @@ function gasf_crm_render_inbox_script() {
 			xhr.withCredentials = true;
 			xhr.timeout = 180000;
 
-			function rejectWith(msg, transient, status){
+			function rejectWith(msg, transient, status, code){
 				var e = new Error(msg);
 				e.transient = !!transient;
 				if (status) { e.status = status; }
+				if (code) { e.code = code; }
 				reject(e);
 			}
 
@@ -1951,8 +2290,9 @@ function gasf_crm_render_inbox_script() {
 					if (xhr.status >= 200 && xhr.status < 300) { return resolve(b); }
 					return rejectWith(
 						b.message || ('Error ' + xhr.status),
-						xhr.status >= 500 || xhr.status === 408 || xhr.status === 502 || xhr.status === 503 || xhr.status === 504 || xhr.status === 522 || xhr.status === 524,
-						xhr.status
+						xhr.status >= 500 || xhr.status === 408 || xhr.status === 502 || xhr.status === 503 || xhr.status === 504 || xhr.status === 522 || xhr.status === 524 || b.code === 'gasf_crm_inflight',
+						xhr.status,
+						b.code || ''
 					);
 				}
 				// The server answered with something that is not JSON — an error
@@ -2314,7 +2654,8 @@ function gasf_crm_render_inbox_script() {
 					flyer: !!(ppane.querySelector('.p-flyer') && ppane.querySelector('.p-flyer').checked),
 					event_id: parseInt(v('.p-evid'), 10) || 0,
 					taken: v('.p-taken'), caption: v('.p-caption'),
-					revision: v('.p-rev')
+					revision: v('.p-rev'),
+					op_id: nextOpId('photo-save-' + id)
 				})}).then(function(){ loadPeople(true); loadPhotos(); openPhoto(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
@@ -2331,7 +2672,8 @@ function gasf_crm_render_inbox_script() {
 				var rv = ppane.querySelector('.p-rev');
 				api('/photos/reject', { method:'POST', body: JSON.stringify({
 					photo: id,
-					revision: rv ? rv.value : ''
+					revision: rv ? rv.value : '',
+					op_id: nextOpId('photo-reject-' + id)
 				}) })
 					.then(function(){
 						pcur = null;
@@ -2408,6 +2750,9 @@ function gasf_crm_render_inbox_script() {
 			var q = new URLSearchParams(window.location.search || '');
 			q.delete('thread');
 			q.delete('photo');
+			q.set('status', status || 'open');
+			if (stream) { q.set('stream', stream); } else { q.delete('stream'); }
+			if (status === 'open' && queue && queue !== 'all') { q.set('queue', queue); } else { q.delete('queue'); }
 			var uv = document.getElementById('uploadview');
 			if (!document.getElementById('photoview').hidden) {
 				path = routePathForView('photos');
@@ -2434,10 +2779,14 @@ function gasf_crm_render_inbox_script() {
 		var q = new URLSearchParams(window.location.search || '');
 		var threadId = parseInt(q.get('thread') || '0', 10) || 0;
 		var photoId = parseInt(q.get('photo') || '0', 10) || 0;
-		if (!pathView && !threadId && !photoId) { return false; }
+		var hasMailFilters = !!(q.get('status') || q.get('stream') || q.get('queue'));
+		if (!pathView && !threadId && !photoId && !hasMailFilters) { return false; }
 		routing = true;
 		// Same reasoning: a bad URL state must not stop the app starting.
 		try {
+			if (q.get('status')) { setStatus(q.get('status')); }
+			if (q.get('stream') !== null) { setStream(q.get('stream')); }
+			if (q.get('queue')) { setQueue(q.get('queue')); }
 			if (photoId) {
 				showView('photos');
 				openPhoto(photoId);
@@ -2446,6 +2795,10 @@ function gasf_crm_render_inbox_script() {
 				open(threadId);
 			} else if (pathView) {
 				showView(pathView);
+				if (pathView === 'mail' && hasMailFilters) { loadList(); }
+			} else if (hasMailFilters) {
+				showView('mail');
+				loadList();
 			} else {
 				return false;
 			}
@@ -2681,7 +3034,8 @@ function gasf_crm_render_inbox_script() {
 			row.querySelector('.hmsg').textContent = keep ? 'Keeping\u2026' : 'Deleting\u2026';
 			api('/photos/held/decide', { method: 'POST', body: JSON.stringify({
 				id: parseInt(b.dataset.id, 10), approve: keep,
-				revision: parseInt(row.dataset.rv, 10) || 0
+				revision: parseInt(row.dataset.rv, 10) || 0,
+				op_id: nextOpId('held-decide-' + parseInt(b.dataset.id, 10) + '-' + (keep ? 'keep' : 'drop'))
 			}) }).then(function(){
 				load();
 				if (keep) { loadLib(); loadPeople(true); }
@@ -2755,7 +3109,8 @@ function gasf_crm_render_inbox_script() {
 				place: document.getElementById('btplace').value,
 				event: ev.value.trim(),
 				event_id: parseInt(document.getElementById('bteventid').value, 10) || 0,
-				taken: document.getElementById('bttaken').value
+				taken: document.getElementById('bttaken').value,
+				op_id: nextOpId('photo-bulk-tag-' + ids.join('-'))
 			}) }).then(function(r){
 				document.getElementById('btgo').disabled = false;
 				msg.textContent = r.updated + ' photo(s) tagged' +
@@ -2985,6 +3340,7 @@ function gasf_crm_render_inbox_script() {
 		var msg = document.getElementById('pnewmsg');
 		msg.textContent = '';
 		args.action = action;
+		args.op_id = nextOpId('photo-place-' + action + '-' + String(args.term || 0) + '-' + String(args.name || ''));
 		return api('/photos/place', { method:'POST', body: JSON.stringify(args) })
 			.then(function(r){
 				if (action === 'add') {
@@ -3007,7 +3363,10 @@ function gasf_crm_render_inbox_script() {
 
 	function person(action, name, into){
 		var box = document.getElementById('lnameslist');
-		api('/photos/person', { method:'POST', body: JSON.stringify({ action: action, name: name, into: into }) })
+		api('/photos/person', { method:'POST', body: JSON.stringify({
+			action: action, name: name, into: into,
+			op_id: nextOpId('photo-person-' + action + '-' + name + '-' + into)
+		}) })
 			.then(function(r){
 				box.insertAdjacentHTML('beforebegin',
 					'<p class="nmsg ok">' + esc(r.from) + ' → ' + esc(r.to) + ' on ' + r.photos + ' photo(s).</p>');
@@ -3088,7 +3447,10 @@ function gasf_crm_render_inbox_script() {
 			lzip.textContent = 'Building…';
 			msg.textContent = ids.length + ' photo' + (ids.length === 1 ? '' : 's') + ' — this can take a moment.';
 
-			api('/photos/zip', { method:'POST', body: JSON.stringify({ ids: ids }) })
+			api('/photos/zip', { method:'POST', body: JSON.stringify({
+				ids: ids,
+				op_id: nextOpId('photo-zip-' + ids.join('-'))
+			}) })
 				.then(function(r){
 					// Navigating to it rather than fetching: the browser's own
 					// download handles a large file far better than holding it in
@@ -3280,7 +3642,8 @@ function gasf_crm_render_inbox_script() {
 		if (!confirm('Delete this photo for good?\n\nIt is removed from the library and cannot be recovered.')) { return; }
 		api('/photos/delete', { method:'POST', body: JSON.stringify({
 			photo: p.id,
-			revision: p.revision
+			revision: p.revision,
+			op_id: nextOpId('photo-delete-' + p.id)
 		}) }).then(function(){
 			if (lgrid && lgrid._photos) { delete lgrid._photos[p.id]; }
 			if (lsel && lsel[p.id]) { delete lsel[p.id]; lsyncBar(); }
@@ -3437,7 +3800,8 @@ function gasf_crm_render_inbox_script() {
 				crop: { x: st.x / W, y: st.y / H, w: st.w / W, h: st.h / H },
 				rotate: rot,
 				brightness: parseInt(bri.value, 10),
-				contrast:   parseInt(con.value, 10)
+				contrast:   parseInt(con.value, 10),
+				op_id: nextOpId('photo-edit-image-' + p.id)
 			}) }).then(done).catch(function(e){ document.getElementById('ieapply').disabled = false; fail(e); });
 		};
 		document.getElementById('iecancel').onclick = function(){
@@ -3448,7 +3812,9 @@ function gasf_crm_render_inbox_script() {
 		if (rst) { rst.onclick = function(){
 			if (!confirm('Put the original photo back? The crop and adjustments are discarded.')) { return; }
 			rst.disabled = true;
-			api('/photos/edit-image/restore', { method: 'POST', body: JSON.stringify({ id: p.id, revision: p.revision }) })
+			api('/photos/edit-image/restore', { method: 'POST', body: JSON.stringify({
+				id: p.id, revision: p.revision, op_id: nextOpId('photo-edit-restore-' + p.id)
+			}) })
 				.then(done).catch(function(e){ rst.disabled = false; fail(e); });
 		}; }
 	}
@@ -3489,7 +3855,8 @@ function gasf_crm_render_inbox_script() {
 				flyer: !!(edit.querySelector('.p-flyer') && edit.querySelector('.p-flyer').checked),
 				event_id: parseInt(v('.p-evid'), 10) || 0,
 				taken: v('.p-taken'), caption: v('.p-caption'),
-				revision: v('.p-rev')
+				revision: v('.p-rev'),
+				op_id: nextOpId('photo-edit-' + p.id)
 			})}).then(function(card){
 				// The grid behind the overlay is now stale in exactly one cell.
 				// Reloading the page of results keeps the filter bar honest too —
@@ -3548,7 +3915,8 @@ function gasf_crm_render_inbox_script() {
 			}
 			msg.textContent = 'Saving…';
 			api('/photos/consent', { method:'POST', body: JSON.stringify({
-				photo: p.id, decision: decision, note: note.value.trim()
+				photo: p.id, decision: decision, note: note.value.trim(),
+				op_id: nextOpId('photo-consent-' + p.id + '-' + decision)
 			})}).then(function(state){
 				p.consent = state;
 				if (lgrid._photos && lgrid._photos[p.id]) { lgrid._photos[p.id].consent = state; }
@@ -3627,26 +3995,80 @@ function gasf_crm_render_inbox_script() {
 
 	// Status tabs and stream tabs are independent rows, so each only clears the
 	// selection within its own row.
-	Array.prototype.forEach.call(document.querySelectorAll('.tabs:not(.streams) button'), function(b){
+	function setStatus(next){
+		var allowed = { open: true, addressed: true, ignored: true };
+		var pick = String(next || '').toLowerCase();
+		status = allowed[pick] ? pick : 'open';
+		if (!CASE_WORKFLOW || status !== 'open') { queue = 'all'; }
+		Array.prototype.forEach.call(document.querySelectorAll('.tabs.mstatus button'), function(b){
+			b.classList.toggle('on', b.dataset.status === status);
+		});
+		var qbar = document.getElementById('qtabs');
+		if (qbar) { qbar.hidden = (!CASE_WORKFLOW || status !== 'open'); }
+		var kbar = document.getElementById('casekpis');
+		if (kbar && (!CASE_WORKFLOW || status !== 'open')) { kbar.hidden = true; }
+	}
+
+	function setQueue(next){
+		var allowed = {
+			all: true, unassigned: true, active: true, waiting_external: true,
+			blocked: true, ready_to_publish: true, exceptions: true
+		};
+		if (!CASE_WORKFLOW) {
+			queue = 'all';
+			return;
+		}
+		var pick = String(next || '').toLowerCase();
+		queue = allowed[pick] ? pick : 'all';
+		if (status !== 'open') { queue = 'all'; }
+		Array.prototype.forEach.call(document.querySelectorAll('.tabs.mqueue button'), function(b){
+			b.classList.toggle('on', (b.dataset.queue || 'all') === queue);
+		});
+	}
+
+	function setStream(next){
+		var pick = String(next || '');
+		var ok = (pick === '');
+		for (var i = 0; i < STREAMS.length; i++) {
+			if (STREAMS[i].key === pick) { ok = true; break; }
+		}
+		stream = ok ? pick : '';
+		Array.prototype.forEach.call(document.querySelectorAll('.tabs.streams button'), function(b){
+			b.classList.toggle('on', (b.dataset.stream || '') === stream);
+		});
+		if (document.querySelectorAll('.tabs.streams button').length) {
+			document.body.setAttribute('data-stream', stream);
+			var hb = document.getElementById('hbox'), box = '';
+			for (var j = 0; j < STREAMS.length; j++) { if (STREAMS[j].key === stream) { box = STREAMS[j].mailbox; } }
+			if (hb) { hb.textContent = box ? ' — ' + box : ''; }
+		}
+	}
+
+	Array.prototype.forEach.call(document.querySelectorAll('.tabs.mstatus button'), function(b){
 		b.onclick = function(){
-			Array.prototype.forEach.call(document.querySelectorAll('.tabs:not(.streams) button'), function(x){ x.classList.remove('on'); });
-			b.classList.add('on'); status = b.dataset.status; current = null; currentStamp = null;
+			setStatus(b.dataset.status);
+			setQueue(queue);
+			current = null;
+			currentStamp = null;
+			clearPane();
+			loadList();
+		};
+	});
+	Array.prototype.forEach.call(document.querySelectorAll('.tabs.mqueue button'), function(b){
+		b.onclick = function(){
+			setQueue(b.dataset.queue || 'all');
+			current = null;
+			currentStamp = null;
 			clearPane();
 			loadList();
 		};
 	});
 	Array.prototype.forEach.call(document.querySelectorAll('.tabs.streams button'), function(b){
 		b.onclick = function(){
-			Array.prototype.forEach.call(document.querySelectorAll('.tabs.streams button'), function(x){ x.classList.remove('on'); });
-			b.classList.add('on'); stream = b.dataset.stream || ''; current = null; currentStamp = null;
-			// Re-theme the page to the chosen mailbox and name it in the header.
-			// '' (All) falls back to the club's own colours and no address, since
-			// no single one describes a mixed list.
-			document.body.setAttribute('data-stream', stream);
-			var hb = document.getElementById('hbox'), box = '';
-			for (var i = 0; i < STREAMS.length; i++) { if (STREAMS[i].key === stream) { box = STREAMS[i].mailbox; } }
-			if (hb) { hb.textContent = box ? ' — ' + box : ''; }
+			setStream(b.dataset.stream || '');
 			clearPane();
+			current = null;
+			currentStamp = null;
 			loadList();
 		};
 	});
@@ -3681,7 +4103,9 @@ function gasf_crm_render_inbox_script() {
 		check.onclick = function(){
 			check.disabled = true;
 			check.textContent = 'Checking…';
-			api('/sync', {method:'POST'}).then(function(r){
+			api('/sync', {method:'POST', body: JSON.stringify({
+				op_id: nextOpId('mail-sync')
+			})}).then(function(r){
 				if(r.throttled){
 					check.textContent = 'Just checked';
 				} else if(r.new){

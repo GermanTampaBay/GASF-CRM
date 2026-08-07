@@ -14,6 +14,10 @@ function gasf_crm_table( $name ) {
 	return $wpdb->prefix . 'gasf_crm_' . $name;
 }
 
+function gasf_crm_case_workflow_enabled() {
+	return (bool) apply_filters( 'gasf_crm_case_workflow_enabled', true );
+}
+
 function gasf_crm_install_tables() {
 	global $wpdb;
 	require_once ABSPATH . 'wp-admin/includes/upgrade.php';
@@ -290,6 +294,56 @@ function gasf_crm_install_tables() {
 		UNIQUE KEY stream_message (stream, graph_message_id),
 		KEY thread_sent (thread_id, sent_at)
 	) {$charset};" );
+
+	// Phase 1 workflow contract: case-first work queue with advisory ownership.
+	dbDelta( "CREATE TABLE " . gasf_crm_table( 'cases' ) . " (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		thread_id BIGINT UNSIGNED NULL,
+		source_type VARCHAR(16) NOT NULL DEFAULT 'email',
+		source_key VARCHAR(191) NOT NULL,
+		state VARCHAR(24) NOT NULL DEFAULT 'new',
+		priority VARCHAR(12) NOT NULL DEFAULT 'normal',
+		owner_user_id BIGINT UNSIGNED NULL,
+		owner_claimed_at DATETIME NULL,
+		last_activity_at DATETIME NOT NULL,
+		closed_at DATETIME NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY  (id),
+		UNIQUE KEY source_key (source_key),
+		UNIQUE KEY thread_id (thread_id),
+		KEY state_activity (state, last_activity_at),
+		KEY owner_state (owner_user_id, state)
+	) {$charset};" );
+
+	dbDelta( "CREATE TABLE " . gasf_crm_table( 'case_tasks' ) . " (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		case_id BIGINT UNSIGNED NULL,
+		type VARCHAR(24) NOT NULL DEFAULT 'exception',
+		state VARCHAR(16) NOT NULL DEFAULT 'open',
+		reason_code VARCHAR(64) NOT NULL DEFAULT '',
+		details_json LONGTEXT NULL,
+		owner_user_id BIGINT UNSIGNED NULL,
+		due_at DATETIME NULL,
+		resolved_at DATETIME NULL,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY  (id),
+		KEY case_state (case_id, state),
+		KEY type_state (type, state)
+	) {$charset};" );
+
+	dbDelta( "CREATE TABLE " . gasf_crm_table( 'case_events' ) . " (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		case_id BIGINT UNSIGNED NOT NULL,
+		event_type VARCHAR(64) NOT NULL,
+		actor_type VARCHAR(16) NOT NULL DEFAULT 'system',
+		actor_user_id BIGINT UNSIGNED NULL,
+		payload_json LONGTEXT NULL,
+		created_at DATETIME NOT NULL,
+		PRIMARY KEY  (id),
+		KEY case_time (case_id, created_at)
+	) {$charset};" );
 }
 
 /**
@@ -341,6 +395,14 @@ function gasf_crm_upsert_thread( $conversation_id, $subject, $from_name, $from_a
 		) );
 
 		if ( false !== $inserted ) {
+			$case_id = gasf_crm_case_ensure_for_thread(
+				(int) $wpdb->insert_id,
+				'email:' . $stream . ':' . $conversation_id,
+				'new'
+			);
+			if ( $case_id ) {
+				gasf_crm_case_log_event( $case_id, 'case.created', array( 'thread_id' => (int) $wpdb->insert_id ) );
+			}
 			return array( 'id' => (int) $wpdb->insert_id, 'reopened' => false, 'created' => true );
 		}
 
@@ -374,6 +436,10 @@ function gasf_crm_upsert_thread( $conversation_id, $subject, $from_name, $from_a
 	}
 
 	$wpdb->update( $t, $data, array( 'id' => (int) $row['id'] ) );
+	gasf_crm_case_ensure_for_thread( (int) $row['id'], 'email:' . $stream . ':' . $conversation_id, 'new' );
+	if ( $reopened ) {
+		gasf_crm_case_sync_from_thread( (int) $row['id'], 'inbound_reopen' );
+	}
 	return array( 'id' => (int) $row['id'], 'reopened' => $reopened, 'created' => false );
 }
 
@@ -458,6 +524,7 @@ function gasf_crm_set_status( $thread_id, $status ) {
 		'locked_by'             => null,
 		'locked_at'             => null,
 	), array( 'id' => (int) $thread_id ) );
+	gasf_crm_case_sync_from_thread( (int) $thread_id, 'thread_status:' . $status );
 }
 
 /**
@@ -704,7 +771,7 @@ function gasf_crm_list_threads( $status = 'open', array $streams = array(), $lim
  * MySQL serialises the row write and the loser's affected-rows comes back 0.
  * A read-then-write would race.
  */
-function gasf_crm_claim_thread( $thread_id, $user_id, $lock_minutes = 15 ) {
+function gasf_crm_claim_thread( $thread_id, $user_id, $lock_minutes = 15, $force = false ) {
 	global $wpdb;
 	$t = gasf_crm_table( 'threads' );
 	// GMT, like every other timestamp in these tables. This one line spent two
@@ -716,23 +783,36 @@ function gasf_crm_claim_thread( $thread_id, $user_id, $lock_minutes = 15 ) {
 	$now    = current_time( 'mysql', true );
 	$cutoff = gmdate( 'Y-m-d H:i:s', strtotime( $now ) - ( $lock_minutes * 60 ) );
 
-	$rows = $wpdb->query( $wpdb->prepare(
-		"UPDATE {$t}
+	$sql = "UPDATE {$t}
 		    SET locked_by = %d, locked_at = %s, status = 'claimed',
 		        last_status_change_at = CASE WHEN status = 'new' THEN %s ELSE last_status_change_at END
 		  WHERE id = %d
 		    AND status NOT IN ('addressed','ignored')
-		    AND (locked_by IS NULL OR locked_by = %d OR locked_at < %s)",
-		$user_id, $now, $now, $thread_id, $user_id, $cutoff
-	) );
+		    AND (locked_by IS NULL OR locked_by = %d OR locked_at < %s)";
+	if ( $force ) {
+		$sql = "UPDATE {$t}
+		    SET locked_by = %d, locked_at = %s, status = 'claimed',
+		        last_status_change_at = CASE WHEN status = 'new' THEN %s ELSE last_status_change_at END
+		  WHERE id = %d
+		    AND status NOT IN ('addressed','ignored')";
+		$rows = $wpdb->query( $wpdb->prepare( $sql, $user_id, $now, $now, $thread_id ) );
+	} else {
+		$rows = $wpdb->query( $wpdb->prepare( $sql, $user_id, $now, $now, $thread_id, $user_id, $cutoff ) );
+	}
 
 	// affected_rows is 0 both when the WHERE missed and when the row already
 	// held identical values (same user re-opening within the lock window), so
 	// confirm by reading the holder back rather than trusting the count.
 	if ( ! $rows ) {
 		$holder = (int) $wpdb->get_var( $wpdb->prepare( "SELECT locked_by FROM {$t} WHERE id = %d", $thread_id ) );
-		return $holder === (int) $user_id;
+		$ok     = $holder === (int) $user_id;
+		if ( $ok ) {
+			gasf_crm_case_mark_owner_by_thread( (int) $thread_id, (int) $user_id, $force ? 'takeover' : 'claim' );
+		}
+		return $ok;
 	}
+	gasf_crm_case_mark_owner_by_thread( (int) $thread_id, (int) $user_id, $force ? 'takeover' : 'claim' );
+	gasf_crm_case_sync_from_thread( (int) $thread_id, $force ? 'thread_takeover' : 'thread_claim' );
 	return true;
 }
 
@@ -745,16 +825,499 @@ function gasf_crm_release_thread( $thread_id, $user_id ) {
 		  WHERE id = %d AND locked_by = %d",
 		$thread_id, $user_id
 	) );
+	gasf_crm_case_mark_owner_by_thread( (int) $thread_id, 0, 'release' );
+	gasf_crm_case_sync_from_thread( (int) $thread_id, 'thread_release' );
 }
 
 /** Drop locks past their window so an abandoned tab doesn't hold a thread forever. */
 function gasf_crm_expire_locks( $lock_minutes = 15 ) {
 	global $wpdb;
 	$cutoff = gmdate( 'Y-m-d H:i:s', strtotime( current_time( 'mysql', true ) ) - ( $lock_minutes * 60 ) );
-	return (int) $wpdb->query( $wpdb->prepare(
+	$changed = (int) $wpdb->query( $wpdb->prepare(
 		'UPDATE ' . gasf_crm_table( 'threads' ) . "
 		    SET locked_by = NULL, locked_at = NULL,
 		        status = CASE WHEN status = 'claimed' THEN 'new' ELSE status END
 		  WHERE locked_at IS NOT NULL AND locked_at < %s", $cutoff
 	) );
+	if ( $changed > 0 ) {
+		$rows = $wpdb->get_results( $wpdb->prepare(
+			'SELECT id FROM ' . gasf_crm_table( 'threads' ) . '
+			  WHERE status = %s AND locked_by IS NULL',
+			'new'
+		), ARRAY_A );
+		foreach ( (array) $rows as $r ) {
+			gasf_crm_case_mark_owner_by_thread( (int) $r['id'], 0, 'lock_expired' );
+			gasf_crm_case_sync_from_thread( (int) $r['id'], 'lock_expired' );
+		}
+	}
+	return $changed;
+}
+
+function gasf_crm_case_state_from_thread_status( $thread_status ) {
+	switch ( (string) $thread_status ) {
+		case 'addressed':
+			return 'resolved';
+		case 'ignored':
+			return 'cancelled';
+		case 'claimed':
+			return 'active';
+		case 'new':
+		default:
+			return 'new';
+	}
+}
+
+function gasf_crm_case_allowed_transition( $from, $to ) {
+	static $map = array(
+		'new'             => array( 'active', 'cancelled' ),
+		'active'          => array( 'waiting_external', 'blocked', 'ready_to_publish', 'resolved', 'cancelled', 'active' ),
+		'waiting_external'=> array( 'active', 'blocked', 'cancelled' ),
+		'blocked'         => array( 'active', 'cancelled' ),
+		'ready_to_publish'=> array( 'resolved', 'active', 'cancelled' ),
+		'resolved'        => array(),
+		'cancelled'       => array(),
+	);
+	$from = (string) $from;
+	$to   = (string) $to;
+	return $from === $to || ( isset( $map[ $from ] ) && in_array( $to, $map[ $from ], true ) );
+}
+
+function gasf_crm_case_ensure_for_thread( $thread_id, $source_key, $initial_state = 'new' ) {
+	global $wpdb;
+	$thread_id   = (int) $thread_id;
+	$source_key  = (string) $source_key;
+	$initial     = sanitize_key( (string) $initial_state ) ?: 'new';
+	$cases_table = gasf_crm_table( 'cases' );
+	$now         = current_time( 'mysql', true );
+
+	$case_id = (int) $wpdb->get_var( $wpdb->prepare(
+		"SELECT id FROM {$cases_table} WHERE thread_id = %d OR source_key = %s LIMIT 1",
+		$thread_id,
+		$source_key
+	) );
+	if ( $case_id > 0 ) {
+		$wpdb->update( $cases_table, array( 'thread_id' => $thread_id, 'updated_at' => $now ), array( 'id' => $case_id ) );
+		return $case_id;
+	}
+
+	$ok = $wpdb->insert( $cases_table, array(
+		'thread_id'         => $thread_id,
+		'source_type'       => 'email',
+		'source_key'        => $source_key,
+		'state'             => $initial,
+		'priority'          => 'normal',
+		'owner_user_id'     => null,
+		'owner_claimed_at'  => null,
+		'last_activity_at'  => $now,
+		'closed_at'         => null,
+		'created_at'        => $now,
+		'updated_at'        => $now,
+	) );
+
+	return false !== $ok ? (int) $wpdb->insert_id : 0;
+}
+
+function gasf_crm_case_log_event( $case_id, $event_type, array $payload = array(), $actor_type = 'system', $actor_user_id = null ) {
+	global $wpdb;
+	$wpdb->insert( gasf_crm_table( 'case_events' ), array(
+		'case_id'       => (int) $case_id,
+		'event_type'    => (string) $event_type,
+		'actor_type'    => (string) $actor_type,
+		'actor_user_id' => null === $actor_user_id ? null : (int) $actor_user_id,
+		'payload_json'  => wp_json_encode( $payload ),
+		'created_at'    => current_time( 'mysql', true ),
+	) );
+}
+
+function gasf_crm_case_mark_owner_by_thread( $thread_id, $owner_user_id, $reason = 'claim' ) {
+	global $wpdb;
+	$thread = gasf_crm_get_thread( (int) $thread_id );
+	if ( ! $thread ) { return; }
+	$case_id = gasf_crm_case_ensure_for_thread(
+		(int) $thread_id,
+		'email:' . (string) $thread['stream'] . ':' . (string) $thread['conversation_id'],
+		gasf_crm_case_state_from_thread_status( (string) $thread['status'] )
+	);
+	if ( ! $case_id ) { return; }
+
+	$owner = (int) $owner_user_id;
+	$now   = current_time( 'mysql', true );
+	$wpdb->update( gasf_crm_table( 'cases' ), array(
+		'owner_user_id'    => $owner > 0 ? $owner : null,
+		'owner_claimed_at' => $owner > 0 ? $now : null,
+		'last_activity_at' => $now,
+		'updated_at'       => $now,
+	), array( 'id' => $case_id ) );
+
+	gasf_crm_case_log_event( $case_id, 'case.owner_changed', array(
+		'owner_user_id' => $owner > 0 ? $owner : null,
+		'reason'        => (string) $reason,
+	), 'user', $owner > 0 ? $owner : get_current_user_id() );
+}
+
+function gasf_crm_case_sync_from_thread( $thread_id, $event_type = 'thread_sync' ) {
+	global $wpdb;
+	$thread = gasf_crm_get_thread( (int) $thread_id );
+	if ( ! $thread ) { return false; }
+	$target_state = gasf_crm_case_state_from_thread_status( (string) $thread['status'] );
+	$source_key   = 'email:' . (string) $thread['stream'] . ':' . (string) $thread['conversation_id'];
+	$case_id      = gasf_crm_case_ensure_for_thread( (int) $thread_id, $source_key, $target_state );
+	if ( ! $case_id ) { return false; }
+
+	$cases_table = gasf_crm_table( 'cases' );
+	$row         = $wpdb->get_row( $wpdb->prepare( "SELECT state FROM {$cases_table} WHERE id = %d", $case_id ), ARRAY_A );
+	if ( ! $row ) { return false; }
+	$current = (string) $row['state'];
+	$next    = gasf_crm_case_allowed_transition( $current, $target_state ) ? $target_state : $current;
+	$now     = current_time( 'mysql', true );
+
+	$wpdb->update( $cases_table, array(
+		'state'            => $next,
+		'last_activity_at' => $now,
+		'updated_at'       => $now,
+		'closed_at'        => in_array( $next, array( 'resolved', 'cancelled' ), true ) ? $now : null,
+	), array( 'id' => $case_id ) );
+
+	gasf_crm_case_log_event( $case_id, (string) $event_type, array(
+		'thread_id'     => (int) $thread_id,
+		'thread_status' => (string) $thread['status'],
+		'case_state'    => $next,
+	), 'system', null );
+
+	return true;
+}
+
+function gasf_crm_case_by_thread( $thread_id ) {
+	global $wpdb;
+	return $wpdb->get_row( $wpdb->prepare(
+		'SELECT * FROM ' . gasf_crm_table( 'cases' ) . ' WHERE thread_id = %d',
+		(int) $thread_id
+	), ARRAY_A );
+}
+
+function gasf_crm_case_set_state( $case_id, $target_state, $event_type = 'case.state_changed', array $payload = array(), $actor_user_id = null ) {
+	global $wpdb;
+	$case_id = (int) $case_id;
+	if ( $case_id <= 0 ) { return false; }
+
+	$row = $wpdb->get_row( $wpdb->prepare(
+		'SELECT state FROM ' . gasf_crm_table( 'cases' ) . ' WHERE id = %d',
+		$case_id
+	), ARRAY_A );
+	if ( ! $row ) { return false; }
+
+	$current = (string) $row['state'];
+	$target  = sanitize_key( (string) $target_state );
+	if ( '' === $target || ! gasf_crm_case_allowed_transition( $current, $target ) ) {
+		return false;
+	}
+
+	$now = current_time( 'mysql', true );
+	$wpdb->update( gasf_crm_table( 'cases' ), array(
+		'state'            => $target,
+		'last_activity_at' => $now,
+		'updated_at'       => $now,
+		'closed_at'        => in_array( $target, array( 'resolved', 'cancelled' ), true ) ? $now : null,
+	), array( 'id' => $case_id ) );
+
+	$payload['from'] = $current;
+	$payload['to']   = $target;
+	gasf_crm_case_log_event( $case_id, $event_type, $payload, 'user', null === $actor_user_id ? get_current_user_id() : (int) $actor_user_id );
+	return true;
+}
+
+function gasf_crm_case_set_state_by_thread( $thread_id, $target_state, $event_type = 'case.state_changed', array $payload = array(), $actor_user_id = null ) {
+	$case = gasf_crm_case_by_thread( (int) $thread_id );
+	if ( ! $case ) {
+		$thread = gasf_crm_get_thread( (int) $thread_id );
+		if ( ! $thread ) { return false; }
+		$case_id = gasf_crm_case_ensure_for_thread(
+			(int) $thread['id'],
+			'email:' . (string) $thread['stream'] . ':' . (string) $thread['conversation_id'],
+			gasf_crm_case_state_from_thread_status( (string) $thread['status'] )
+		);
+		$case = $case_id ? gasf_crm_case_by_thread( (int) $thread_id ) : null;
+	}
+	if ( ! $case ) { return false; }
+	return gasf_crm_case_set_state( (int) $case['id'], $target_state, $event_type, $payload, $actor_user_id );
+}
+
+function gasf_crm_case_set_owner_by_thread( $thread_id, $owner_user_id, $reason = 'manual_owner_change', $actor_user_id = null ) {
+	global $wpdb;
+	$thread = gasf_crm_get_thread( (int) $thread_id );
+	if ( ! $thread ) { return false; }
+	$case_id = gasf_crm_case_ensure_for_thread(
+		(int) $thread['id'],
+		'email:' . (string) $thread['stream'] . ':' . (string) $thread['conversation_id'],
+		gasf_crm_case_state_from_thread_status( (string) $thread['status'] )
+	);
+	if ( ! $case_id ) { return false; }
+
+	$owner = (int) $owner_user_id;
+	$now   = current_time( 'mysql', true );
+	$ok    = $wpdb->update( gasf_crm_table( 'cases' ), array(
+		'owner_user_id'    => $owner > 0 ? $owner : null,
+		'owner_claimed_at' => $owner > 0 ? $now : null,
+		'last_activity_at' => $now,
+		'updated_at'       => $now,
+	), array( 'id' => $case_id ) );
+	if ( false === $ok ) { return false; }
+
+	gasf_crm_case_log_event( $case_id, 'case.owner_changed', array(
+		'owner_user_id' => $owner > 0 ? $owner : null,
+		'reason'        => (string) $reason,
+	), 'user', null === $actor_user_id ? get_current_user_id() : (int) $actor_user_id );
+	return true;
+}
+
+function gasf_crm_case_open_exception_by_thread( $thread_id, $reason_code, $detail = '', array $details = array() ) {
+	global $wpdb;
+	$thread = gasf_crm_get_thread( (int) $thread_id );
+	if ( ! $thread ) { return false; }
+	$case_id = gasf_crm_case_ensure_for_thread(
+		(int) $thread['id'],
+		'email:' . (string) $thread['stream'] . ':' . (string) $thread['conversation_id'],
+		gasf_crm_case_state_from_thread_status( (string) $thread['status'] )
+	);
+	if ( ! $case_id ) { return false; }
+
+	$reason = sanitize_key( (string) $reason_code );
+	$now    = current_time( 'mysql', true );
+	$payload = array_merge( array(
+		'thread_id'   => (int) $thread_id,
+		'reason_code' => $reason,
+		'detail'      => (string) $detail,
+	), $details );
+
+	$wpdb->insert( gasf_crm_table( 'case_tasks' ), array(
+		'case_id'       => $case_id,
+		'type'          => 'exception',
+		'state'         => 'open',
+		'reason_code'   => $reason,
+		'details_json'  => wp_json_encode( $payload ),
+		'owner_user_id' => null,
+		'due_at'        => null,
+		'resolved_at'   => null,
+		'created_at'    => $now,
+		'updated_at'    => $now,
+	) );
+
+	gasf_crm_case_log_event( $case_id, 'case.exception_opened', $payload, 'system', null );
+	gasf_crm_case_set_state( $case_id, 'blocked', 'case.blocked', array( 'reason_code' => $reason, 'detail' => (string) $detail ), null );
+	return true;
+}
+
+function gasf_crm_case_resolve_exceptions_by_thread( $thread_id, $reason_code = '' ) {
+	global $wpdb;
+	$case = gasf_crm_case_by_thread( (int) $thread_id );
+	if ( ! $case ) { return 0; }
+
+	$where = 'case_id = %d AND type = %s AND state = %s';
+	$args  = array( (int) $case['id'], 'exception', 'open' );
+	if ( '' !== $reason_code ) {
+		$where .= ' AND reason_code = %s';
+		$args[] = sanitize_key( (string) $reason_code );
+	}
+
+	$now   = current_time( 'mysql', true );
+	$sql   = 'UPDATE ' . gasf_crm_table( 'case_tasks' ) . " SET state = %s, resolved_at = %s, updated_at = %s WHERE {$where}";
+	$done  = (int) $wpdb->query( $wpdb->prepare( $sql, array_merge( array( 'resolved', $now, $now ), $args ) ) );
+	if ( $done > 0 ) {
+		gasf_crm_case_log_event( (int) $case['id'], 'case.exception_resolved', array(
+			'count'       => $done,
+			'reason_code' => '' !== $reason_code ? sanitize_key( (string) $reason_code ) : null,
+		), 'user', get_current_user_id() );
+		gasf_crm_case_unblock_if_clear( (int) $case['id'], get_current_user_id() );
+	}
+	return $done;
+}
+
+function gasf_crm_case_exception_count( $case_id ) {
+	global $wpdb;
+	return (int) $wpdb->get_var( $wpdb->prepare(
+		'SELECT COUNT(*) FROM ' . gasf_crm_table( 'case_tasks' ) . ' WHERE case_id = %d AND type = %s AND state = %s',
+		(int) $case_id,
+		'exception',
+		'open'
+	) );
+}
+
+function gasf_crm_case_list( $queue = 'active', $limit = 100, array $streams = array() ) {
+	global $wpdb;
+	$limit = max( 1, min( 500, (int) $limit ) );
+	$args  = array();
+	$sql   = 'SELECT c.* FROM ' . gasf_crm_table( 'cases' ) . ' c';
+
+	$streams = array_values( array_filter( array_unique( array_map( 'sanitize_key', (array) $streams ) ) ) );
+	if ( ! empty( $streams ) ) {
+		$ph   = implode( ', ', array_fill( 0, count( $streams ), '%s' ) );
+		$sql .= ' INNER JOIN ' . gasf_crm_table( 'threads' ) . " t ON t.id = c.thread_id WHERE t.stream IN ({$ph})";
+		$args = array_merge( $args, $streams );
+	}
+
+	$sql   .= ' ORDER BY c.last_activity_at DESC LIMIT %d';
+	$args[] = $limit;
+	$cases  = $wpdb->get_results( $wpdb->prepare( $sql, $args ), ARRAY_A );
+
+	$out = array();
+	foreach ( (array) $cases as $c ) {
+		$state = (string) $c['state'];
+		$exc   = gasf_crm_case_exception_count( (int) $c['id'] );
+		$is_unassigned = empty( $c['owner_user_id'] );
+		$q = '';
+		if ( $exc > 0 ) {
+			$q = 'exceptions';
+		} elseif ( 'new' === $state && $is_unassigned ) {
+			$q = 'unassigned';
+		} elseif ( 'active' === $state ) {
+			$q = 'active';
+		} elseif ( 'waiting_external' === $state ) {
+			$q = 'waiting_external';
+		} elseif ( 'blocked' === $state ) {
+			$q = 'blocked';
+		} elseif ( 'ready_to_publish' === $state ) {
+			$q = 'ready_to_publish';
+		}
+		if ( '' === $q || ( 'all' !== $queue && $queue !== $q ) ) { continue; }
+		$out[] = array(
+			'id'               => (int) $c['id'],
+			'thread_id'        => (int) $c['thread_id'],
+			'state'            => $state,
+			'queue'            => $q,
+			'owner_user_id'    => (int) $c['owner_user_id'],
+			'owner_claimed_at' => (string) $c['owner_claimed_at'],
+			'last_activity_at' => (string) $c['last_activity_at'],
+			'exception_count'  => $exc,
+			'source_key'       => (string) $c['source_key'],
+		);
+	}
+	return $out;
+}
+
+function gasf_crm_case_events( $case_id, $limit = 200 ) {
+	global $wpdb;
+	return $wpdb->get_results( $wpdb->prepare(
+		'SELECT * FROM ' . gasf_crm_table( 'case_events' ) . ' WHERE case_id = %d ORDER BY created_at DESC, id DESC LIMIT %d',
+		(int) $case_id,
+		max( 1, min( 1000, (int) $limit ) )
+	), ARRAY_A );
+}
+
+function gasf_crm_case_tasks( $case_id, $state = '' ) {
+	global $wpdb;
+	$case_id = (int) $case_id;
+	$state   = sanitize_key( (string) $state );
+	if ( '' !== $state ) {
+		return $wpdb->get_results( $wpdb->prepare(
+			'SELECT * FROM ' . gasf_crm_table( 'case_tasks' ) . ' WHERE case_id = %d AND state = %s ORDER BY created_at DESC, id DESC',
+			$case_id,
+			$state
+		), ARRAY_A );
+	}
+	return $wpdb->get_results( $wpdb->prepare(
+		'SELECT * FROM ' . gasf_crm_table( 'case_tasks' ) . ' WHERE case_id = %d ORDER BY created_at DESC, id DESC',
+		$case_id
+	), ARRAY_A );
+}
+
+function gasf_crm_case_resolve_task( $case_id, $task_id ) {
+	global $wpdb;
+	$case_id = (int) $case_id;
+	$task_id = (int) $task_id;
+	if ( $case_id <= 0 || $task_id <= 0 ) { return false; }
+	$row = $wpdb->get_row( $wpdb->prepare(
+		'SELECT id, state, reason_code FROM ' . gasf_crm_table( 'case_tasks' ) . ' WHERE id = %d AND case_id = %d',
+		$task_id,
+		$case_id
+	), ARRAY_A );
+	if ( ! $row ) { return false; }
+	if ( 'resolved' === (string) $row['state'] ) { return true; }
+
+	$now = current_time( 'mysql', true );
+	$ok  = $wpdb->update( gasf_crm_table( 'case_tasks' ), array(
+		'state'       => 'resolved',
+		'resolved_at' => $now,
+		'updated_at'  => $now,
+	), array( 'id' => $task_id, 'case_id' => $case_id ) );
+	if ( false === $ok ) { return false; }
+
+	gasf_crm_case_log_event( $case_id, 'case.exception_resolved', array(
+		'task_id'      => $task_id,
+		'reason_code'  => (string) $row['reason_code'],
+		'resolved_by'  => get_current_user_id(),
+	), 'user', get_current_user_id() );
+	gasf_crm_case_unblock_if_clear( $case_id, get_current_user_id() );
+	return true;
+}
+
+function gasf_crm_case_unblock_if_clear( $case_id, $actor_user_id = null ) {
+	global $wpdb;
+	$case_id = (int) $case_id;
+	if ( $case_id <= 0 ) { return false; }
+
+	$row = $wpdb->get_row( $wpdb->prepare(
+		'SELECT state FROM ' . gasf_crm_table( 'cases' ) . ' WHERE id = %d',
+		$case_id
+	), ARRAY_A );
+	if ( ! $row || 'blocked' !== (string) $row['state'] ) { return false; }
+	if ( gasf_crm_case_exception_count( $case_id ) > 0 ) { return false; }
+
+	return gasf_crm_case_set_state(
+		$case_id,
+		'active',
+		'case.unblocked',
+		array( 'reason' => 'all_exceptions_resolved' ),
+		null === $actor_user_id ? get_current_user_id() : (int) $actor_user_id
+	);
+}
+
+function gasf_crm_case_release_stale_owners( $minutes = 1440 ) {
+	global $wpdb;
+	$minutes = max( 1, (int) $minutes );
+	$cutoff  = gmdate( 'Y-m-d H:i:s', strtotime( current_time( 'mysql', true ) ) - ( $minutes * 60 ) );
+	$cases_t = gasf_crm_table( 'cases' );
+
+	$rows = $wpdb->get_results( $wpdb->prepare(
+		"SELECT id, thread_id, owner_user_id
+		   FROM {$cases_t}
+		  WHERE owner_user_id IS NOT NULL
+		    AND owner_claimed_at IS NOT NULL
+		    AND state NOT IN ('resolved','cancelled')
+		    AND owner_claimed_at < %s",
+		$cutoff
+	), ARRAY_A );
+	if ( ! $rows ) { return 0; }
+
+	$released = 0;
+	$now      = current_time( 'mysql', true );
+	foreach ( $rows as $r ) {
+		$case_id  = (int) $r['id'];
+		$thread_id = (int) $r['thread_id'];
+		$owner_id = (int) $r['owner_user_id'];
+		$ok = $wpdb->update( $cases_t, array(
+			'owner_user_id'    => null,
+			'owner_claimed_at' => null,
+			'last_activity_at' => $now,
+			'updated_at'       => $now,
+		), array(
+			'id'            => $case_id,
+			'owner_user_id' => $owner_id,
+		) );
+		if ( false === $ok || 0 === (int) $ok ) { continue; }
+
+		gasf_crm_case_log_event( $case_id, 'case.owner_auto_released', array(
+			'prior_owner_user_id' => $owner_id,
+			'reason'              => 'owner_inactivity_timeout',
+			'timeout_minutes'     => $minutes,
+		), 'system', null );
+		$released++;
+
+		if ( $thread_id > 0 ) {
+			$thread = gasf_crm_get_thread( $thread_id );
+			if ( $thread && (int) $thread['locked_by'] === $owner_id ) {
+				gasf_crm_release_thread( $thread_id, $owner_id );
+			}
+		}
+	}
+	return $released;
 }
