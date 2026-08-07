@@ -303,42 +303,21 @@ function gasf_crm_render_inbox_script() {
 
 		return api('/cases?queue=all').then(function(r){
 			var rows = (r && r.cases) ? r.cases : [];
-			var counts = {
-				all: rows.length, unassigned: 0, active: 0, waiting_external: 0,
-				blocked: 0, ready_to_publish: 0, exceptions: 0
-			};
 			var stale = 0;
 			var now = Date.now();
 			rows.forEach(function(c){
-				var q = c && c.queue ? String(c.queue) : '';
-				if (counts.hasOwnProperty(q)) { counts[q]++; }
 				if (parseInt(c.owner_user_id, 10) > 0 && c.owner_claimed_at) {
 					var d = new Date(String(c.owner_claimed_at).replace(' ', 'T') + 'Z');
 					if (!isNaN(d) && (now - d.getTime()) > 86400000) { stale++; }
 				}
 			});
 
-			var order = ['all', 'unassigned', 'active', 'waiting_external', 'blocked', 'ready_to_publish', 'exceptions'];
-			box.innerHTML = order.map(function(k){
-				var lbl = queueLabel(k);
-				var on = (k === queue) ? ' on' : '';
-				return '<button type="button" class="' + on.trim() + '" data-kpiq="' + k + '">' +
-					esc(lbl) + ': ' + counts[k] + '</button>';
-			}).join('') + (stale > 0
-				? '<button type="button" class="warn" title="Case ownership older than roughly one day">Stale owners: ' + stale + '</button>'
-				: '');
-			box.hidden = false;
-
-			Array.prototype.forEach.call(box.querySelectorAll('[data-kpiq]'), function(b){
-				b.onclick = function(){
-					setStatus('open');
-					setQueue(b.dataset.kpiq || 'all');
-					current = null;
-					currentStamp = null;
-					clearPane();
-					loadList();
-				};
-			});
+			if (stale > 0) {
+				box.innerHTML = '<button type="button" class="warn" title="Case ownership older than roughly one day">Stale owners: ' + stale + '</button>';
+				box.hidden = false;
+				return;
+			}
+			box.hidden = true;
 		}).catch(function(){ box.hidden = true; });
 	}
 
