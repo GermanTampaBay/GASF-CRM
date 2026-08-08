@@ -855,6 +855,67 @@ final class GASF_CRM_Selftest {
 			&& (string) get_post_field( 'post_modified_gmt', $lab ) > $corrected_modified,
 			'faces: clearing explicit labels records a learnable removal'
 		);
+		gasf_crm_face_labels_store( $lab, array(
+			array( 'name' => 'Existing Example', 'box' => array( 10, 10, 30, 30 ) ),
+		), true );
+		$discovery_body = array(
+			'name'        => 'Discovery Example',
+			'occurrences' => array(
+				array(
+					'client_key'  => 'unknown-1',
+					'photo'       => $lab,
+					'box'         => array( 60, 10, 30, 30 ),
+					'image_width'  => 120,
+					'image_height' => 90,
+				),
+			),
+		);
+		$discovered_first  = $this->rest_post( '/gasf/v1/crm/photos/faces/discover-label', $discovery_body );
+		$discovered_second = $this->rest_post( '/gasf/v1/crm/photos/faces/discover-label', $discovery_body );
+		$discovery_labels  = gasf_crm_face_labels_for( $lab );
+		$this->ok(
+			! empty( $discovered_first['ok'] )
+			&& array( 'unknown-1' ) === (array) ( $discovered_first['applied'] ?? array() )
+			&& 1 === (int) ( $discovered_first['stored'] ?? 0 )
+			&& 0 === (int) ( $discovered_second['stored'] ?? -1 ),
+			'faces: discovery labels are verified and idempotent'
+		);
+		$this->ok(
+			2 === count( $discovery_labels )
+			&& 'Existing Example' === (string) ( $discovery_labels[0]['name'] ?? '' )
+			&& 'Discovery Example' === (string) ( $discovery_labels[1]['name'] ?? '' ),
+			'faces: discovery adds reviewed boxes without replacing unrelated labels'
+		);
+		$invalid_discovery = $discovery_body;
+		$invalid_discovery['occurrences'][0]['client_key'] = 'unknown-outside';
+		$invalid_discovery['occurrences'][0]['box'] = array( 110, 80, 30, 30 );
+		$invalid_result = $this->rest_post( '/gasf/v1/crm/photos/faces/discover-label', $invalid_discovery );
+		$this->ok(
+			is_wp_error( $invalid_result )
+			&& 400 === (int) ( $invalid_result->get_error_data()['status'] ?? 0 )
+			&& 2 === count( gasf_crm_face_labels_for( $lab ) ),
+			'faces: discovery rejects boxes outside detector-oriented dimensions'
+		);
+		$discovery_lock = gasf_crm_faces_try_lock( $lab, 'scan' );
+		$busy_discovery = gasf_crm_face_discovery_labels_record(
+			'Busy Example',
+			array(
+				array(
+					'client_key'  => 'unknown-busy',
+					'photo'       => $lab,
+					'box'         => array( 5, 50, 20, 20 ),
+					'image_width'  => 120,
+					'image_height' => 90,
+				),
+			)
+		);
+		gasf_crm_faces_unlock( $lab, 'scan', $discovery_lock );
+		$this->ok(
+			'' !== $discovery_lock
+			&& array( 'unknown-busy' ) === (array) ( $busy_discovery['busy'] ?? array() )
+			&& empty( $busy_discovery['applied'] ),
+			'faces: discovery uses the shared scanner write lock'
+		);
 		$term = get_term_by( 'name', 'Jürgen Example', 'gasf_photo_person' );
 		$this->ok( (bool) $term, 'faces: scanner labels create a person term for next-photo suggestions' );
 		$alias = get_term_by( 'name', 'Juergen Example', 'gasf_photo_person' );
@@ -866,6 +927,10 @@ final class GASF_CRM_Selftest {
 		if ( $term ) { wp_delete_term( (int) $term->term_id, 'gasf_photo_person' ); }
 		$corrected_term = get_term_by( 'name', 'Corrected Example', 'gasf_photo_person' );
 		if ( $corrected_term ) { wp_delete_term( (int) $corrected_term->term_id, 'gasf_photo_person' ); }
+		foreach ( array( 'Existing Example', 'Discovery Example' ) as $cleanup_name ) {
+			$cleanup_term = get_term_by( 'name', $cleanup_name, 'gasf_photo_person' );
+			if ( $cleanup_term ) { wp_delete_term( (int) $cleanup_term->term_id, 'gasf_photo_person' ); }
+		}
 
 		// Label-only photos are still offered to the learning feed.
 		$learn = $this->library_photo( 'st-face-learn-label-only' );

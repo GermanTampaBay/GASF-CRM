@@ -31,6 +31,7 @@ class ScanGui(tk.Tk):
 
         self.v_learn = tk.BooleanVar(value=False)
         self.v_label = tk.BooleanVar(value=False)
+        self.v_discover = tk.BooleanVar(value=False)
         self.v_label_flow = tk.BooleanVar(value=True)
         self.v_watch = tk.BooleanVar(value=False)
         self.v_status = tk.BooleanVar(value=False)
@@ -40,6 +41,7 @@ class ScanGui(tk.Tk):
         self.v_engine = tk.StringVar(value="auto")
         self.v_watch_seconds = tk.StringVar(value="900")
         self.v_label_limit = tk.StringVar(value="500")
+        self.v_discovery_limit = tk.StringVar(value="1000")
         self.v_uploaded_after = tk.StringVar(value="")
         self.v_uploaded_before = tk.StringVar(value="")
         self.v_python = tk.StringVar(value="")
@@ -74,6 +76,13 @@ class ScanGui(tk.Tk):
             "--label",
             "Open local face-label UI (browser flow).",
             self._on_flag_change,
+        )
+        self.cb_discover = self._option_row(
+            opts,
+            self.v_discover,
+            "--discover",
+            "Prepare unknown faces and open the entirely local People Discovery board.",
+            self._on_discover_change,
         )
         self.cb_label_flow = self._option_row(
             opts,
@@ -145,6 +154,9 @@ class ScanGui(tk.Tk):
         self.ent_before = ttk.Entry(fields, textvariable=self.v_uploaded_before, width=12)
         self.ent_before.grid(row=1, column=3, sticky="w", padx=(8, 20), pady=(8, 0))
         ttk.Label(fields, text="(YYYY-MM-DD)", foreground="#666").grid(row=1, column=4, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(fields, text="Discovery limit").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.ent_discovery = ttk.Entry(fields, textvariable=self.v_discovery_limit, width=10)
+        self.ent_discovery.grid(row=2, column=1, sticky="w", padx=(8, 20), pady=(8, 0))
 
         info = ttk.Frame(wrap)
         info.pack(fill="x", pady=(8, 0))
@@ -200,6 +212,7 @@ class ScanGui(tk.Tk):
     def _on_flag_change(self):
         # Mutually exclusive "single-purpose" modes.
         if self.v_label.get():
+            self.v_discover.set(False)
             self.v_status.set(False)
             self.v_check.set(False)
             self.v_selftest.set(False)
@@ -207,32 +220,61 @@ class ScanGui(tk.Tk):
             self.v_learn.set(False)
         if self.v_status.get():
             self.v_label.set(False)
+            self.v_discover.set(False)
             self.v_check.set(False)
             self.v_selftest.set(False)
             self.v_watch.set(False)
             self.v_learn.set(False)
         if self.v_check.get():
             self.v_label.set(False)
+            self.v_discover.set(False)
             self.v_status.set(False)
             self.v_selftest.set(False)
             self.v_watch.set(False)
             self.v_learn.set(False)
         if self.v_selftest.get():
             self.v_label.set(False)
+            self.v_discover.set(False)
             self.v_status.set(False)
             self.v_check.set(False)
             self.v_watch.set(False)
             self.v_learn.set(False)
         if self.v_watch.get():
             self.v_label.set(False)
+            self.v_discover.set(False)
             self.v_label_flow.set(False)
             self.v_status.set(False)
             self.v_check.set(False)
             self.v_selftest.set(False)
+        if self.v_discover.get():
+            self.v_label.set(False)
+            self.v_label_flow.set(False)
+            self.v_status.set(False)
+            self.v_check.set(False)
+            self.v_selftest.set(False)
+            self.v_watch.set(False)
+            self.v_learn.set(False)
+        self._refresh_constraints()
+
+    def _on_discover_change(self):
+        if self.v_discover.get():
+            self.v_label.set(False)
+            self.v_label_flow.set(False)
+            self.v_status.set(False)
+            self.v_check.set(False)
+            self.v_selftest.set(False)
+            self.v_watch.set(False)
+            self.v_learn.set(False)
         self._refresh_constraints()
 
     def _refresh_constraints(self):
-        special = self.v_label.get() or self.v_status.get() or self.v_check.get() or self.v_selftest.get()
+        special = (
+            self.v_label.get()
+            or self.v_discover.get()
+            or self.v_status.get()
+            or self.v_check.get()
+            or self.v_selftest.get()
+        )
         watch = self.v_watch.get()
         lock_learn = special
         lock_watch = special
@@ -241,11 +283,12 @@ class ScanGui(tk.Tk):
         self.cb_watch.configure(state="disabled" if lock_watch else "normal")
         self.cb_label_flow.configure(state="normal" if self.v_label.get() else "disabled")
 
-        for cb in (self.cb_label, self.cb_status, self.cb_check, self.cb_selftest):
+        for cb in (self.cb_label, self.cb_discover, self.cb_status, self.cb_check, self.cb_selftest):
             cb.configure(state="disabled" if watch else "normal")
 
         self.ent_watch.configure(state="normal" if watch else "disabled")
         self.ent_label.configure(state="normal" if self.v_label.get() else "disabled")
+        self.ent_discovery.configure(state="normal" if self.v_discover.get() else "disabled")
 
     def _build_cmd(self):
         if not os.path.isfile(SCAN_PY):
@@ -265,6 +308,11 @@ class ScanGui(tk.Tk):
             cmd += ["--label", "--label-limit", str(limit)]
             if self.v_label_flow.get():
                 cmd.append("--label-flow")
+        if self.v_discover.get():
+            limit = int(self.v_discovery_limit.get().strip() or "1000")
+            if limit < 1 or limit > 1000:
+                raise ValueError("Discovery limit must be between 1 and 1000.")
+            cmd += ["--discover", "--discovery-limit", str(limit)]
         if self.v_watch.get():
             seconds = int(self.v_watch_seconds.get().strip() or "900")
             if seconds < 1:

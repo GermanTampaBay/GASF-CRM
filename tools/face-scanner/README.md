@@ -42,7 +42,7 @@ extract it, and double-click `Install-GASFFaceScanner.cmd`. The installer:
 
 The laptop does not need Git or this repository. Re-running a newer installer
 updates scripts and dependencies while preserving its scanner key,
-engine/tolerance tuning, and local `faces.db`. Use
+engine/tolerance/discovery tuning, and local `faces.db`. Use
 `-InstallScheduledTask -TaskIntervalMinutes 30` when unattended polling is
 wanted; it is deliberately not enabled by default.
 
@@ -155,8 +155,9 @@ face rectangles use the same orientation Edge displays.
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
 | `python scan.py --label --label-flow` | Mature refinement pass: learn corrections, face-scan new photos, label only unresolved work, relearn those labels, then run the full face/caption scan. |
+| `python scan.py --discover` | Refresh unresolved observations, cluster them locally, and open the loopback-only People Discovery contact-sheet board. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
-| `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning and `--label`. Useful for "new uploads only" runs. |
+| `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning, `--label`, and `--discover`. Useful for "new uploads only" runs. |
 | `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
 | `python scan.py --selftest` | Exercise the non-ML plumbing. Needs no backend, no config, no network. |
@@ -175,6 +176,7 @@ python scan-gui.py
 - Tick options, click **Start**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
 - In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
+- In discovery mode, each contact sheet is a conservative, engine-isolated cluster. Open it, deselect mistakes, type one known or new person name, and confirm. That one name applies to every selected face. Unselected faces remain unknown and are reclustered; **Dismiss selected locally** suppresses obvious detector mistakes without changing or deleting the WordPress photo.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
 - The labeler has live outline/opacity settings plus zoom, fit, center, and pan controls. You can also drag the image to pan, double-click to fit, and use Ctrl+wheel to zoom.
 - In the WordPress photo editor, **Not in photo** removes one wrong person suggestion and remembers that photo/person rejection. Later scans may suggest other people, but cannot resurrect that rejected person or auto-accept them on that photo.
@@ -248,6 +250,31 @@ That second path means group photos can now teach the model without guessing
 which name belongs to which face. A person is not offered as a suggestion until
 it has **at least three** examples.
 
+### People Discovery stays local
+
+`--discover` stores unresolved observations and their clusters only in
+`faces.db`. Each row includes the local embedding plus review context such as
+the photo id, detector face index, displayed-pixel rectangle and dimensions,
+date taken/uploaded when available, and trusted event/place context. Clusters
+never mix recognition engines.
+
+The board listens only on a random `127.0.0.1` port and uses a per-run random
+token, restrictive browser headers, request limits, bounded image caching, and
+stale-view guards. Representative crops are generated locally after the board
+fetches a protected library image. No embedding, centroid, cluster template, or
+distance is sent to WordPress.
+
+Naming sends only the selected photo ids, displayed-pixel boxes and dimensions,
+and the one human-entered name. WordPress adds those reviewed box-to-name facts
+without replacing unrelated labels on the photo. The next `--learn` pass picks
+them up as explicit training examples.
+
+`"discovery_tolerance"` is a separate, deliberately conservative distance
+threshold; lower values create smaller, stricter clusters. The default is
+engine-specific. `"discovery_limit"` caps preparation at the latest 1,000
+approved library photos. The CLI `--discovery-limit N` and the existing upload
+date flags can narrow a pass further.
+
 ---
 
 ## Running it on a schedule
@@ -292,7 +319,8 @@ interchangeable:
 Every reference face is stored in `faces.db` **stamped with the engine that
 produced it**, and the scanner only ever compares a face against references from
 the same engine. Switching engines is therefore safe: the new one simply
-relearns into its own vectors and never misreads the other's. `--status` shows
+relearns into its own vectors and never misreads the other's. Unknown
+observations and clusters carry the same engine boundary. `--status` shows
 the counts per engine and marks the active one.
 
 ## Tuning the tolerance

@@ -160,17 +160,27 @@ function Write-Config(
     }
     $engine = "auto"
     $tolerance = $null
+    $discoveryTolerance = $null
+    $discoveryLimit = 1000
     if ($existing) {
         $engineProperty = $existing.PSObject.Properties["engine"]
         $toleranceProperty = $existing.PSObject.Properties["tolerance"]
+        $discoveryToleranceProperty = $existing.PSObject.Properties["discovery_tolerance"]
+        $discoveryLimitProperty = $existing.PSObject.Properties["discovery_limit"]
         if ($engineProperty -and $engineProperty.Value) { $engine = [string]$engineProperty.Value }
         if ($toleranceProperty) { $tolerance = $toleranceProperty.Value }
+        if ($discoveryToleranceProperty) { $discoveryTolerance = $discoveryToleranceProperty.Value }
+        if ($discoveryLimitProperty -and $discoveryLimitProperty.Value) {
+            $discoveryLimit = [int]$discoveryLimitProperty.Value
+        }
     }
     $config = [ordered]@{
         url = $Url.TrimEnd("/")
         key = $Key
         engine = $engine
         tolerance = $tolerance
+        discovery_tolerance = $discoveryTolerance
+        discovery_limit = $discoveryLimit
         caption_model = $Model
         caption_prompt = "Write a concise, factual archive description that prioritizes the event, activity, setting, and clearly visible details."
         caption_url = "http://127.0.0.1:11434/api/generate"

@@ -600,6 +600,102 @@ function gasf_crm_face_labels_record( $attachment_id, array $map ) {
 	}
 }
 
+/**
+ * Add reviewed discovery boxes without replacing unrelated labels on a photo.
+ *
+ * The scanner sends only non-biometric facts: a photo id, displayed-pixel box,
+ * and one human-entered name shared by the selected occurrences.
+ */
+function gasf_crm_face_discovery_labels_record( $raw_name, array $occurrences ) {
+	$name = trim( sanitize_text_field( (string) $raw_name ) );
+	$len  = function_exists( 'mb_strlen' ) ? mb_strlen( $name ) : strlen( $name );
+	if ( '' === $name || $len > 120 ) {
+		return new WP_Error( 'gasf_crm_bad', 'A person name of 1 to 120 characters is required.', array( 'status' => 400 ) );
+	}
+	if ( ! $occurrences || count( $occurrences ) > 100 ) {
+		return new WP_Error( 'gasf_crm_bad', 'Select between 1 and 100 face occurrences.', array( 'status' => 400 ) );
+	}
+
+	$groups = array();
+	$keys   = array();
+	foreach ( $occurrences as $occurrence ) {
+		if ( ! is_array( $occurrence ) ) {
+			return new WP_Error( 'gasf_crm_bad', 'Every occurrence must be an object.', array( 'status' => 400 ) );
+		}
+		$key = trim( sanitize_text_field( (string) ( $occurrence['client_key'] ?? '' ) ) );
+		$id  = (int) ( $occurrence['photo'] ?? 0 );
+		$box = array_map( 'intval', (array) ( $occurrence['box'] ?? array() ) );
+		$iw  = (int) ( $occurrence['image_width'] ?? 0 );
+		$ih  = (int) ( $occurrence['image_height'] ?? 0 );
+		if ( ! preg_match( '/^[a-zA-Z0-9:_-]{1,64}$/', $key ) || isset( $keys[ $key ] ) ) {
+			return new WP_Error( 'gasf_crm_bad', 'Occurrence keys must be unique safe identifiers.', array( 'status' => 400 ) );
+		}
+		if ( ! $id || ! gasf_crm_photo_in_library( $id ) || get_post_meta( $id, '_gasf_photo_flyer', true ) ) {
+			return new WP_Error( 'gasf_crm_404', 'A selected photo is no longer in the library.', array( 'status' => 404 ) );
+		}
+		if (
+			4 !== count( $box )
+			|| $box[0] < 0
+			|| $box[1] < 0
+			|| $box[2] <= 0
+			|| $box[3] <= 0
+			|| $iw < 1
+			|| $ih < 1
+			|| $iw > 50000
+			|| $ih > 50000
+			|| $box[0] + $box[2] > $iw
+			|| $box[1] + $box[3] > $ih
+		) {
+			return new WP_Error( 'gasf_crm_bad', 'A selected face box is outside its displayed photo dimensions.', array( 'status' => 400 ) );
+		}
+		$keys[ $key ] = true;
+		$groups[ $id ][] = array(
+			'client_key' => $key,
+			'box'        => array_values( $box ),
+		);
+	}
+
+	$applied = array();
+	$busy    = array();
+	$stored  = 0;
+	foreach ( $groups as $id => $items ) {
+		$lock = gasf_crm_faces_try_lock( $id, 'discover' );
+		if ( '' === $lock ) {
+			$busy = array_merge( $busy, wp_list_pluck( $items, 'client_key' ) );
+			continue;
+		}
+		try {
+			$labels = array();
+			foreach ( $items as $item ) {
+				$labels[] = array( 'name' => $name, 'box' => $item['box'] );
+			}
+			$stored += (int) gasf_crm_face_labels_store( $id, $labels, false );
+			$have = gasf_crm_face_labels_for( $id );
+			foreach ( $items as $item ) {
+				foreach ( $have as $label ) {
+					if (
+						$item['box'] === (array) ( $label['box'] ?? array() )
+						&& gasf_crm_face_name_same( $name, (string) ( $label['name'] ?? '' ) )
+					) {
+						$applied[] = $item['client_key'];
+						break;
+					}
+				}
+			}
+		} finally {
+			gasf_crm_faces_unlock( $id, 'discover', $lock );
+		}
+	}
+
+	return array(
+		'ok'      => ! $busy && count( $applied ) === count( $occurrences ),
+		'name'    => $name,
+		'applied' => array_values( $applied ),
+		'busy'    => array_values( $busy ),
+		'stored'  => $stored,
+	);
+}
+
 /** Sanitized face labels kept for scanner learning. */
 function gasf_crm_face_labels_for( $attachment_id ) {
 	$id  = (int) $attachment_id;
@@ -702,7 +798,7 @@ function gasf_crm_faces_try_lock( $attachment_id, $kind, $ttl = 300 ) {
 	$id   = (int) $attachment_id;
 	$kind = preg_replace( '/[^a-z0-9_-]/i', '', (string) $kind );
 	if ( ! $id || '' === $kind ) { return ''; }
-	if ( in_array( $kind, array( 'scan', 'label', 'reject' ), true ) ) { $kind = 'write'; }
+	if ( in_array( $kind, array( 'scan', 'label', 'reject', 'discover' ), true ) ) { $kind = 'write'; }
 
 	$key   = '_gasf_face_lock_' . $kind;
 	$token = wp_generate_uuid4();
@@ -723,7 +819,7 @@ function gasf_crm_faces_unlock( $attachment_id, $kind, $token ) {
 	$id   = (int) $attachment_id;
 	$kind = preg_replace( '/[^a-z0-9_-]/i', '', (string) $kind );
 	if ( ! $id || '' === $kind || '' === (string) $token ) { return; }
-	if ( in_array( $kind, array( 'scan', 'label', 'reject' ), true ) ) { $kind = 'write'; }
+	if ( in_array( $kind, array( 'scan', 'label', 'reject', 'discover' ), true ) ) { $kind = 'write'; }
 	$key  = '_gasf_face_lock_' . $kind;
 	$have = json_decode( (string) get_post_meta( $id, $key, true ), true );
 	if ( ! is_array( $have ) || (string) ( $have['token'] ?? '' ) !== (string) $token ) { return; }
@@ -926,6 +1022,9 @@ add_action( 'rest_api_init', function () {
 					'id'            => (int) $id,
 					'url'           => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
 					'people'        => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
+					'labels'        => gasf_crm_face_labels_for( $id ),
+					'rejected'      => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
+					'uploaded_at'   => (string) get_post_field( 'post_date_gmt', $id ),
 					'caption_context' => gasf_crm_caption_context( $id ),
 					'needs_faces'   => $needs_faces,
 					'needs_caption' => $needs_caption,
@@ -1189,6 +1288,26 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/discover-label', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$in     = (array) $req->get_json_params();
+			$result = gasf_crm_face_discovery_labels_record(
+				(string) ( $in['name'] ?? '' ),
+				(array) ( $in['occurrences'] ?? array() )
+			);
+			if ( is_wp_error( $result ) ) { return $result; }
+			gasf_crm_log( sprintf(
+				'CRM faces: People Discovery stored %d additive label change(s), verified %d occurrence(s), and left %d busy',
+				(int) ( $result['stored'] ?? 0 ),
+				count( (array) ( $result['applied'] ?? array() ) ),
+				count( (array) ( $result['busy'] ?? array() ) )
+			) );
+			return $result;
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/faces/reject', array(
 		'methods'             => 'POST',
 		'permission_callback' => $volunteer_guard,
@@ -1310,6 +1429,8 @@ add_action( 'rest_api_init', function () {
 					'people' => array_map( 'html_entity_decode', $people ),
 					'labels' => gasf_crm_face_labels_for( $id ),
 					'rejected' => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
+					'uploaded_at' => (string) get_post_field( 'post_date_gmt', $id ),
+					'caption_context' => gasf_crm_caption_context( $id ),
 					'pipeline' => gasf_crm_faces_photo_state( $id ),
 				);
 			}

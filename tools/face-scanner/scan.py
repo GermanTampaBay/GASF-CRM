@@ -5,6 +5,7 @@ GASF-CRM face scanner — runs on a private machine, never on the web host.
     python scan.py                 # scan whatever is waiting, then stop
     python scan.py --learn         # refresh the reference set first
     python scan.py --label --label-flow  # mature learn/scan/label refinement loop
+    python scan.py --discover      # cluster unresolved faces and open the local board
     python scan.py --watch 900     # keep going, learning then scanning, every 15 min
     python scan.py --uploaded-after 2026-08-01   # only scan newer uploads
     python scan.py --status        # what do I know, and what is waiting
@@ -127,6 +128,10 @@ DEFAULT_TOLERANCE = {
     "insightface": 0.50,        # cosine distance (1 - similarity); sim >= 0.50
     "face_recognition": 0.50,   # euclidean; the library's own default is 0.60
 }
+DEFAULT_DISCOVERY_TOLERANCE = {
+    "insightface": 0.32,
+    "face_recognition": 0.42,
+}
 
 # Below this many reference faces, a person is not offered at all. One photo of
 # somebody is an accident waiting to happen — a bad angle becomes "the system
@@ -219,6 +224,32 @@ def cfg_tolerance(cfg, engine):
         except (TypeError, ValueError):
             sys.exit(f"tolerance must be a number, got {raw!r}")
     return DEFAULT_TOLERANCE.get(engine, 0.50)
+
+
+def cfg_discovery_tolerance(cfg, engine):
+    raw = os.environ.get(
+        "GASF_FACE_DISCOVERY_TOLERANCE",
+        cfg.get("discovery_tolerance", ""),
+    )
+    if raw not in ("", None):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            sys.exit(f"discovery_tolerance must be a number, got {raw!r}")
+        if value <= 0:
+            sys.exit("discovery_tolerance must be greater than zero")
+        return value
+    short = str(engine or "").split(":", 1)[0]
+    return DEFAULT_DISCOVERY_TOLERANCE.get(short, 0.35)
+
+
+def cfg_discovery_limit(cfg):
+    raw = os.environ.get("GASF_FACE_DISCOVERY_LIMIT", cfg.get("discovery_limit", "1000"))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"discovery_limit must be an integer, got {raw!r}")
+    return max(1, min(1000, value))
 
 
 def cfg_caption_model(cfg):
@@ -689,7 +720,7 @@ def local_caption(image_bytes, cfg, metadata=None):
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     _migrate(conn)
     return conn
 
@@ -713,6 +744,46 @@ def _migrate(conn):
            )"""
     )
     conn.execute("CREATE TABLE IF NOT EXISTS state (k TEXT PRIMARY KEY, v TEXT)")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS unknown_faces (
+               id INTEGER PRIMARY KEY,
+               engine TEXT NOT NULL,
+               photo_id INTEGER NOT NULL,
+               face_key TEXT NOT NULL,
+               box_x INTEGER NOT NULL,
+               box_y INTEGER NOT NULL,
+               box_w INTEGER NOT NULL,
+               box_h INTEGER NOT NULL,
+               image_width INTEGER NOT NULL,
+               image_height INTEGER NOT NULL,
+               image_url TEXT NOT NULL DEFAULT '',
+               taken_at TEXT NOT NULL DEFAULT '',
+               uploaded_at TEXT NOT NULL DEFAULT '',
+               context_json TEXT NOT NULL DEFAULT '{}',
+               vector BLOB NOT NULL,
+               cluster_id TEXT NOT NULL DEFAULT '',
+               updated_at INTEGER NOT NULL,
+               UNIQUE(engine, photo_id, face_key)
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS unknown_clusters (
+               cluster_id TEXT PRIMARY KEY,
+               engine TEXT NOT NULL,
+               anchor_unknown_id INTEGER NOT NULL,
+               member_count INTEGER NOT NULL DEFAULT 0,
+               updated_at INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS unknown_dismissals (
+               engine TEXT NOT NULL,
+               photo_id INTEGER NOT NULL,
+               face_key TEXT NOT NULL,
+               dismissed_at INTEGER NOT NULL,
+               PRIMARY KEY(engine, photo_id, face_key)
+           )"""
+    )
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info(refs)")}
     if "engine" not in cols:  # a database written before backends existed
@@ -749,6 +820,14 @@ def _migrate(conn):
         conn.execute("ALTER TABLE refs_new RENAME TO refs")
 
     conn.execute("CREATE INDEX IF NOT EXISTS refs_person ON refs(engine, person)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS unknown_faces_engine_cluster "
+        "ON unknown_faces(engine, cluster_id, id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS unknown_faces_photo "
+        "ON unknown_faces(engine, photo_id)"
+    )
     conn.commit()
 
 
@@ -812,6 +891,210 @@ def load_references(conn, engine):
     return {p: np.vstack(vs) for p, vs in vectors.items() if len(vs) >= MIN_REFERENCES}
 
 
+def _unknown_face_key(index):
+    return f"i:{int(index)}"
+
+
+def _photo_context(photo):
+    raw = photo.get("caption_context") if isinstance(photo, dict) else {}
+    raw = raw if isinstance(raw, dict) else {}
+    clean = caption_context(raw)
+    return {
+        "taken_at": str(raw.get("taken_at") or clean.get("date_taken") or "")[:40],
+        "uploaded_at": str(photo.get("uploaded_at") or "")[:40],
+        "context_json": json.dumps(clean, ensure_ascii=True, sort_keys=True),
+        "image_url": str(photo.get("url") or ""),
+    }
+
+
+def reconcile_unknown_photo(conn, engine, photo, observations):
+    """Make one photo's unresolved local observations match the latest detection."""
+    photo_id = int(photo["id"])
+    metadata = _photo_context(photo)
+    dismissed = {
+        row[0]
+        for row in conn.execute(
+            """SELECT face_key FROM unknown_dismissals
+               WHERE engine = ? AND photo_id = ?""",
+            (engine, photo_id),
+        )
+    }
+    rows = []
+    for observation in observations:
+        if str(observation["face_key"]) in dismissed:
+            continue
+        box = observation["box"]
+        vector = np.asarray(observation["vector"], dtype=np.float32)
+        rows.append(
+            (
+                engine,
+                photo_id,
+                str(observation["face_key"]),
+                int(box[0]),
+                int(box[1]),
+                int(box[2]),
+                int(box[3]),
+                int(observation["image_width"]),
+                int(observation["image_height"]),
+                metadata["image_url"],
+                metadata["taken_at"],
+                metadata["uploaded_at"],
+                metadata["context_json"],
+                vector.tobytes(),
+                int(time.time()),
+            )
+        )
+
+    keep = {row[2] for row in rows}
+    with conn:
+        if keep:
+            marks = ",".join("?" for _ in keep)
+            conn.execute(
+                f"""DELETE FROM unknown_faces
+                    WHERE engine = ? AND photo_id = ? AND face_key NOT IN ({marks})""",
+                (engine, photo_id, *sorted(keep)),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM unknown_faces WHERE engine = ? AND photo_id = ?",
+                (engine, photo_id),
+            )
+        conn.executemany(
+            """INSERT INTO unknown_faces (
+                   engine, photo_id, face_key,
+                   box_x, box_y, box_w, box_h,
+                   image_width, image_height, image_url,
+                   taken_at, uploaded_at, context_json, vector, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(engine, photo_id, face_key) DO UPDATE SET
+                   box_x = excluded.box_x,
+                   box_y = excluded.box_y,
+                   box_w = excluded.box_w,
+                   box_h = excluded.box_h,
+                   image_width = excluded.image_width,
+                   image_height = excluded.image_height,
+                   image_url = excluded.image_url,
+                   taken_at = excluded.taken_at,
+                   uploaded_at = excluded.uploaded_at,
+                   context_json = excluded.context_json,
+                   vector = excluded.vector,
+                   updated_at = excluded.updated_at""",
+            rows,
+        )
+    return len(rows)
+
+
+def unresolved_observations(photo, found, references, backend, tolerance, image_width, image_height):
+    """Return only faces not resolved by explicit truth or a non-rejected match."""
+    boxes = []
+    vectors = []
+    for box_css, vector in found:
+        box = clamp_box_xywh(css_box_to_xywh(box_css), image_width, image_height)
+        if box is None:
+            continue
+        boxes.append(box)
+        vectors.append(vector)
+
+    explicit = set()
+    labels = [item for item in (photo.get("labels") or []) if isinstance(item, dict)]
+    used = set()
+    for label in labels:
+        target = label.get("box") or []
+        name = str(label.get("name") or "").strip()
+        if not name or not isinstance(target, (list, tuple)) or len(target) != 4:
+            continue
+        target = [int(value) for value in target]
+        best_i, best_iou = -1, 0.0
+        for index, box in enumerate(boxes):
+            if index in used:
+                continue
+            overlap = box_iou_xywh(target, box)
+            if overlap > best_iou:
+                best_i, best_iou = index, overlap
+        if best_i >= 0 and best_iou >= 0.15:
+            explicit.add(best_i)
+            used.add(best_i)
+
+    one_face_truth = len(boxes) == 1 and len(
+        [name for name in (photo.get("people") or []) if str(name).strip()]
+    ) == 1
+    rejected = photo.get("rejected") or []
+    unknown = []
+    for index, (box, vector) in enumerate(zip(boxes, vectors)):
+        resolved = index in explicit or (index == 0 and one_face_truth)
+        if not resolved:
+            name, _ = identify(vector, references, backend, tolerance)
+            resolved = bool(name) and not _face_name_rejected(name, rejected)
+        if resolved:
+            continue
+        unknown.append(
+            {
+                "face_key": _unknown_face_key(index),
+                "box": box,
+                "image_width": image_width,
+                "image_height": image_height,
+                "vector": vector,
+            }
+        )
+    return unknown
+
+
+def cluster_unknown_faces(conn, backend, threshold):
+    """Deterministic complete-link clustering, isolated to one recognition engine."""
+    raw = conn.execute(
+        """SELECT id, vector FROM unknown_faces
+           WHERE engine = ? ORDER BY id ASC""",
+        (backend.name,),
+    ).fetchall()
+    observations = [
+        {"id": int(row[0]), "vector": np.frombuffer(row[1], dtype=np.float32)}
+        for row in raw
+    ]
+    clusters = []
+    for observation in observations:
+        candidates = []
+        for cluster in clusters:
+            matrix = np.vstack([member["vector"] for member in cluster])
+            distances = backend.distances(matrix, observation["vector"])
+            farthest = float(np.max(distances))
+            if farthest <= threshold:
+                candidates.append((farthest, cluster[0]["id"], cluster))
+        if candidates:
+            min(candidates, key=lambda item: (item[0], item[1]))[2].append(observation)
+        else:
+            clusters.append([observation])
+
+    now = int(time.time())
+    assigned = []
+    with conn:
+        conn.execute(
+            "UPDATE unknown_faces SET cluster_id = '' WHERE engine = ?",
+            (backend.name,),
+        )
+        conn.execute(
+            "DELETE FROM unknown_clusters WHERE engine = ?",
+            (backend.name,),
+        )
+        for cluster in clusters:
+            anchor = int(cluster[0]["id"])
+            digest = hashlib.sha256(f"{backend.name}:{anchor}".encode("utf-8")).hexdigest()[:16]
+            cluster_id = f"unknown-{digest}"
+            ids = [int(member["id"]) for member in cluster]
+            conn.execute(
+                """INSERT INTO unknown_clusters (
+                       cluster_id, engine, anchor_unknown_id, member_count, updated_at
+                   ) VALUES (?, ?, ?, ?, ?)""",
+                (cluster_id, backend.name, anchor, len(ids), now),
+            )
+            marks = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE unknown_faces SET cluster_id = ? WHERE id IN ({marks})",
+                (cluster_id, *ids),
+            )
+            assigned.append((cluster_id, ids))
+    return assigned
+
+
 # --------------------------------------------------------------------------- identify
 
 
@@ -855,6 +1138,496 @@ def box_iou_xywh(a, b):
     area_b = float(max(0, bw) * max(0, bh))
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+# --------------------------------------------------------------------------- people discovery
+
+
+def prepare_unknown_faces(
+    api,
+    conn,
+    backend,
+    tolerance,
+    limit=1000,
+    uploaded_after="",
+    uploaded_before="",
+    verbose=True,
+):
+    """Refresh local unknown observations from approved library photos."""
+    params = {"limit": max(1, min(1000, int(limit)))}
+    if uploaded_after:
+        params["after"] = uploaded_after
+    if uploaded_before:
+        params["before"] = uploaded_before
+    data = api.get("/label-queue", **params)
+    photos = list(data.get("photos") or [])
+    references = load_references(conn, backend.name)
+    people = []
+    try:
+        people_data = api.get("/people")
+        people = [
+            str(name).strip()
+            for name in (people_data.get("people") or [])
+            if str(name).strip()
+        ]
+    except requests.RequestException as e:
+        if verbose:
+            print(f"people list unavailable: {e}")
+
+    processed = unknown_count = failed = 0
+    for index, photo in enumerate(photos, start=1):
+        photo_id = int(photo["id"])
+        try:
+            image_bytes = api.image(photo["url"])
+            pixels = display_rgb_array(image_bytes)
+            found = backend.embed_rgb(pixels)
+            image_height, image_width = pixels.shape[:2]
+            unknown = unresolved_observations(
+                photo,
+                found,
+                references,
+                backend,
+                tolerance,
+                image_width,
+                image_height,
+            )
+            unknown_count += reconcile_unknown_photo(
+                conn,
+                backend.name,
+                photo,
+                unknown,
+            )
+            processed += 1
+        except (requests.RequestException, RuntimeError, ValueError, OSError) as e:
+            failed += 1
+            if verbose:
+                print(f"  #{photo_id}: discovery preparation skipped ({e})")
+        if verbose and (index % 25 == 0 or index == len(photos)):
+            print(
+                f"discovery prep: {index}/{len(photos)} photos checked, "
+                f"{unknown_count} unresolved occurrence(s)"
+            )
+    return {
+        "photos": processed,
+        "unknown": unknown_count,
+        "failed": failed,
+        "people": people,
+    }
+
+
+def discovery_metadata(conn, engine):
+    rows = conn.execute(
+        """SELECT u.id, u.cluster_id, u.photo_id, u.face_key,
+                  u.box_x, u.box_y, u.box_w, u.box_h,
+                  u.image_width, u.image_height,
+                  u.taken_at, u.uploaded_at, u.context_json
+           FROM unknown_faces u
+           WHERE u.engine = ? AND u.cluster_id <> ''
+           ORDER BY u.cluster_id, u.id""",
+        (engine,),
+    ).fetchall()
+    grouped = {}
+    for row in rows:
+        context = {}
+        try:
+            context = json.loads(row[12] or "{}")
+        except json.JSONDecodeError:
+            context = {}
+        occurrence = {
+            "id": int(row[0]),
+            "photo": int(row[2]),
+            "face_key": row[3],
+            "box": [int(row[4]), int(row[5]), int(row[6]), int(row[7])],
+            "image_width": int(row[8]),
+            "image_height": int(row[9]),
+            "taken_at": row[10] or "",
+            "uploaded_at": row[11] or "",
+            "context": context,
+        }
+        grouped.setdefault(row[1], []).append(occurrence)
+
+    clusters = []
+    for cluster_id, occurrences in grouped.items():
+        dates = sorted(
+            value[:10]
+            for item in occurrences
+            for value in (item["taken_at"] or item["uploaded_at"],)
+            if value
+        )
+        clusters.append(
+            {
+                "id": cluster_id,
+                "count": len(occurrences),
+                "first_date": dates[0] if dates else "",
+                "last_date": dates[-1] if dates else "",
+                "occurrences": occurrences,
+            }
+        )
+    clusters.sort(key=lambda item: (-item["count"], item["id"]))
+    return clusters
+
+
+def _discovery_crop(image_bytes, box, max_px=280):
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        image = ImageOps.exif_transpose(source).convert("RGB")
+    x, y, width, height = [int(value) for value in box]
+    padding = max(8, int(max(width, height) * 0.22))
+    left = max(0, x - padding)
+    top = max(0, y - padding)
+    right = min(image.width, x + width + padding)
+    bottom = min(image.height, y + height + padding)
+    if right <= left or bottom <= top:
+        raise ValueError("The stored face rectangle is outside the photo.")
+    crop = image.crop((left, top, right, bottom))
+    crop.thumbnail((max_px, max_px))
+    output = io.BytesIO()
+    crop.save(output, format="JPEG", quality=82, optimize=True)
+    return output.getvalue()
+
+
+def _discovery_ui_html(session_token):
+    page = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GASF People Discovery</title>
+<style>
+:root{color-scheme:light;--blue:#135e96;--ink:#1d2327;--muted:#646970;--line:#dcdcde;--bg:#f6f7f7}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}
+header{position:sticky;top:0;z-index:3;display:flex;gap:16px;align-items:center;padding:14px 22px;background:#fff;border-bottom:1px solid var(--line)}
+h1{font-size:21px;margin:0}header p{margin:0;color:var(--muted);flex:1}.button,button{border:1px solid #2271b1;border-radius:4px;background:#2271b1;color:#fff;padding:8px 13px;font-weight:600;cursor:pointer}
+button.secondary{background:#fff;color:#2271b1}button.danger{background:#fff;color:#b32d2e;border-color:#b32d2e}
+main{padding:20px}.notice{max-width:900px;margin:0 0 18px;padding:12px 14px;background:#fff;border-left:4px solid var(--blue)}
+#clusters{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}
+.cluster{background:#fff;border:1px solid var(--line);border-radius:6px;overflow:hidden;cursor:pointer}.cluster:focus{outline:3px solid #72aee6}
+.sheet{display:grid;grid-template-columns:repeat(3,1fr);height:220px;background:#dcdcde;gap:2px}.sheet img{width:100%;height:100%;object-fit:cover;background:#eee}
+.cluster .meta{padding:11px 13px}.cluster strong{font-size:17px}.range{color:var(--muted);font-size:13px}
+#empty{padding:30px;background:#fff;border:1px solid var(--line)}
+.modal{position:fixed;inset:0;z-index:5;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:22px}.modal.on{display:flex}
+.dialog{background:#fff;width:min(1050px,100%);max-height:94vh;overflow:auto;border-radius:7px}.dialog header{position:sticky;padding:13px 16px}
+.dialog .body{padding:16px}.instruction{padding:10px 12px;background:#fcf0c3;border-left:4px solid #dba617;font-weight:600}
+.occurrences{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin:16px 0}.occ{border:2px solid #2271b1;border-radius:5px;background:#fff;overflow:hidden}.occ.off{border-color:#c3c4c7;opacity:.55}
+.occ img{display:block;width:100%;height:150px;object-fit:cover;background:#eee}.occ label{display:block;padding:8px}.occ small{display:block;color:var(--muted)}
+.actions{position:sticky;bottom:0;display:flex;gap:9px;align-items:end;padding:13px 0;background:#fff;border-top:1px solid var(--line)}
+.actions .name{flex:1}.actions label{display:block;font-weight:600}.actions input[type=text]{width:100%;padding:8px;border:1px solid #8c8f94;border-radius:4px}
+#message{min-height:22px;color:#b32d2e;font-weight:600}.busy{opacity:.6;pointer-events:none}
+</style></head><body>
+<header><h1>People Discovery</h1><p>Biometric vectors stay in this PC's local faces.db. WordPress receives only reviewed photo, box, and name facts.</p><button class="secondary" id="closeBoard">Close board</button></header>
+<main><div class="notice"><strong>Review before naming.</strong> Each card is a conservative local cluster. Open one, deselect any wrong faces, and type one name. That one name applies to every selected face.</div>
+<div id="clusters"></div><div id="empty" hidden>No unresolved faces are waiting. Run discovery again after new photos are scanned.</div></main>
+<div class="modal" id="modal"><section class="dialog"><header><h1 id="clusterTitle">Review cluster</h1><button class="secondary" id="closeModal">Back</button></header><div class="body">
+<div class="instruction">One name applies to all selected faces. Deselect mistakes before applying.</div>
+<div id="occurrences" class="occurrences"></div><div id="message"></div>
+<div class="actions"><div class="name"><label for="personName">Known or new person name</label><input id="personName" type="text" maxlength="120" list="people"></div>
+<datalist id="people"></datalist><button class="danger" id="dismissSelected">Dismiss selected locally</button><button id="applyName">Apply name to selected faces</button></div>
+</div></section></div>
+<script>
+const TOKEN=__DISCOVERY_TOKEN__;
+let meta={clusters:[],people:[]}, current=null, viewRevision=0, busy=false;
+const byId=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function call(path,options={}){options.headers={...(options.headers||{}),'X-GASF-Discovery-Token':TOKEN};if(options.body)options.headers['Content-Type']='application/json';const r=await fetch(path,options);let data=null;try{data=await r.json()}catch(e){}if(!r.ok)throw new Error(data?.error||`Request failed (${r.status})`);return data}
+async function putCrop(img,id,revision){try{const r=await fetch(`/api/crop?id=${encodeURIComponent(id)}`,{headers:{'X-GASF-Discovery-Token':TOKEN}});if(!r.ok)throw new Error();const blob=await r.blob();if(revision!==viewRevision)return;img.src=URL.createObjectURL(blob)}catch(e){if(revision===viewRevision)img.alt='Crop unavailable'}}
+function contextText(o){const c=o.context||{};return [...(c.events||[]),...(c.places||[])].slice(0,2).join(' / ')}
+function render(next){meta=next;const revision=++viewRevision;const root=byId('clusters');root.innerHTML='';byId('empty').hidden=meta.clusters.length>0;byId('people').innerHTML=(meta.people||[]).map(n=>`<option value="${esc(n)}">`).join('');
+meta.clusters.forEach((cluster,index)=>{const card=document.createElement('article');card.className='cluster';card.tabIndex=0;card.innerHTML=`<div class="sheet"></div><div class="meta"><strong>${cluster.count} occurrence${cluster.count===1?'':'s'}</strong><div class="range">${esc(cluster.first_date&&cluster.last_date?(cluster.first_date===cluster.last_date?cluster.first_date:`${cluster.first_date} to ${cluster.last_date}`):'Date unavailable')}</div></div>`;card.onclick=()=>openCluster(index);card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openCluster(index)}};const sheet=card.querySelector('.sheet');cluster.occurrences.slice(0,6).forEach(o=>{const img=document.createElement('img');img.alt=`Face from photo ${o.photo}`;sheet.appendChild(img);putCrop(img,o.id,revision)});root.appendChild(card)})}
+function openCluster(index){current=meta.clusters[index];if(!current)return;const revision=++viewRevision;byId('clusterTitle').textContent=`Review ${current.count} occurrence${current.count===1?'':'s'}`;byId('personName').value='';byId('message').textContent='';const root=byId('occurrences');root.innerHTML='';current.occurrences.forEach(o=>{const card=document.createElement('article');card.className='occ';card.innerHTML=`<img alt="Face crop from photo ${o.photo}"><label><input type="checkbox" value="${o.id}" checked> Photo #${o.photo}<small>${esc(o.taken_at||o.uploaded_at||'Date unavailable')}</small><small>${esc(contextText(o))}</small></label>`;const cb=card.querySelector('input');cb.onchange=()=>card.classList.toggle('off',!cb.checked);root.appendChild(card);putCrop(card.querySelector('img'),o.id,revision)});byId('modal').classList.add('on')}
+function selected(){return [...byId('occurrences').querySelectorAll('input:checked')].map(el=>Number(el.value))}
+function setBusy(value){busy=value;document.body.classList.toggle('busy',value)}
+async function applyName(){if(busy)return;const ids=selected(),name=byId('personName').value.trim();if(!ids.length){byId('message').textContent='Select at least one face.';return}if(!name){byId('message').textContent='Type the one name to apply to all selected faces.';return}if(!confirm(`Apply "${name}" to ${ids.length} selected face${ids.length===1?'':'s'}?`))return;setBusy(true);try{const out=await call('/api/name',{method:'POST',body:JSON.stringify({cluster:current.id,name,selected:ids})});byId('modal').classList.remove('on');render(out.meta);if(out.pending)alert(`${out.applied} face(s) saved. ${out.pending} stayed pending because WordPress reported them busy.`)}catch(e){byId('message').textContent=e.message}finally{setBusy(false)}}
+async function dismissSelected(){if(busy)return;const ids=selected();if(!ids.length){byId('message').textContent='Select at least one face to dismiss.';return}if(!confirm(`Dismiss ${ids.length} selected occurrence${ids.length===1?'':'s'} locally? The WordPress photos are not deleted or changed.`))return;setBusy(true);try{const out=await call('/api/dismiss',{method:'POST',body:JSON.stringify({cluster:current.id,selected:ids})});byId('modal').classList.remove('on');render(out.meta)}catch(e){byId('message').textContent=e.message}finally{setBusy(false)}}
+async function closeBoard(){try{await call('/api/close',{method:'POST',body:'{}'});document.body.innerHTML='<main><div class="notice"><strong>People Discovery closed.</strong> You may close this tab.</div></main>'}catch(e){alert(e.message)}}
+byId('closeModal').onclick=()=>{byId('modal').classList.remove('on');++viewRevision};byId('applyName').onclick=applyName;byId('dismissSelected').onclick=dismissSelected;byId('closeBoard').onclick=closeBoard;
+call('/api/meta').then(render).catch(e=>{byId('clusters').innerHTML=`<div class="notice">${esc(e.message)}</div>`});
+</script></body></html>"""
+    return page.replace("__DISCOVERY_TOKEN__", json.dumps(session_token))
+
+
+def local_discovery_board(api, conn, backend, threshold, people):
+    state = {
+        "token": secrets.token_urlsafe(32),
+        "done": threading.Event(),
+        "lock": threading.Lock(),
+        "db_lock": threading.RLock(),
+        "image_cache": OrderedDict(),
+        "people": list(people),
+    }
+
+    def current_meta():
+        with state["db_lock"]:
+            return {
+                "engine": backend.name,
+                "threshold": threshold,
+                "people": state["people"],
+                "clusters": discovery_metadata(conn, backend.name),
+            }
+
+    class DiscoveryHandler(BaseHTTPRequestHandler):
+        def _write(self, code, payload, ctype="application/json; charset=utf-8"):
+            body = payload if isinstance(payload, (bytes, bytearray)) else payload.encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            if ctype.startswith("text/html"):
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; img-src 'self' blob: data:; "
+                    "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                    "connect-src 'self'; frame-ancestors 'none'",
+                )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
+        def _json(self, code, payload):
+            return self._write(code, json.dumps(payload, ensure_ascii=True))
+
+        def _authorized(self):
+            supplied = self.headers.get("X-GASF-Discovery-Token", "")
+            return bool(supplied) and secrets.compare_digest(supplied, state["token"])
+
+        def _selected_rows(self, data):
+            cluster_id = str(data.get("cluster") or "")
+            raw_ids = data.get("selected") or []
+            if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 100:
+                raise ValueError("Select between 1 and 100 occurrences.")
+            try:
+                ids = sorted({int(value) for value in raw_ids if int(value) > 0})
+            except (TypeError, ValueError) as e:
+                raise ValueError("Selected occurrence ids must be integers.") from e
+            if not ids:
+                raise ValueError("Select at least one occurrence.")
+            marks = ",".join("?" for _ in ids)
+            with state["db_lock"]:
+                rows = conn.execute(
+                    f"""SELECT id, photo_id, face_key, box_x, box_y, box_w, box_h,
+                               image_width, image_height
+                        FROM unknown_faces
+                        WHERE engine = ? AND cluster_id = ? AND id IN ({marks})
+                        ORDER BY id""",
+                    (backend.name, cluster_id, *ids),
+                ).fetchall()
+            if len(rows) != len(ids):
+                raise ValueError("That cluster changed. Refresh the board and review it again.")
+            return rows
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            if parsed.path == "/":
+                supplied = (parse_qs(parsed.query or "").get("token") or [""])[0]
+                if not supplied or not secrets.compare_digest(supplied, state["token"]):
+                    return self._write(403, "Forbidden", "text/plain; charset=utf-8")
+                return self._write(
+                    200,
+                    _discovery_ui_html(state["token"]),
+                    "text/html; charset=utf-8",
+                )
+            if not self._authorized():
+                return self._json(403, {"error": "Forbidden"})
+            if parsed.path == "/api/meta":
+                return self._json(200, current_meta())
+            if parsed.path == "/api/crop":
+                try:
+                    occurrence_id = int((parse_qs(parsed.query).get("id") or ["0"])[0])
+                except (TypeError, ValueError):
+                    return self._json(400, {"error": "Invalid occurrence id."})
+                with state["db_lock"]:
+                    row = conn.execute(
+                        """SELECT photo_id, image_url, box_x, box_y, box_w, box_h
+                           FROM unknown_faces WHERE id = ? AND engine = ?""",
+                        (occurrence_id, backend.name),
+                    ).fetchone()
+                if row is None:
+                    return self._json(404, {"error": "No such occurrence."})
+                photo_id, image_url = int(row[0]), row[1]
+                with state["lock"]:
+                    image_bytes = state["image_cache"].get(photo_id)
+                    if image_bytes is not None:
+                        state["image_cache"].move_to_end(photo_id)
+                if image_bytes is None:
+                    try:
+                        image_bytes = api.image(image_url)
+                    except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
+                        return self._json(502, {"error": f"Could not load photo #{photo_id}: {e}"})
+                    with state["lock"]:
+                        state["image_cache"][photo_id] = image_bytes
+                        state["image_cache"].move_to_end(photo_id)
+                        while len(state["image_cache"]) > 6:
+                            state["image_cache"].popitem(last=False)
+                try:
+                    crop = _discovery_crop(image_bytes, row[2:6])
+                except (OSError, ValueError) as e:
+                    return self._json(422, {"error": str(e)})
+                return self._write(200, crop, "image/jpeg")
+            return self._json(404, {"error": "Not found"})
+
+        def do_POST(self):
+            parsed = urlparse(self.path)
+            if not self._authorized():
+                return self._json(403, {"error": "Forbidden"})
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                return self._json(400, {"error": "Invalid content length."})
+            if length < 0 or length > 64 * 1024:
+                return self._json(413, {"error": "Request too large."})
+            try:
+                data = json.loads((self.rfile.read(length) if length else b"{}").decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return self._json(400, {"error": "Invalid JSON."})
+
+            if parsed.path == "/api/close":
+                state["done"].set()
+                return self._json(200, {"ok": True})
+
+            if parsed.path == "/api/dismiss":
+                try:
+                    rows = self._selected_rows(data)
+                except ValueError as e:
+                    return self._json(409, {"error": str(e)})
+                now = int(time.time())
+                ids = [int(row[0]) for row in rows]
+                with state["db_lock"]:
+                    with conn:
+                        conn.executemany(
+                            """INSERT INTO unknown_dismissals (
+                                   engine, photo_id, face_key, dismissed_at
+                               ) VALUES (?, ?, ?, ?)
+                               ON CONFLICT(engine, photo_id, face_key) DO UPDATE SET
+                                   dismissed_at = excluded.dismissed_at""",
+                            [(backend.name, int(row[1]), str(row[2]), now) for row in rows],
+                        )
+                        marks = ",".join("?" for _ in ids)
+                        conn.execute(
+                            f"DELETE FROM unknown_faces WHERE id IN ({marks})",
+                            ids,
+                        )
+                    cluster_unknown_faces(conn, backend, threshold)
+                return self._json(
+                    200,
+                    {"ok": True, "dismissed": len(ids), "meta": current_meta()},
+                )
+
+            if parsed.path == "/api/name":
+                name = " ".join(str(data.get("name") or "").split())
+                if not name or len(name) > 120:
+                    return self._json(400, {"error": "Type a person name of 1 to 120 characters."})
+                try:
+                    rows = self._selected_rows(data)
+                except ValueError as e:
+                    return self._json(409, {"error": str(e)})
+                payload = []
+                for row in rows:
+                    payload.append(
+                        {
+                            "client_key": str(row[0]),
+                            "photo": int(row[1]),
+                            "box": [int(value) for value in row[3:7]],
+                            "image_width": int(row[7]),
+                            "image_height": int(row[8]),
+                        }
+                    )
+                try:
+                    result = api.post(
+                        "/discover-label",
+                        {"name": name, "occurrences": payload},
+                    )
+                except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
+                    return self._json(502, {"error": f"WordPress did not save the labels: {e}"})
+                applied_keys = {
+                    str(value) for value in (result.get("applied") or [])
+                }
+                applied_ids = [
+                    int(row[0]) for row in rows if str(row[0]) in applied_keys
+                ]
+                if applied_ids:
+                    marks = ",".join("?" for _ in applied_ids)
+                    with state["db_lock"]:
+                        with conn:
+                            conn.execute(
+                                f"DELETE FROM unknown_faces WHERE id IN ({marks})",
+                                applied_ids,
+                            )
+                        cluster_unknown_faces(conn, backend, threshold)
+                return self._json(
+                    200,
+                    {
+                        "ok": len(applied_ids) == len(rows),
+                        "applied": len(applied_ids),
+                        "pending": len(rows) - len(applied_ids),
+                        "meta": current_meta(),
+                    },
+                )
+            return self._json(404, {"error": "Not found"})
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), DiscoveryHandler)
+    server.daemon_threads = True
+    server.block_on_close = False
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    url = f"http://127.0.0.1:{port}/?token={state['token']}"
+    print(f"People Discovery board: http://127.0.0.1:{port}/")
+    _open_preview_html(url)
+    try:
+        while not state["done"].wait(0.25):
+            pass
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
+def run_discovery(
+    api,
+    conn,
+    backend,
+    tolerance,
+    threshold,
+    limit,
+    uploaded_after="",
+    uploaded_before="",
+    verbose=True,
+):
+    prepared = prepare_unknown_faces(
+        api,
+        conn,
+        backend,
+        tolerance,
+        limit,
+        uploaded_after,
+        uploaded_before,
+        verbose,
+    )
+    clusters = cluster_unknown_faces(conn, backend, threshold)
+    if verbose:
+        print(
+            f"discovery: {prepared['unknown']} unresolved occurrence(s) in "
+            f"{len(clusters)} conservative cluster(s) [{backend.name}, threshold {threshold:g}]"
+        )
+    if not clusters:
+        print("No unresolved faces are available for People Discovery.")
+        return 0
+    local_discovery_board(
+        api,
+        conn,
+        backend,
+        threshold,
+        prepared["people"],
+    )
+    return len(clusters)
 
 
 # --------------------------------------------------------------------------- local labeling
@@ -2198,11 +2971,16 @@ def scan(
                 needs_caption = bool(caption_key) and bool(p.get("needs_caption", True))
                 found = None
                 image_bytes = None
+                display_pixels = None
                 err = None
                 for attempt in range(MAX_SCAN_RETRIES):
                     try:
                         image_bytes = api.image(p["url"])
-                        found = backend.embed(image_bytes) if needs_faces else []
+                        if needs_faces:
+                            display_pixels = display_rgb_array(image_bytes)
+                            found = backend.embed_rgb(display_pixels)
+                        else:
+                            found = []
                         err = None
                         break
                     except Exception as e:
@@ -2252,11 +3030,32 @@ def scan(
                 if needs_faces:
                     already = {n.strip().lower() for n in p.get("people", [])}
                     boxes = []
-                    for (top, right, bottom, left), vector in found:
-                        box = [int(left), int(top), int(right - left), int(bottom - top)]
+                    image_height, image_width = display_pixels.shape[:2]
+                    unknown = unresolved_observations(
+                        p,
+                        found,
+                        references,
+                        backend,
+                        tolerance,
+                        image_width,
+                        image_height,
+                    )
+                    reconcile_unknown_photo(conn, backend.name, p, unknown)
+                    for box_css, vector in found:
+                        box = clamp_box_xywh(
+                            css_box_to_xywh(box_css),
+                            image_width,
+                            image_height,
+                        )
+                        if box is None:
+                            continue
                         boxes.append({"box": box})
                         name, conf = identify(vector, references, backend, tolerance)
-                        if not name or name.lower() in already:
+                        if (
+                            not name
+                            or name.lower() in already
+                            or _face_name_rejected(name, p.get("rejected") or [])
+                        ):
                             continue
                         faces.append(
                             {
@@ -2266,7 +3065,7 @@ def scan(
                             }
                         )
                     face_item.update({
-                        "found": len(found),
+                        "found": len(boxes),
                         "faces": faces,
                         "boxes": boxes,
                         "engine": backend.name,
@@ -2451,6 +3250,16 @@ def status(api, conn, cfg):
         if len(people) > 20:
             print(f"  ... and {len(people) - 20} more")
         print(f"  learned up to photo #{state_get(conn, state_key(eng, 'learned_to'), '0')}")
+
+    unknown_rows = conn.execute(
+        """SELECT engine, COUNT(*), COUNT(DISTINCT NULLIF(cluster_id, ''))
+           FROM unknown_faces GROUP BY engine ORDER BY engine"""
+    ).fetchall()
+    for eng, occurrences, clusters in unknown_rows:
+        print(
+            f"\nPeople Discovery [{eng}]: {int(occurrences)} unresolved occurrence(s), "
+            f"{int(clusters)} cluster(s)"
+        )
 
     if api is not None:
         try:
@@ -2718,6 +3527,140 @@ def selftest():
             "db: successful captions clear their failure counter",
         )
 
+        def unknown_photo(photo_id):
+            return {
+                "id": photo_id,
+                "url": f"selftest://{photo_id}",
+                "uploaded_at": "2026-08-08 01:00:00",
+                "caption_context": {
+                    "taken_at": "2026-07-04",
+                    "events": ["Selftest Event"],
+                },
+            }
+
+        def unknown_observation(value):
+            return {
+                "face_key": "i:0",
+                "box": [10, 10, 20, 20],
+                "image_width": 100,
+                "image_height": 80,
+                "vector": np.array([value, 0.0, 0.0], dtype=np.float32),
+            }
+
+        reconcile_unknown_photo(
+            conn,
+            backend.name,
+            unknown_photo(601),
+            [unknown_observation(0.0)],
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend.name,
+            unknown_photo(601),
+            [unknown_observation(0.02)],
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM unknown_faces
+                   WHERE engine = ? AND photo_id = 601""",
+                (backend.name,),
+            ).fetchone()[0] == 1,
+            "discovery db: reprocessing one engine/photo/face is idempotent",
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend.name,
+            unknown_photo(602),
+            [unknown_observation(0.10)],
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend.name,
+            unknown_photo(603),
+            [unknown_observation(0.20)],
+        )
+        first_clusters = cluster_unknown_faces(conn, backend, 0.15)
+        second_clusters = cluster_unknown_faces(conn, backend, 0.15)
+        sizes = sorted(len(ids) for _, ids in first_clusters)
+        check_that(
+            sizes == [1, 2],
+            "discovery clustering: complete-link blocks transitive chain over-merging",
+        )
+        check_that(
+            first_clusters == second_clusters,
+            "discovery clustering: unchanged reruns keep stable cluster ids and members",
+        )
+        reconcile_unknown_photo(
+            conn,
+            "other-engine",
+            unknown_photo(604),
+            [unknown_observation(0.02)],
+        )
+        cluster_unknown_faces(conn, backend, 0.15)
+        check_that(
+            conn.execute(
+                "SELECT cluster_id FROM unknown_faces WHERE engine = 'other-engine'"
+            ).fetchone()[0] == "",
+            "discovery clustering: another engine is never assigned into this engine's clusters",
+        )
+        rejected_unknown = unresolved_observations(
+            {"rejected": ["Rejected Person"]},
+            [((10, 30, 30, 10), np.zeros(3, dtype=np.float32))],
+            {"Rejected Person": np.zeros((3, 3), dtype=np.float32)},
+            backend,
+            0.5,
+            100,
+            80,
+        )
+        check_that(
+            len(rejected_unknown) == 1,
+            "discovery capture: rejecting one known person leaves the face available as unknown",
+        )
+        corrected_known = unresolved_observations(
+            {"labels": [{"name": "Corrected", "box": [10, 10, 20, 20]}]},
+            [((10, 30, 30, 10), np.zeros(3, dtype=np.float32))],
+            {},
+            backend,
+            0.5,
+            100,
+            80,
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend.name,
+            unknown_photo(601),
+            corrected_known,
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM unknown_faces
+                   WHERE engine = ? AND photo_id = 601""",
+                (backend.name,),
+            ).fetchone()[0] == 0,
+            "discovery capture: corrected explicit truth removes stale unknown observations",
+        )
+        with conn:
+            conn.execute(
+                """INSERT INTO unknown_dismissals (
+                       engine, photo_id, face_key, dismissed_at
+                   ) VALUES (?, 605, 'i:0', 1)""",
+                (backend.name,),
+            )
+        reconcile_unknown_photo(
+            conn,
+            backend.name,
+            unknown_photo(605),
+            [unknown_observation(0.3)],
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM unknown_faces
+                   WHERE engine = ? AND photo_id = 605""",
+                (backend.name,),
+            ).fetchone()[0] == 0,
+            "discovery db: locally dismissed detector mistakes stay dismissed",
+        )
+
         class LearnApi:
             def __init__(self, photo):
                 self.photo = photo
@@ -2791,6 +3734,16 @@ def selftest():
         conn = db()
         stamped = conn.execute("SELECT DISTINCT engine FROM refs").fetchone()[0]
         check_that(stamped == "face_recognition:dlib-hog", "db: legacy rows migrate to the dlib engine")
+        migrated_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        check_that(
+            {"unknown_faces", "unknown_clusters", "unknown_dismissals"}.issubset(migrated_tables),
+            "db: legacy databases gain discovery tables without losing references",
+        )
         conn.close()
     finally:
         globals()["DB_PATH"] = prev
@@ -3018,6 +3971,160 @@ def selftest():
         globals()["_collect_label_items"] = original_collect
         globals()["_open_preview_html"] = original_open
 
+    # People Discovery lifecycle: protected loopback board, local crop, reviewed
+    # non-biometric write contract, and local resolution after acknowledgement.
+    discovery_prev_db = globals()["DB_PATH"]
+    discovery_open = globals()["_open_preview_html"]
+    discovery_tmp = Path(tempfile.mkdtemp()) / "faces.db"
+    discovery_conn = None
+    discovery_thread = None
+    discovery_opened = {}
+    discovery_ready = threading.Event()
+    discovery_posts = []
+
+    class DiscoveryApi:
+        def __init__(self, image_bytes):
+            self.image_bytes = image_bytes
+
+        def image(self, _url):
+            return self.image_bytes
+
+        def post(self, path, payload):
+            if path != "/discover-label":
+                raise RuntimeError(f"unexpected discovery path {path}")
+            discovery_posts.append(payload)
+            return {
+                "ok": True,
+                "applied": [
+                    item["client_key"]
+                    for item in payload.get("occurrences", [])
+                ],
+            }
+
+    def capture_discovery_url(url):
+        discovery_opened["url"] = url
+        discovery_ready.set()
+
+    try:
+        from PIL import Image
+
+        image = Image.new("RGB", (100, 80), (80, 120, 160))
+        encoded = io.BytesIO()
+        image.save(encoded, format="JPEG")
+        globals()["DB_PATH"] = discovery_tmp
+        discovery_conn = db()
+        reconcile_unknown_photo(
+            discovery_conn,
+            backend.name,
+            {
+                "id": 701,
+                "url": "selftest://701",
+                "uploaded_at": "2026-08-08 01:00:00",
+                "caption_context": {"taken_at": "2026-07-04"},
+            },
+            [{
+                "face_key": "i:0",
+                "box": [20, 15, 30, 30],
+                "image_width": 100,
+                "image_height": 80,
+                "vector": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+            }],
+        )
+        cluster_unknown_faces(discovery_conn, backend, 0.15)
+        globals()["_open_preview_html"] = capture_discovery_url
+
+        def run_discovery_board():
+            local_discovery_board(
+                DiscoveryApi(encoded.getvalue()),
+                discovery_conn,
+                backend,
+                0.15,
+                ["Anna"],
+            )
+
+        discovery_thread = threading.Thread(target=run_discovery_board, daemon=True)
+        discovery_thread.start()
+        ready = discovery_ready.wait(3.0)
+        check_that(ready, "discovery UI: loopback board starts")
+        if ready:
+            board_url = discovery_opened["url"]
+            token = (parse_qs(urlparse(board_url).query).get("token") or [""])[0]
+            base = board_url.split("/?token=", 1)[0]
+            headers = {"X-GASF-Discovery-Token": token}
+            denied = requests.get(base + "/api/meta", timeout=3)
+            page = requests.get(board_url, timeout=3)
+            check_that(
+                denied.status_code == 403
+                and page.status_code == 200
+                and "One name applies to all selected faces" in page.text
+                and "default-src 'self'" in page.headers.get("Content-Security-Policy", ""),
+                "discovery UI: token guard, review warning, and restrictive CSP are active",
+            )
+            board_meta = requests.get(
+                base + "/api/meta",
+                headers=headers,
+                timeout=3,
+            ).json()
+            occurrence_id = board_meta["clusters"][0]["occurrences"][0]["id"]
+            crop = requests.get(
+                base + f"/api/crop?id={occurrence_id}",
+                headers=headers,
+                timeout=3,
+            )
+            check_that(
+                crop.status_code == 200
+                and crop.headers.get("Content-Type") == "image/jpeg",
+                "discovery UI: representative crops are generated locally",
+            )
+            named = requests.post(
+                base + "/api/name",
+                headers=headers,
+                json={
+                    "cluster": board_meta["clusters"][0]["id"],
+                    "name": "Anna",
+                    "selected": [occurrence_id],
+                },
+                timeout=3,
+            ).json()
+            sent_occurrence = discovery_posts[0]["occurrences"][0]
+            check_that(
+                named.get("applied") == 1
+                and set(sent_occurrence) == {
+                    "client_key",
+                    "photo",
+                    "box",
+                    "image_width",
+                    "image_height",
+                }
+                and "vector" not in json.dumps(discovery_posts[0]).lower(),
+                "discovery UI: WordPress receives only reviewed non-biometric facts",
+            )
+            check_that(
+                discovery_conn.execute(
+                    "SELECT COUNT(*) FROM unknown_faces WHERE engine = ?",
+                    (backend.name,),
+                ).fetchone()[0] == 0,
+                "discovery UI: acknowledged selections leave the local unknown queue",
+            )
+            requests.post(
+                base + "/api/close",
+                headers=headers,
+                json={},
+                timeout=3,
+            )
+            discovery_thread.join(timeout=4.0)
+            check_that(
+                not discovery_thread.is_alive(),
+                "discovery UI: close stops the loopback server",
+            )
+    except (ImportError, requests.RequestException, KeyError, IndexError) as e:
+        check_that(False, f"discovery UI: localhost lifecycle ({e})")
+    finally:
+        globals()["_open_preview_html"] = discovery_open
+        globals()["DB_PATH"] = discovery_prev_db
+        if discovery_conn is not None:
+            discovery_conn.close()
+
     # Mature label flow resolves known faces before asking for human work, then
     # incorporates the new labels before the full face/caption scan.
     original_learn = globals()["learn"]
@@ -3127,11 +4234,15 @@ def main():
                     help="with --label: learn/scan first, label unresolved faces, then relearn/rescan")
     ap.add_argument("--label-limit", type=int, default=500, metavar="N",
                     help="how many recent confirmed photos to load in --label mode (default: 500)")
+    ap.add_argument("--discover", action="store_true",
+                    help="prepare unknown faces and open the local People Discovery board")
+    ap.add_argument("--discovery-limit", type=int, metavar="N",
+                    help="how many recent library photos to prepare for --discover (default: config or 1000)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
     ap.add_argument("--uploaded-after", metavar="YYYY-MM-DD",
-                    help="only process photos uploaded on/after this date (scan and --label)")
+                    help="only process photos uploaded on/after this date (scan, --label, and --discover)")
     ap.add_argument("--uploaded-before", metavar="YYYY-MM-DD",
-                    help="only process photos uploaded on/before this date (scan and --label)")
+                    help="only process photos uploaded on/before this date (scan, --label, and --discover)")
     ap.add_argument("--status", action="store_true", help="show what is known and what is waiting")
     ap.add_argument("--check", action="store_true", help="preflight: backend, config, database, and server")
     ap.add_argument("--selftest", action="store_true", help="exercise the non-ML plumbing; needs no backend or server")
@@ -3139,6 +4250,8 @@ def main():
                     help="override the recognition backend for this run")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
+    if args.discover and (args.label or args.label_flow or args.learn or args.watch):
+        ap.error("--discover cannot be combined with --label, --label-flow, --learn, or --watch")
 
     # These three never touch the ML backend or the network unnecessarily.
     if args.selftest:
@@ -3170,6 +4283,24 @@ def main():
     uploaded_before = parse_ymd(args.uploaded_before, "--uploaded-before")
     if uploaded_after and uploaded_before and uploaded_after > uploaded_before:
         sys.exit("--uploaded-after must be on or before --uploaded-before")
+
+    if args.discover:
+        discovery_limit = args.discovery_limit or cfg_discovery_limit(cfg)
+        if discovery_limit < 1 or discovery_limit > 1000:
+            sys.exit("--discovery-limit must be between 1 and 1000")
+        threshold = cfg_discovery_tolerance(cfg, engine)
+        run_discovery(
+            api,
+            conn,
+            backend,
+            tolerance,
+            threshold,
+            discovery_limit,
+            uploaded_after,
+            uploaded_before,
+            verbose,
+        )
+        return
 
     if args.label:
         if verbose and (uploaded_after or uploaded_before):

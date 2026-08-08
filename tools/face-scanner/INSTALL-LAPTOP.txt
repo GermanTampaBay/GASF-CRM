@@ -13,7 +13,7 @@ under:
 
   %LOCALAPPDATA%\GASF Face Scanner
 
-It preserves the scanner key, engine/tolerance tuning, and faces.db when rerun,
+It preserves the scanner key, engine/tolerance/discovery tuning, and faces.db when rerun,
 so the same ZIP also repairs or updates an existing installation without
 deleting learned faces.
 
