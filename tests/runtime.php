@@ -1071,6 +1071,11 @@ final class GASF_CRM_Selftest {
 		// Alias labels, taxonomy renames, and merges keep one stable scanner identity.
 		$identity_suffix = (string) wp_rand( 100000, 999999 );
 		$identity_photo = $this->library_photo( 'st-face-identity-' . $identity_suffix );
+		$canonical_identity_name = 'Jürgen Identity ' . $identity_suffix;
+		$canonical_identity_insert = wp_insert_term( $canonical_identity_name, 'gasf_photo_person' );
+		$canonical_identity_id = is_wp_error( $canonical_identity_insert )
+			? 0
+			: (int) $canonical_identity_insert['term_id'];
 		update_post_meta( $identity_photo, '_gasf_face_boxes', array(
 			array( 'box' => array( 10, 10, 30, 30 ) ),
 			array( 'box' => array( 60, 10, 30, 30 ) ),
@@ -1088,13 +1093,59 @@ final class GASF_CRM_Selftest {
 		$this->ok(
 			2 === count( $identity_labels )
 			&& $identity_id > 0
+			&& $identity_id === $canonical_identity_id
 			&& $identity_id === (int) ( $identity_labels[1]['person_id'] ?? 0 )
 			&& $identity_term
 			&& ! is_wp_error( $identity_term ),
 			'faces: expanded and plain-ASCII aliases share one stable taxonomy identity'
 		);
+		$bauer_name = 'Bauer Identity ' . $identity_suffix;
+		$baur_name = 'Baur Identity ' . $identity_suffix;
+		gasf_crm_face_person_terms_ensure( array( $bauer_name, $baur_name ) );
+		$bauer_identity = gasf_crm_face_person_identity( $bauer_name );
+		$baur_identity = gasf_crm_face_person_identity( $baur_name );
+		$this->ok(
+			! gasf_crm_face_name_same( $bauer_name, $baur_name )
+			&& (int) $bauer_identity['person_id'] > 0
+			&& (int) $baur_identity['person_id'] > 0
+			&& (int) $bauer_identity['person_id'] !== (int) $baur_identity['person_id'],
+			'faces: unproven ASCII digraph spellings remain distinct identities'
+		);
 
 		$renamed_identity = 'Jürgen Canonical ' . $identity_suffix;
+		$identity_modified = (string) get_post_field( 'post_modified_gmt', $identity_photo );
+		$identity_lock = gasf_crm_faces_try_lock( $identity_photo, 'label' );
+		$busy_rename = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term'   => $identity_id,
+			'name'   => $identity_term_name,
+			'into'   => $renamed_identity,
+			'op_id'  => 'selftest-face-identity-busy-' . $identity_suffix,
+		) );
+		gasf_crm_faces_unlock( $identity_photo, 'label', $identity_lock );
+		$identity_after_busy = get_term( $identity_id, 'gasf_photo_person' );
+		$this->ok(
+			'' !== $identity_lock
+			&& is_wp_error( $busy_rename )
+			&& 409 === (int) ( $busy_rename->get_error_data()['status'] ?? 0 )
+			&& $identity_term_name === (string) ( $identity_after_busy->name ?? '' )
+			&& $identity_modified === (string) get_post_field( 'post_modified_gmt', $identity_photo ),
+			'faces: a busy label-only photo aborts rename before taxonomy or revision changes'
+		);
+
+		$remap_hook = null;
+		$remap_hook = static function ( $from_id ) use ( $identity_id, $identity_photo, &$remap_hook ) {
+			if ( (int) $from_id !== $identity_id ) { return; }
+			$raw = get_post_meta( $identity_photo, '_gasf_face_labels', true );
+			$raw = is_array( $raw ) ? $raw : array();
+			$raw[] = array(
+				'name' => 'Concurrent Keep',
+				'box'  => array( 20, 55, 20, 20 ),
+			);
+			update_post_meta( $identity_photo, '_gasf_face_labels', $raw );
+			remove_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook );
+		};
+		add_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook, 10, 1 );
 		$renamed_result = $this->rest_post( '/gasf/v1/crm/photos/person', array(
 			'action' => 'rename',
 			'term'   => $identity_id,
@@ -1102,17 +1153,43 @@ final class GASF_CRM_Selftest {
 			'into'   => $renamed_identity,
 			'op_id'  => 'selftest-face-identity-rename-' . $identity_suffix,
 		) );
+		remove_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook );
 		$renamed_labels = gasf_crm_face_labels_for( $identity_photo );
 		$this->ok(
 			! is_wp_error( $renamed_result )
 			&& $identity_id === (int) ( $renamed_labels[0]['person_id'] ?? 0 )
-			&& $renamed_identity === (string) ( $renamed_labels[0]['canonical_name'] ?? '' ),
-			'faces: a taxonomy rename updates canonical label facts without changing identity'
+			&& $renamed_identity === (string) ( $renamed_labels[0]['canonical_name'] ?? '' )
+			&& 3 === count( $renamed_labels )
+			&& 'Concurrent Keep' === (string) ( $renamed_labels[2]['name'] ?? '' )
+			&& (string) get_post_field( 'post_modified_gmt', $identity_photo ) > $identity_modified,
+			'faces: rename rereads locked labels, preserves concurrent additions, and advances learning'
 		);
 
 		$destination_name = 'Identity Destination ' . $identity_suffix;
 		$destination_insert = wp_insert_term( $destination_name, 'gasf_photo_person' );
 		$destination_id = is_wp_error( $destination_insert ) ? 0 : (int) $destination_insert['term_id'];
+		$identity_before_merge = (string) get_post_field( 'post_modified_gmt', $identity_photo );
+		$identity_lock = gasf_crm_faces_try_lock( $identity_photo, 'label' );
+		$busy_merge = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action'    => 'merge',
+			'term'      => $identity_id,
+			'name'      => $renamed_identity,
+			'into_term' => $destination_id,
+			'into'      => $destination_name,
+			'op_id'     => 'selftest-face-identity-merge-busy-' . $identity_suffix,
+		) );
+		gasf_crm_faces_unlock( $identity_photo, 'label', $identity_lock );
+		$labels_after_busy_merge = gasf_crm_face_labels_for( $identity_photo );
+		$this->ok(
+			'' !== $identity_lock
+			&& is_wp_error( $busy_merge )
+			&& 409 === (int) ( $busy_merge->get_error_data()['status'] ?? 0 )
+			&& term_exists( $identity_id, 'gasf_photo_person' )
+			&& term_exists( $destination_id, 'gasf_photo_person' )
+			&& $identity_id === (int) ( $labels_after_busy_merge[0]['person_id'] ?? 0 )
+			&& $identity_before_merge === (string) get_post_field( 'post_modified_gmt', $identity_photo ),
+			'faces: a busy label-only photo aborts merge before either identity or revision changes'
+		);
 		$merged_result = $this->rest_post( '/gasf/v1/crm/photos/person', array(
 			'action'    => 'merge',
 			'term'      => $identity_id,
@@ -1135,10 +1212,15 @@ final class GASF_CRM_Selftest {
 			&& $destination_id === (int) ( $merged_labels[0]['person_id'] ?? 0 )
 			&& $destination_name === (string) ( $merged_labels[0]['canonical_name'] ?? '' )
 			&& $destination_id === (int) ( $identity_feed_photo['person_facts'][0]['person_id'] ?? 0 )
-			&& $destination_id === (int) ( $identity_feed_photo['labels'][0]['person_id'] ?? 0 ),
-			'faces: a merge remaps label and confirmed-feed facts with no competing identity'
+			&& $destination_id === (int) ( $identity_feed_photo['labels'][0]['person_id'] ?? 0 )
+			&& (string) get_post_field( 'post_modified_gmt', $identity_photo ) > $identity_before_merge,
+			'faces: a merge remaps label facts, advances learning, and leaves no competing identity'
 		);
 		if ( $destination_id > 0 ) { wp_delete_term( $destination_id, 'gasf_photo_person' ); }
+		foreach ( array( $bauer_name, $baur_name ) as $distinct_name ) {
+			$distinct_term = get_term_by( 'name', $distinct_name, 'gasf_photo_person' );
+			if ( $distinct_term ) { wp_delete_term( (int) $distinct_term->term_id, 'gasf_photo_person' ); }
+		}
 
 		// Label-only photos are still offered to the learning feed.
 		$learn = $this->library_photo( 'st-face-learn-label-only' );

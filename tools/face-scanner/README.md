@@ -262,16 +262,18 @@ No pose score is invented: neither supported backend currently exposes one
 reliably through the shared abstraction.
 
 References also carry the WordPress person term id and canonical display name.
-Alias spellings therefore share one reference floor, a rename updates the
+Spellings proven to belong to one canonical term therefore share one reference
+floor, while merely similar ASCII names remain distinct. A rename updates the
 display name without splitting vectors, and a merge moves later reconciliation
 onto the surviving identity. Older databases retain their exact-name rows until
 the confirmed photo is reprocessed.
 
 Databases created before objective quality metadata are backfilled incrementally
-in batches of 25 photos during ordinary learn/watch/refinement passes. A failed
-image leaves its old reference untouched for the next pass. Each engine has its
-own resumable completion marker, which is written only after no synthetic
-quality rows remain.
+in batches of 25 photos during ordinary learn/watch/refinement passes. Failed,
+ambiguous, and partially matched photos keep every unmatched old reference for
+the next pass; only an exact successfully re-embedded face key is replaced.
+Each engine has its own resumable completion marker, which is written only after
+no synthetic quality rows remain.
 
 ### People Discovery stays local
 

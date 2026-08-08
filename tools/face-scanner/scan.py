@@ -1282,25 +1282,9 @@ def refresh_reference_selection(conn, engine=None, identities=None):
             )
 
 
-def replace_photo_references(conn, photo_id, engine, references):
-    """Make one photo's vectors exactly match its current confirmed truth."""
-    rows = list(references)
-    old_count = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM refs WHERE photo_id = ? AND engine = ?",
-            (photo_id, engine),
-        ).fetchone()[0]
-    )
-    old_identities = {
-        _reference_identity(row[0], row[1], row[2])[0]
-        for row in conn.execute(
-            """SELECT DISTINCT person_id, canonical_name, person
-               FROM refs WHERE photo_id = ? AND engine = ?""",
-            (photo_id, engine),
-        )
-    }
+def _prepare_photo_references(photo_id, engine, references):
     prepared = []
-    for row in rows:
+    for row in references:
         raw_identity, face_key, vector = row[:3]
         if isinstance(raw_identity, dict):
             person_id = max(0, int(raw_identity.get("person_id") or 0))
@@ -1323,7 +1307,7 @@ def replace_photo_references(conn, photo_id, engine, references):
                 canonical_name,
                 photo_id,
                 engine,
-                face_key,
+                str(face_key),
                 max(0, int(metrics.get("face_width", 0))),
                 max(0, int(metrics.get("face_height", 0))),
                 max(0.0, min(1.0, float(metrics.get("sharpness", 0)))),
@@ -1334,27 +1318,55 @@ def replace_photo_references(conn, photo_id, engine, references):
                 np.asarray(vector, dtype=np.float32).tobytes(),
             )
         )
+    return prepared
+
+
+def _update_reference_display_names(conn, engine, prepared):
+    for person_id, canonical_name in sorted(
+        {(row[1], row[2]) for row in prepared if row[1] > 0}
+    ):
+        conn.execute(
+            """UPDATE refs SET person = ?, canonical_name = ?
+               WHERE engine = ? AND person_id = ?""",
+            (canonical_name, canonical_name, engine, person_id),
+        )
+
+
+def _insert_prepared_references(conn, prepared):
+    conn.executemany(
+        """INSERT INTO refs (
+               person, person_id, canonical_name, photo_id, engine, face_key,
+               face_width, face_height, sharpness, clipping,
+               quality, quality_measured, captured_at, vector
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        prepared,
+    )
+
+
+def replace_photo_references(conn, photo_id, engine, references):
+    """Make one photo's vectors exactly match its current confirmed truth."""
+    prepared = _prepare_photo_references(photo_id, engine, list(references))
+    old_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM refs WHERE photo_id = ? AND engine = ?",
+            (photo_id, engine),
+        ).fetchone()[0]
+    )
+    old_identities = {
+        _reference_identity(row[0], row[1], row[2])[0]
+        for row in conn.execute(
+            """SELECT DISTINCT person_id, canonical_name, person
+               FROM refs WHERE photo_id = ? AND engine = ?""",
+            (photo_id, engine),
+        )
+    }
     with conn:
         conn.execute(
             "DELETE FROM refs WHERE photo_id = ? AND engine = ?",
             (photo_id, engine),
         )
-        for person_id, canonical_name in sorted(
-            {(row[1], row[2]) for row in prepared if row[1] > 0}
-        ):
-            conn.execute(
-                """UPDATE refs SET person = ?, canonical_name = ?
-                   WHERE engine = ? AND person_id = ?""",
-                (canonical_name, canonical_name, engine, person_id),
-            )
-        conn.executemany(
-            """INSERT INTO refs (
-                   person, person_id, canonical_name, photo_id, engine, face_key,
-                   face_width, face_height, sharpness, clipping,
-                   quality, quality_measured, captured_at, vector
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            prepared,
-        )
+        _update_reference_display_names(conn, engine, prepared)
+        _insert_prepared_references(conn, prepared)
         refresh_reference_selection(
             conn,
             engine,
@@ -1363,6 +1375,44 @@ def replace_photo_references(conn, photo_id, engine, references):
             ),
         )
     return old_count, len(prepared)
+
+
+def backfill_photo_references(conn, photo_id, engine, references):
+    """Replace only exact unmeasured face keys; unmatched legacy rows survive."""
+    candidates = _prepare_photo_references(photo_id, engine, list(references))
+    matched = []
+    old_identities = set()
+    for prepared in candidates:
+        old = conn.execute(
+            """SELECT id, person_id, canonical_name, person
+               FROM refs
+               WHERE photo_id = ? AND engine = ? AND face_key = ?
+                 AND quality_measured = 0""",
+            (photo_id, engine, prepared[5]),
+        ).fetchone()
+        if not old:
+            continue
+        matched.append((int(old[0]), prepared))
+        old_identities.add(_reference_identity(old[1], old[2], old[3])[0])
+    if not matched:
+        return 0, 0
+
+    prepared_rows = [row for _, row in matched]
+    with conn:
+        conn.executemany("DELETE FROM refs WHERE id = ?", [(row_id,) for row_id, _ in matched])
+        _update_reference_display_names(conn, engine, prepared_rows)
+        _insert_prepared_references(conn, prepared_rows)
+        refresh_reference_selection(
+            conn,
+            engine,
+            old_identities.union(
+                {
+                    _reference_identity(row[1], row[2], row[0])[0]
+                    for row in prepared_rows
+                }
+            ),
+        )
+    return len(matched), len(prepared_rows)
 
 
 def load_references(conn, engine):
@@ -3651,7 +3701,7 @@ def _person_identity_fact(raw, fallback=""):
     return {"person_id": person_id, "canonical_name": name}
 
 
-def _learn_photo(api, conn, backend, photo, verbose=True):
+def _learn_photo(api, conn, backend, photo, verbose=True, backfill=False):
     """Reconcile one photo only after its pixels were processed successfully."""
     photo_id = int(photo["id"])
     context = _photo_context(photo)
@@ -3675,6 +3725,8 @@ def _learn_photo(api, conn, backend, photo, verbose=True):
                 print(f"  #{photo_id}: {e}")
             return {"success": False, "old": 0, "new": 0, "skipped": 0}
         if not found:
+            if backfill:
+                return {"success": False, "old": 0, "new": 0, "skipped": 1}
             old_count, _ = replace_photo_references(conn, photo_id, backend.name, [])
             return {"success": True, "old": old_count, "new": 0, "skipped": 1}
 
@@ -3708,17 +3760,18 @@ def _learn_photo(api, conn, backend, photo, verbose=True):
             metrics = reference_quality(display_pixels, box_css)
             metrics["captured_at"] = captured_at
             replacements.append((identity, face_key, vector, metrics))
-        old_count, new_count = replace_photo_references(
-            conn, photo_id, backend.name, replacements
-        )
+        reconcile = backfill_photo_references if backfill else replace_photo_references
+        old_count, new_count = reconcile(conn, photo_id, backend.name, replacements)
         return {
-            "success": True,
+            "success": not backfill or new_count > 0,
             "old": old_count,
             "new": new_count,
             "skipped": 1 if new_count == 0 else 0,
         }
 
     if len(person_facts) != 1:
+        if backfill:
+            return {"success": False, "old": 0, "new": 0, "skipped": 1}
         old_count, _ = replace_photo_references(conn, photo_id, backend.name, [])
         return {"success": True, "old": old_count, "new": 0, "skipped": 1}
     try:
@@ -3729,13 +3782,16 @@ def _learn_photo(api, conn, backend, photo, verbose=True):
             print(f"  #{photo_id}: {e}")
         return {"success": False, "old": 0, "new": 0, "skipped": 0}
     if len(found) != 1:
+        if backfill:
+            return {"success": False, "old": 0, "new": 0, "skipped": 1}
         old_count, _ = replace_photo_references(conn, photo_id, backend.name, [])
         return {"success": True, "old": old_count, "new": 0, "skipped": 1}
 
     box_css, vector = found[0]
     metrics = reference_quality(display_pixels, box_css)
     metrics["captured_at"] = captured_at
-    old_count, new_count = replace_photo_references(
+    reconcile = backfill_photo_references if backfill else replace_photo_references
+    old_count, new_count = reconcile(
         conn,
         photo_id,
         backend.name,
@@ -3792,7 +3848,9 @@ def learn(api, conn, backend, verbose=True):
             )
             for photo in data.get("photos", []):
                 try:
-                    result = _learn_photo(api, conn, backend, photo, verbose)
+                    result = _learn_photo(
+                        api, conn, backend, photo, verbose, backfill=True
+                    )
                     if result["success"]:
                         learned_ids.add(int(photo["id"]))
                         removed += int(result["old"])
@@ -4669,6 +4727,23 @@ def selftest():
             and not any(name in alias_refs for name in ("Juergen Example", "Jurgen Example")),
             "reference identity: alias spellings share one minimum-reference floor",
         )
+        for person_index, person in enumerate(("Bauer Example", "Baur Example")):
+            for offset in range(MIN_REFERENCES):
+                conn.execute(
+                    """INSERT INTO refs (
+                           person, canonical_name, photo_id, engine,
+                           face_key, quality_measured, vector
+                       ) VALUES (?, ?, ?, 'engineAliases', '0', 1, ?)""",
+                    (person, person, 1150 + person_index * 10 + offset, vec),
+                )
+        conn.commit()
+        refresh_reference_selection(conn, "engineAliases")
+        conn.commit()
+        distinct_aliases = load_references(conn, "engineAliases")
+        check_that(
+            set(distinct_aliases) == {"Bauer Example", "Baur Example"},
+            "reference identity: unproven ASCII digraph names remain separate",
+        )
         replace_photo_references(
             conn,
             1101,
@@ -5209,6 +5284,128 @@ def selftest():
             and state_get(conn, quality_backfill_key(backend.name), "") == str(QUALITY_METRICS_VERSION)
             and state_get(conn, state_key(backend.name, "learned_modified"), "") == watermark_before,
             "quality backfill: success records real metrics without resetting the learn watermark",
+        )
+
+        class ControlledBackfillBackend(StubBackend):
+            def __init__(self, name, mode):
+                self.name = name
+                self.mode = mode
+
+            def embed_rgb(self, _rgb):
+                first_face = (
+                    (10, 30, 30, 10),
+                    np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                )
+                second_face = (
+                    (10, 70, 30, 50),
+                    np.array([3.0, 2.0, 1.0], dtype=np.float32),
+                )
+                if self.mode == "zero":
+                    return []
+                if self.mode == "partial":
+                    return [first_face]
+                return [first_face, second_face]
+
+        class DirectBackfillApi:
+            def image(self, _url):
+                return quality_image.getvalue()
+
+        direct_api = DirectBackfillApi()
+        ambiguous_backend = ControlledBackfillBackend("stub:ambiguous", "zero")
+        conn.execute(
+            """INSERT INTO refs (
+                   person, person_id, canonical_name, photo_id, engine,
+                   face_key, quality_measured, vector
+               ) VALUES ('Ambiguous Person', 901, 'Ambiguous Person', 1401, ?, '0', 0, ?)""",
+            (ambiguous_backend.name, vec),
+        )
+        conn.commit()
+        ambiguous_photo = {
+            "id": 1401,
+            "url": "selftest://1401",
+            "people": ["Ambiguous Person"],
+            "person_facts": [{
+                "person_id": 901,
+                "canonical_name": "Ambiguous Person",
+            }],
+            "labels": [],
+        }
+        _learn_photo(
+            direct_api, conn, ambiguous_backend, ambiguous_photo,
+            verbose=False, backfill=True,
+        )
+        ambiguous_backend.mode = "multiple"
+        _learn_photo(
+            direct_api, conn, ambiguous_backend, ambiguous_photo,
+            verbose=False, backfill=True,
+        )
+        ambiguous_state = conn.execute(
+            """SELECT COUNT(*), SUM(quality_measured) FROM refs
+               WHERE engine = ? AND photo_id = 1401""",
+            (ambiguous_backend.name,),
+        ).fetchone()
+        check_that(
+            ambiguous_state == (1, 0)
+            and update_quality_backfill_state(conn, ambiguous_backend.name) == 1,
+            "quality backfill: zero and multiple detections preserve pending legacy refs",
+        )
+
+        partial_backend = ControlledBackfillBackend("stub:partial", "partial")
+        for face_key, person_id, person in (
+            ("b:10,10,20,20:0", 911, "Partial One"),
+            ("b:50,10,20,20:1", 912, "Partial Two"),
+        ):
+            conn.execute(
+                """INSERT INTO refs (
+                       person, person_id, canonical_name, photo_id, engine,
+                       face_key, quality_measured, vector
+                   ) VALUES (?, ?, ?, 1402, ?, ?, 0, ?)""",
+                (person, person_id, person, partial_backend.name, face_key, vec),
+            )
+        conn.commit()
+        partial_photo = {
+            "id": 1402,
+            "url": "selftest://1402",
+            "people": [],
+            "labels": [
+                {
+                    "name": "Partial One",
+                    "person_id": 911,
+                    "canonical_name": "Partial One",
+                    "box": [10, 10, 20, 20],
+                },
+                {
+                    "name": "Partial Two",
+                    "person_id": 912,
+                    "canonical_name": "Partial Two",
+                    "box": [50, 10, 20, 20],
+                },
+            ],
+        }
+        _learn_photo(
+            direct_api, conn, partial_backend, partial_photo,
+            verbose=False, backfill=True,
+        )
+        partial_state = conn.execute(
+            """SELECT COUNT(*), SUM(quality_measured) FROM refs
+               WHERE engine = ? AND photo_id = 1402""",
+            (partial_backend.name,),
+        ).fetchone()
+        partial_backend.mode = "multiple"
+        _learn_photo(
+            direct_api, conn, partial_backend, partial_photo,
+            verbose=False, backfill=True,
+        )
+        retried_state = conn.execute(
+            """SELECT COUNT(*), SUM(quality_measured) FROM refs
+               WHERE engine = ? AND photo_id = 1402""",
+            (partial_backend.name,),
+        ).fetchone()
+        check_that(
+            partial_state == (2, 1)
+            and retried_state == (2, 2)
+            and update_quality_backfill_state(conn, partial_backend.name) == 0,
+            "quality backfill: partial labels stay pending and later retry completes without loss",
         )
         conn.close()
 
