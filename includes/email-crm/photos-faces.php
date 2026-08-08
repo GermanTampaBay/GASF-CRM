@@ -593,6 +593,23 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$limit = min( GASF_CRM_FACES_BATCH, max( 1, (int) $req->get_param( 'limit' ) ?: GASF_CRM_FACES_BATCH ) );
+			$after = gasf_crm_faces_queue_bound( (string) $req->get_param( 'after' ) );
+			$before = gasf_crm_faces_queue_bound( (string) $req->get_param( 'before' ) );
+			$date_query = array();
+			if ( '' !== $after ) {
+				$date_query[] = array(
+					'column'    => 'post_date_gmt',
+					'after'     => $after,
+					'inclusive' => true,
+				);
+			}
+			if ( '' !== $before ) {
+				$date_query[] = array(
+					'column'    => 'post_date_gmt',
+					'before'    => $before,
+					'inclusive' => true,
+				);
+			}
 
 			$ids = get_posts( array(
 				'post_type'      => 'attachment',
@@ -608,6 +625,7 @@ add_action( 'rest_api_init', function () {
 					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 					array( 'key' => '_gasf_face_scanned', 'compare' => 'NOT EXISTS' ),
 				),
+				'date_query'     => $date_query,
 			) );
 
 			$out = array();
@@ -624,7 +642,7 @@ add_action( 'rest_api_init', function () {
 
 			return array(
 				'photos'    => $out,
-				'remaining' => max( 0, gasf_crm_faces_unscanned_count() - count( $out ) ),
+				'remaining' => max( 0, gasf_crm_faces_unscanned_count( $after, $before ) - count( $out ) ),
 			);
 		},
 	) );
@@ -798,6 +816,23 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$limit = min( 1000, max( 1, (int) $req->get_param( 'limit' ) ?: 25 ) );
+			$after = gasf_crm_faces_queue_bound( (string) $req->get_param( 'after' ) );
+			$before = gasf_crm_faces_queue_bound( (string) $req->get_param( 'before' ) );
+			$date_query = array();
+			if ( '' !== $after ) {
+				$date_query[] = array(
+					'column'    => 'post_date_gmt',
+					'after'     => $after,
+					'inclusive' => true,
+				);
+			}
+			if ( '' !== $before ) {
+				$date_query[] = array(
+					'column'    => 'post_date_gmt',
+					'before'    => $before,
+					'inclusive' => true,
+				);
+			}
 			$ids = get_posts( array(
 				'post_type'      => 'attachment',
 				'post_status'    => array( 'inherit', 'private' ),
@@ -810,6 +845,7 @@ add_action( 'rest_api_init', function () {
 				'meta_query'     => array(
 					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 				),
+				'date_query'     => $date_query,
 			) );
 
 			$out = array();
@@ -946,7 +982,33 @@ add_action( 'rest_api_init', function () {
 } );
 
 /** How many library photos still have no scan stamp. */
-function gasf_crm_faces_unscanned_count() {
+function gasf_crm_faces_queue_bound( $raw ) {
+	$raw = trim( (string) $raw );
+	if ( '' === $raw ) { return ''; }
+	$ts = strtotime( $raw );
+	if ( false === $ts ) { return ''; }
+	return gmdate( 'Y-m-d H:i:s', $ts );
+}
+
+function gasf_crm_faces_unscanned_count( $after = '', $before = '' ) {
+	$after  = gasf_crm_faces_queue_bound( $after );
+	$before = gasf_crm_faces_queue_bound( $before );
+	$date_query = array();
+	if ( '' !== $after ) {
+		$date_query[] = array(
+			'column'    => 'post_date_gmt',
+			'after'     => $after,
+			'inclusive' => true,
+		);
+	}
+	if ( '' !== $before ) {
+		$date_query[] = array(
+			'column'    => 'post_date_gmt',
+			'before'    => $before,
+			'inclusive' => true,
+		);
+	}
+
 	$ids = get_posts( array(
 		'post_type'      => 'attachment',
 		'post_status'    => array( 'inherit', 'private' ),
@@ -959,6 +1021,7 @@ function gasf_crm_faces_unscanned_count() {
 			array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 			array( 'key' => '_gasf_face_scanned', 'compare' => 'NOT EXISTS' ),
 		),
+		'date_query'     => $date_query,
 	) );
 	$left = 0;
 	foreach ( $ids as $id ) {

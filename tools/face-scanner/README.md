@@ -71,11 +71,35 @@ The first real run downloads the `buffalo_l` model pack (~280 MB) into
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
+| `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning and `--label`. Useful for "new uploads only" runs. |
 | `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
 | `python scan.py --selftest` | Exercise the non-ML plumbing. Needs no backend, no config, no network. |
+| `python scan-gui.py` | Checkbox launcher UI for `scan.py` (blocks unsupported option combos, shows inline output). |
 
 `--engine insightface|face_recognition|auto` overrides the backend for one run.
+
+### Simple launcher UI
+
+If you prefer not to remember CLI flags:
+
+```powershell
+python scan-gui.py
+```
+
+- Tick options, click **Go**, and it runs `scan.py`.
+- It blocks unsupported combinations (for example `--learn` + `--label`).
+- Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
+- `scan.py` path is hardcoded in the launcher so you can run the GUI from any folder.
+
+Optional single-file EXE (Windows):
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --noconsole scan-gui.py
+```
+
+Then run `dist\scan-gui.exe`.
 
 ### Optional: local AI summaries (captions)
 

@@ -5,6 +5,7 @@ GASF-CRM face scanner — runs on a private machine, never on the web host.
     python scan.py                 # scan whatever is waiting, then stop
     python scan.py --learn         # refresh the reference set first
     python scan.py --watch 900     # keep going, learning then scanning, every 15 min
+    python scan.py --uploaded-after 2026-08-01   # only scan newer uploads
     python scan.py --status        # what do I know, and what is waiting
     python scan.py --check         # is everything wired up? (needs the ML backend)
     python scan.py --selftest      # exercise the plumbing with no ML at all
@@ -240,6 +241,17 @@ def cfg_caption_timeout(cfg):
     except (TypeError, ValueError):
         sys.exit(f"caption_timeout must be an integer number of seconds, got {raw!r}")
     return max(15, min(300, n))
+
+
+def parse_ymd(raw, flag_name):
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        time.strptime(raw, "%Y-%m-%d")
+    except ValueError:
+        sys.exit(f"{flag_name} must be YYYY-MM-DD, got {raw!r}")
+    return raw
 
 
 class Api:
@@ -678,15 +690,20 @@ def _thumb_data_uri(image_bytes, max_px=240, quality=70):
         return ""
 
 
-def _collect_label_items(api, conn, backend, tolerance, limit):
+def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after="", uploaded_before=""):
     limit = max(1, min(1000, int(limit)))
+    q = {"limit": limit}
+    if uploaded_after:
+        q["after"] = uploaded_after
+    if uploaded_before:
+        q["before"] = uploaded_before
     try:
-        data = api.get("/label-queue", limit=limit)
+        data = api.get("/label-queue", **q)
     except requests.HTTPError as e:
         code = e.response.status_code if e.response is not None else 0
         if code != 404:
             raise
-        data = api.get("/confirmed", limit=limit)
+        data = api.get("/confirmed", **q)
 
     photos = list(data.get("photos", []) or [])
     people_names = []
@@ -1003,9 +1020,17 @@ init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e))
 </script></body></html>"""
 
 
-def local_label(api, conn, backend, tolerance, limit=500):
+def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", uploaded_before=""):
     """Interactive local browser UI: tag faces and step next in one page."""
-    items, people_names = _collect_label_items(api, conn, backend, tolerance, limit)
+    items, people_names = _collect_label_items(
+        api,
+        conn,
+        backend,
+        tolerance,
+        limit,
+        uploaded_after,
+        uploaded_before,
+    )
     if not items:
         print("No confirmed photos with detectable faces are available for local labeling.")
         return 0
@@ -1129,7 +1154,7 @@ def learn(api, conn, backend, verbose=True):
     wk_id = state_key(backend.name, "learned_id")
     since_mod = state_get(conn, wk_mod, "")
     since_id = int(state_get(conn, wk_id, "0") or 0)
-    added = skipped = 0
+    added = skipped = processed = 0
     learned_ids = set()
 
     while True:
@@ -1152,79 +1177,87 @@ def learn(api, conn, backend, verbose=True):
             else:
                 since_id = max(since_id, photo_id)
 
-            people = [n for n in p.get("people", []) if n.strip()]
-            labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
-            if labels:
+            try:
+                people = [n for n in p.get("people", []) if n.strip()]
+                labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
+                if labels:
+                    try:
+                        found = backend.embed(api.image(p["url"]))
+                    except Exception as e:  # a missing file must not stop the run
+                        if verbose:
+                            print(f"  #{p['id']}: {e}")
+                        continue
+                    if not found:
+                        skipped += 1
+                        continue
+
+                    det_boxes = [css_box_to_xywh(b) for (b, _) in found]
+                    used = set()
+                    matched = 0
+                    for li, lbl in enumerate(labels):
+                        name = str(lbl.get("name") or "").strip()
+                        box = lbl.get("box") or []
+                        if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
+                            continue
+                        target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                        best_i, best_iou = -1, 0.0
+                        for j, db in enumerate(det_boxes):
+                            if j in used:
+                                continue
+                            iou = box_iou_xywh(target, db)
+                            if iou > best_iou:
+                                best_i, best_iou = j, iou
+                        if best_i < 0 or best_iou < 0.15:
+                            continue
+                        used.add(best_i)
+                        _, vector = found[best_i]
+                        face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
+                        conn.execute(
+                            """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+                               VALUES (?, ?, ?, ?, ?)
+                               ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
+                                   person = excluded.person,
+                                   vector = excluded.vector""",
+                            (name, photo_id, backend.name, face_key, vector.astype(np.float32).tobytes()),
+                        )
+                        added += 1
+                        matched += 1
+                        learned_ids.add(photo_id)
+                    if matched == 0:
+                        skipped += 1
+                    continue
+
+                if len(people) != 1:
+                    skipped += 1
+                    continue
                 try:
                     found = backend.embed(api.image(p["url"]))
                 except Exception as e:  # a missing file must not stop the run
                     if verbose:
                         print(f"  #{p['id']}: {e}")
                     continue
-                if not found:
+                if len(found) != 1:
                     skipped += 1
                     continue
 
-                det_boxes = [css_box_to_xywh(b) for (b, _) in found]
-                used = set()
-                matched = 0
-                for li, lbl in enumerate(labels):
-                    name = str(lbl.get("name") or "").strip()
-                    box = lbl.get("box") or []
-                    if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
-                        continue
-                    target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
-                    best_i, best_iou = -1, 0.0
-                    for j, db in enumerate(det_boxes):
-                        if j in used:
-                            continue
-                        iou = box_iou_xywh(target, db)
-                        if iou > best_iou:
-                            best_i, best_iou = j, iou
-                    if best_i < 0 or best_iou < 0.15:
-                        continue
-                    used.add(best_i)
-                    _, vector = found[best_i]
-                    face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
-                    conn.execute(
-                        """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-                           VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
-                               person = excluded.person,
-                               vector = excluded.vector""",
-                        (name, photo_id, backend.name, face_key, vector.astype(np.float32).tobytes()),
+                _, vector = found[0]
+                conn.execute(
+                    """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
+                           person = excluded.person,
+                           vector = excluded.vector""",
+                    (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
+                )
+                added += 1
+                learned_ids.add(photo_id)
+            finally:
+                processed += 1
+                if verbose and processed % 20 == 0:
+                    print(
+                        f"learn progress: {processed} photo(s) checked, "
+                        f"{added} reference face(s) added, {skipped} skipped"
                     )
-                    added += 1
-                    matched += 1
-                    learned_ids.add(photo_id)
-                if matched == 0:
-                    skipped += 1
-                continue
-
-            if len(people) != 1:
-                skipped += 1
-                continue
-            try:
-                found = backend.embed(api.image(p["url"]))
-            except Exception as e:  # a missing file must not stop the run
-                if verbose:
-                    print(f"  #{p['id']}: {e}")
-                continue
-            if len(found) != 1:
-                skipped += 1
-                continue
-
-            _, vector = found[0]
-            conn.execute(
-                """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
-                       person = excluded.person,
-                       vector = excluded.vector""",
-                (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
-            )
-            added += 1
-            learned_ids.add(photo_id)
 
         conn.commit()
         if since_mod:
@@ -1246,16 +1279,26 @@ def learn(api, conn, backend, verbose=True):
 # --------------------------------------------------------------------------- scan
 
 
-def scan(api, conn, backend, tolerance, cfg, verbose=True):
+def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", uploaded_before=""):
     references = load_references(conn, backend.name)
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
+        if uploaded_after or uploaded_before:
+            print(
+                "scan window: "
+                f"{uploaded_after or 'start'} .. {uploaded_before or 'now'}"
+            )
 
     total_seen = 0
     total_kept = 0
 
     while True:
-        data = api.get("/queue")
+        qp = {}
+        if uploaded_after:
+            qp["after"] = uploaded_after
+        if uploaded_before:
+            qp["before"] = uploaded_before
+        data = api.get("/queue", **qp)
         photos = data.get("photos", [])
         if not photos:
             if verbose and total_seen == 0:
@@ -1631,6 +1674,10 @@ def main():
     ap.add_argument("--label-limit", type=int, default=500, metavar="N",
                     help="how many recent confirmed photos to load in --label mode (default: 500)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
+    ap.add_argument("--uploaded-after", metavar="YYYY-MM-DD",
+                    help="only process photos uploaded on/after this date (scan and --label)")
+    ap.add_argument("--uploaded-before", metavar="YYYY-MM-DD",
+                    help="only process photos uploaded on/before this date (scan and --label)")
     ap.add_argument("--status", action="store_true", help="show what is known and what is waiting")
     ap.add_argument("--check", action="store_true", help="preflight: backend, config, database, and server")
     ap.add_argument("--selftest", action="store_true", help="exercise the non-ML plumbing; needs no backend or server")
@@ -1665,9 +1712,18 @@ def main():
     api = Api(url, key)
     conn = db()
     verbose = not args.quiet
+    uploaded_after = parse_ymd(args.uploaded_after, "--uploaded-after")
+    uploaded_before = parse_ymd(args.uploaded_before, "--uploaded-before")
+    if uploaded_after and uploaded_before and uploaded_after > uploaded_before:
+        sys.exit("--uploaded-after must be on or before --uploaded-before")
 
     if args.label:
-        stored = local_label(api, conn, backend, tolerance, args.label_limit)
+        if verbose and (uploaded_after or uploaded_before):
+            print(
+                "label window: "
+                f"{uploaded_after or 'start'} .. {uploaded_before or 'now'}"
+            )
+        stored = local_label(api, conn, backend, tolerance, args.label_limit, uploaded_after, uploaded_before)
         if verbose:
             print(f"stored {stored} explicit face label(s)")
         return
@@ -1679,7 +1735,7 @@ def main():
         # asked, or when there is nothing to compare against yet.
         if args.learn or args.watch or not load_references(conn, backend.name):
             learn(api, conn, backend, verbose)
-        scan(api, conn, backend, tolerance, cfg, verbose)
+        scan(api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before)
         if not args.watch:
             break
         if verbose:
