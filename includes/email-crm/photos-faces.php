@@ -165,17 +165,90 @@ function gasf_crm_face_name_keys( $name ) {
 	$keys = function_exists( 'gasf_photo_person_keys' )
 		? gasf_photo_person_keys( $clean )
 		: array( strtolower( html_entity_decode( $clean, ENT_QUOTES ) ) );
-	return array_values( array_unique( array_filter( array_map( 'strval', (array) $keys ) ) ) );
+	$keys = array_values( array_unique( array_filter( array_map( 'strval', (array) $keys ) ) ) );
+	foreach ( $keys as $key ) {
+		// The shared catalogue matcher deliberately treats German umlauts,
+		// expanded spellings, and plain ASCII spellings as one person.
+		$folded = strtr( $key, array( 'ae' => 'a', 'oe' => 'o', 'ue' => 'u' ) );
+		if ( '' !== $folded ) { $keys[] = $folded; }
+	}
+	return array_values( array_unique( $keys ) );
 }
 
 function gasf_crm_face_name_same( $a, $b ) {
 	return (bool) array_intersect( gasf_crm_face_name_keys( $a ), gasf_crm_face_name_keys( $b ) );
 }
 
+/** Bounded backend identifier shared by predictions, samples, and reports. */
+function gasf_crm_face_engine( $raw ) {
+	$engine = trim( sanitize_text_field( (string) $raw ) );
+	return preg_match( '/^[a-zA-Z0-9:_-]{1,80}$/', $engine ) ? $engine : '';
+}
+
 /** Normalized reporting identity; linkage compares the complete alias key set. */
 function gasf_crm_face_canonical_key( $name ) {
 	$keys = gasf_crm_face_name_keys( $name );
 	return $keys ? (string) $keys[0] : '';
+}
+
+/**
+ * Resolve a face label to one stable taxonomy identity.
+ *
+ * Alias-connected duplicate terms collapse onto the lowest surviving term id.
+ * The taxonomy remains untouched; this only keeps scanner learning coherent.
+ */
+function gasf_crm_face_person_identity( $raw_name, $term_id = 0, $terms = null ) {
+	$name = trim( sanitize_text_field( (string) $raw_name ) );
+	if ( null === $terms ) {
+		$terms = get_terms( array(
+			'taxonomy'   => 'gasf_photo_person',
+			'hide_empty' => false,
+		) );
+	}
+	if ( is_wp_error( $terms ) || ! is_array( $terms ) ) {
+		return array(
+			'person_id'     => 0,
+			'canonical_name' => html_entity_decode( $name, ENT_QUOTES, 'UTF-8' ),
+		);
+	}
+
+	$wanted = gasf_crm_face_name_keys( $name );
+	foreach ( $terms as $term ) {
+		if ( (int) $term_id === (int) $term->term_id ) {
+			$wanted = array_values( array_unique( array_merge(
+				$wanted,
+				gasf_crm_face_name_keys( (string) $term->name )
+			) ) );
+			break;
+		}
+	}
+
+	$matches = array();
+	$changed = true;
+	while ( $changed ) {
+		$changed = false;
+		foreach ( $terms as $term ) {
+			$id = (int) $term->term_id;
+			if ( isset( $matches[ $id ] ) ) { continue; }
+			$keys = gasf_crm_face_name_keys( (string) $term->name );
+			if ( ! array_intersect( $wanted, $keys ) ) { continue; }
+			$matches[ $id ] = $term;
+			$wanted = array_values( array_unique( array_merge( $wanted, $keys ) ) );
+			$changed = true;
+		}
+	}
+	if ( ! $matches ) {
+		return array(
+			'person_id'     => 0,
+			'canonical_name' => html_entity_decode( $name, ENT_QUOTES, 'UTF-8' ),
+		);
+	}
+	ksort( $matches, SORT_NUMERIC );
+	$canonical = reset( $matches );
+	return array(
+		'person_id'     => (int) $canonical->term_id,
+		'canonical_name' => html_entity_decode( (string) $canonical->name, ENT_QUOTES, 'UTF-8' ),
+	);
 }
 
 function gasf_crm_face_box_iou( array $a, array $b ) {
@@ -204,6 +277,7 @@ function gasf_crm_face_predictions_for( $attachment_id ) {
 		$name = trim( sanitize_text_field( (string) ( $item['name'] ?? '' ) ) );
 		$box  = array_map( 'intval', (array) ( $item['box'] ?? array() ) );
 		$canonical = gasf_crm_face_canonical_key( $name );
+		$engine = gasf_crm_face_engine( $item['engine'] ?? '' );
 		$outcome = sanitize_key( (string) ( $item['outcome'] ?? 'pending' ) );
 		if ( '' === $name || '' === $canonical || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 		if ( ! in_array( $outcome, array( 'pending', 'positive', 'negative' ), true ) ) { $outcome = 'pending'; }
@@ -211,6 +285,7 @@ function gasf_crm_face_predictions_for( $attachment_id ) {
 			'key'         => preg_replace( '/[^a-f0-9]/', '', strtolower( (string) ( $item['key'] ?? '' ) ) ),
 			'name'        => $name,
 			'canonical'   => $canonical,
+			'engine'      => $engine,
 			'confidence'  => min( 100, max( 0, (int) ( $item['confidence'] ?? 0 ) ) ),
 			'box'         => array_values( $box ),
 			'outcome'     => $outcome,
@@ -240,9 +315,10 @@ function gasf_crm_face_predictions_write( $attachment_id, array $records ) {
 }
 
 /** Upsert predictions offered to a human while preserving already-known outcomes. */
-function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
+function gasf_crm_face_predictions_record( $attachment_id, array $faces, $raw_engine = '' ) {
 	$id = (int) $attachment_id;
-	if ( ! $id ) { return 0; }
+	$engine = gasf_crm_face_engine( $raw_engine );
+	if ( ! $id || '' === $engine ) { return 0; }
 	$all = gasf_crm_face_predictions_for( $id );
 	$changed = 0;
 	foreach ( array_slice( $faces, 0, 60 ) as $face ) {
@@ -256,7 +332,8 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 		$match = -1;
 		foreach ( $all as $i => $old ) {
 			if (
-				gasf_crm_face_name_same( $name, (string) ( $old['name'] ?? '' ) )
+				$engine === (string) ( $old['engine'] ?? '' )
+				&& gasf_crm_face_name_same( $name, (string) ( $old['name'] ?? '' ) )
 				&& gasf_crm_face_box_iou( $box, (array) ( $old['box'] ?? array() ) ) >= 0.35
 			) {
 				$match = $i;
@@ -268,6 +345,7 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 				$updated = $all[ $match ];
 				$updated['name'] = $name;
 				$updated['canonical'] = $canonical;
+				$updated['engine'] = $engine;
 				$updated['confidence'] = $confidence;
 				$updated['box'] = array_values( $box );
 				if ( $updated !== $all[ $match ] ) {
@@ -277,11 +355,12 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 			}
 			continue;
 		}
-		$key = sha1( $id . ':' . $canonical . ':' . implode( ',', $box ) );
+		$key = sha1( $id . ':' . $engine . ':' . $canonical . ':' . implode( ',', $box ) );
 		$all[] = array(
 			'key'         => $key,
 			'name'        => $name,
 			'canonical'   => $canonical,
+			'engine'      => $engine,
 			'confidence'  => $confidence,
 			'box'         => array_values( $box ),
 			'outcome'     => 'pending',
@@ -476,8 +555,9 @@ function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
  *
  * @param array $faces [ ['box'=>[x,y,w,h], 'name'=>'', 'confidence'=>0.0], ... ]
  */
-function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_names = 0, &$auto_labels = 0 ) {
+function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_names = 0, &$auto_labels = 0, $raw_engine = '' ) {
 	$id   = (int) $attachment_id;
+	$engine = gasf_crm_face_engine( $raw_engine );
 	$keep = array();
 	$auto_names  = 0;
 	$auto_labels = 0;
@@ -514,7 +594,7 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_name
 
 	if ( $keep ) { update_post_meta( $id, '_gasf_face_suggestions', $keep ); }
 	else { delete_post_meta( $id, '_gasf_face_suggestions' ); }
-	gasf_crm_face_predictions_record( $id, $keep );
+	if ( '' !== $engine ) { gasf_crm_face_predictions_record( $id, $keep, $engine ); }
 	$auto = gasf_crm_faces_auto_accept( $id, $keep );
 	$auto_names  = (int) ( $auto['names'] ?? 0 );
 	$auto_labels = (int) ( $auto['labels'] ?? 0 );
@@ -600,16 +680,31 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 	$id = (int) $attachment_id;
 	if ( ! $id || ( ! $labels && ! $replace ) ) { return 0; }
 
+	$raw_names = array();
+	foreach ( $labels as $label ) {
+		$name = trim( sanitize_text_field( (string) ( $label['name'] ?? '' ) ) );
+		if ( '' !== $name ) { $raw_names[] = $name; }
+	}
+	gasf_crm_face_person_terms_ensure( $raw_names );
+	$terms = get_terms( array(
+		'taxonomy'   => 'gasf_photo_person',
+		'hide_empty' => false,
+	) );
+
 	$next = array();
 	foreach ( $labels as $l ) {
 		$name = trim( sanitize_text_field( (string) ( $l['name'] ?? '' ) ) );
 		$box  = array_map( 'intval', (array) ( $l['box'] ?? array() ) );
 		if ( '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 		if ( function_exists( 'gasf_crm_face_is_rejected' ) && gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
+		$identity = gasf_crm_face_person_identity( $name, (int) ( $l['person_id'] ?? 0 ), $terms );
+		$name = (string) $identity['canonical_name'];
 		$key = implode( ',', $box );
 		$next[ $key ] = array(
-			'name' => $name,
-			'box'  => array_values( $box ),
+			'name'           => $name,
+			'person_id'      => (int) $identity['person_id'],
+			'canonical_name' => $name,
+			'box'            => array_values( $box ),
 		);
 	}
 	if ( ! $next && ! $replace ) { return 0; }
@@ -619,20 +714,15 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		}
 	}
 
-	$have = get_post_meta( $id, '_gasf_face_labels', true );
 	$all  = array();
-	if ( is_array( $have ) ) {
-		foreach ( $have as $h ) {
-			$b = array_map( 'intval', (array) ( $h['box'] ?? array() ) );
-			$n = trim( sanitize_text_field( (string) ( $h['name'] ?? '' ) ) );
-			if ( 4 !== count( $b ) || '' === $n ) { continue; }
-			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ) );
-		}
+	foreach ( gasf_crm_face_labels_for( $id ) as $label ) {
+		$all[ implode( ',', $label['box'] ) ] = $label;
 	}
-	$same_name = static function ( $a, $b ) {
-		return function_exists( 'gasf_photo_person_same' )
-			? gasf_photo_person_same( (string) $a, (string) $b )
-			: ( strtolower( html_entity_decode( (string) $a, ENT_QUOTES ) ) === strtolower( html_entity_decode( (string) $b, ENT_QUOTES ) ) );
+	$same_identity = static function ( array $a, array $b ) {
+		$aid = (int) ( $a['person_id'] ?? 0 );
+		$bid = (int) ( $b['person_id'] ?? 0 );
+		if ( $aid > 0 && $bid > 0 ) { return $aid === $bid; }
+		return gasf_crm_face_name_same( (string) ( $a['name'] ?? '' ), (string) ( $b['name'] ?? '' ) );
 	};
 	$changed = 0;
 	if ( $replace ) {
@@ -640,12 +730,12 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 			if (
 				$human_verified
 				&& isset( $all[ $k ], $next[ $k ] )
-				&& ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] )
+				&& ! $same_identity( $all[ $k ], $next[ $k ] )
 			) {
 				// A different identity on the same reviewed box explicitly supersedes the old prediction.
 				gasf_crm_face_prediction_outcome( $id, $all[ $k ]['name'], 'negative', $all[ $k ]['box'] );
 			}
-			if ( ! isset( $all[ $k ], $next[ $k ] ) || ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] ) ) {
+			if ( ! isset( $all[ $k ], $next[ $k ] ) || ! $same_identity( $all[ $k ], $next[ $k ] ) ) {
 				$changed++;
 			}
 		}
@@ -653,7 +743,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 	} else {
 		foreach ( $next as $k => $v ) {
 			$old = isset( $all[ $k ] ) ? (string) ( $all[ $k ]['name'] ?? '' ) : '';
-			if ( ! isset( $all[ $k ] ) || ! $same_name( $old, $v['name'] ) ) {
+			if ( ! isset( $all[ $k ] ) || ! $same_identity( $all[ $k ], $v ) ) {
 				if ( $human_verified && '' !== $old ) {
 					gasf_crm_face_prediction_outcome( $id, $old, 'negative', $v['box'] );
 				}
@@ -671,7 +761,6 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		update_post_meta( $id, '_gasf_face_labeled_at', current_time( 'mysql', true ) );
 		gasf_crm_faces_learning_touch( $id );
 	}
-	gasf_crm_face_person_terms_ensure( wp_list_pluck( $next, 'name' ) );
 	return $changed;
 }
 
@@ -687,9 +776,8 @@ function gasf_crm_face_person_terms_ensure( array $names ) {
 	foreach ( $names as $n ) {
 		$n = trim( sanitize_text_field( (string) $n ) );
 		if ( '' === $n ) { continue; }
-		$k = function_exists( 'gasf_photo_person_key' )
-			? gasf_photo_person_key( $n, true )
-			: strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( $n, ENT_QUOTES ) ) );
+		$identity_keys = gasf_crm_face_name_keys( $n );
+		$k = $identity_keys ? (string) $identity_keys[0] : '';
 		if ( '' !== $k && ! isset( $want[ $k ] ) ) { $want[ $k ] = $n; }
 	}
 	if ( ! $want ) { return 0; }
@@ -701,9 +789,7 @@ function gasf_crm_face_person_terms_ensure( array $names ) {
 	) );
 	if ( ! is_wp_error( $terms ) ) {
 		foreach ( $terms as $t ) {
-			$keys = function_exists( 'gasf_photo_person_keys' )
-				? gasf_photo_person_keys( (string) $t->name )
-				: array( strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( (string) $t->name, ENT_QUOTES ) ) ) );
+			$keys = gasf_crm_face_name_keys( (string) $t->name );
 			foreach ( $keys as $k ) {
 				if ( '' !== $k ) { $have[ $k ] = true; }
 			}
@@ -712,9 +798,7 @@ function gasf_crm_face_person_terms_ensure( array $names ) {
 
 	$added = 0;
 	foreach ( $want as $name ) {
-		$keys = function_exists( 'gasf_photo_person_keys' )
-			? gasf_photo_person_keys( $name )
-			: array( strtolower( preg_replace( '/\s+/u', ' ', html_entity_decode( (string) $name, ENT_QUOTES ) ) ) );
+		$keys = gasf_crm_face_name_keys( $name );
 		$exists = false;
 		foreach ( $keys as $k ) {
 			if ( isset( $have[ $k ] ) ) { $exists = true; break; }
@@ -871,14 +955,117 @@ function gasf_crm_face_labels_for( $attachment_id ) {
 	$id  = (int) $attachment_id;
 	$raw = get_post_meta( $id, '_gasf_face_labels', true );
 	if ( ! is_array( $raw ) ) { return array(); }
+	$terms = get_terms( array(
+		'taxonomy'   => 'gasf_photo_person',
+		'hide_empty' => false,
+	) );
 	$out = array();
 	foreach ( $raw as $r ) {
 		$box = array_map( 'intval', (array) ( $r['box'] ?? array() ) );
-		$name = trim( sanitize_text_field( (string) ( $r['name'] ?? '' ) ) );
+		$name = trim( sanitize_text_field( (string) ( $r['canonical_name'] ?? $r['name'] ?? '' ) ) );
 		if ( 4 !== count( $box ) || '' === $name ) { continue; }
-		$out[] = array( 'name' => $name, 'box' => array_values( $box ) );
+		$identity = gasf_crm_face_person_identity( $name, (int) ( $r['person_id'] ?? 0 ), $terms );
+		$out[] = array(
+			'name'           => (string) $identity['canonical_name'],
+			'person_id'      => (int) $identity['person_id'],
+			'canonical_name' => (string) $identity['canonical_name'],
+			'box'            => array_values( $box ),
+		);
 	}
 	return $out;
+}
+
+/** Stable person facts for taxonomy tags on one photo. */
+function gasf_crm_face_person_facts( $attachment_id ) {
+	$photo_terms = wp_get_object_terms( (int) $attachment_id, 'gasf_photo_person' );
+	if ( is_wp_error( $photo_terms ) || ! $photo_terms ) { return array(); }
+	$all_terms = get_terms( array(
+		'taxonomy'   => 'gasf_photo_person',
+		'hide_empty' => false,
+	) );
+	$out = array();
+	foreach ( $photo_terms as $term ) {
+		$identity = gasf_crm_face_person_identity( (string) $term->name, (int) $term->term_id, $all_terms );
+		$person_id = (int) $identity['person_id'];
+		if ( $person_id <= 0 || isset( $out[ $person_id ] ) ) { continue; }
+		$out[ $person_id ] = $identity;
+	}
+	ksort( $out, SORT_NUMERIC );
+	return array_values( $out );
+}
+
+/**
+ * Rewrite stored label facts when a taxonomy identity is renamed or merged.
+ *
+ * All relevant photo locks are acquired before the first write, so a busy
+ * scanner cannot leave a half-remapped identity.
+ */
+function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_name ) {
+	$from_id = max( 0, (int) $from_id );
+	$to_id   = max( 0, (int) $to_id );
+	$from_name = trim( sanitize_text_field( (string) $from_name ) );
+	$to_name = html_entity_decode( trim( sanitize_text_field( (string) $to_name ) ), ENT_QUOTES, 'UTF-8' );
+	if ( $from_id <= 0 || $to_id <= 0 || '' === $to_name ) {
+		return new WP_Error( 'gasf_crm_bad', 'Valid source and destination person identities are required.', array( 'status' => 400 ) );
+	}
+
+	$ids = get_posts( array(
+		'post_type'      => 'attachment',
+		'post_status'    => array( 'inherit', 'private' ),
+		'posts_per_page' => -1,
+		'fields'         => 'ids',
+		'no_found_rows'  => true,
+		'meta_query'     => array(
+			array( 'key' => '_gasf_face_labels', 'compare' => 'EXISTS' ),
+		),
+	) );
+	$plans = array();
+	foreach ( $ids as $id ) {
+		$raw = get_post_meta( (int) $id, '_gasf_face_labels', true );
+		if ( ! is_array( $raw ) ) { continue; }
+		$changed = false;
+		foreach ( $raw as &$label ) {
+			if ( ! is_array( $label ) ) { continue; }
+			$person_id = (int) ( $label['person_id'] ?? 0 );
+			$name = (string) ( $label['canonical_name'] ?? $label['name'] ?? '' );
+			if ( $person_id !== $from_id && ( $person_id > 0 || ! gasf_crm_face_name_same( $from_name, $name ) ) ) {
+				continue;
+			}
+			$label['name'] = $to_name;
+			$label['person_id'] = $to_id;
+			$label['canonical_name'] = $to_name;
+			$changed = true;
+		}
+		unset( $label );
+		if ( $changed ) { $plans[ (int) $id ] = $raw; }
+	}
+	if ( ! $plans ) { return 0; }
+
+	$locks = array();
+	foreach ( array_keys( $plans ) as $id ) {
+		$locks[ $id ] = gasf_crm_faces_try_lock( $id, 'label' );
+		if ( '' !== $locks[ $id ] ) { continue; }
+		foreach ( $locks as $held_id => $token ) {
+			if ( '' !== $token ) { gasf_crm_faces_unlock( $held_id, 'label', $token ); }
+		}
+		return new WP_Error( 'gasf_crm_busy', 'A face label is being updated. Try the person change again in a moment.', array( 'status' => 409 ) );
+	}
+
+	try {
+		foreach ( $plans as $id => $labels ) {
+			update_post_meta( $id, '_gasf_face_labels', array_values( $labels ) );
+			$stored = get_post_meta( $id, '_gasf_face_labels', true );
+			if ( ! is_array( $stored ) || count( $stored ) !== count( $labels ) ) {
+				return new WP_Error( 'gasf_crm_store', 'Canonical face-label identities could not be verified.', array( 'status' => 500 ) );
+			}
+			gasf_crm_faces_learning_touch( $id );
+		}
+	} finally {
+		foreach ( $locks as $id => $token ) {
+			gasf_crm_faces_unlock( $id, 'label', $token );
+		}
+	}
+	return count( $plans );
 }
 
 /** Store, clear, and read local-model caption suggestions (separate from truth). */
@@ -1015,6 +1202,7 @@ function gasf_crm_faces_scan_digest( array $item ) {
 	ksort( $boxes );
 	return md5( wp_json_encode( array(
 		'id'      => $id,
+		'engine'  => gasf_crm_face_engine( $item['engine'] ?? '' ),
 		'found'   => $found,
 		'faces'   => $faces,
 		'boxes'   => $boxes,
@@ -1111,8 +1299,10 @@ function gasf_crm_faces_metrics( $sample_limit = 150 ) {
 	return $out;
 }
 
-/** Bounded explicit outcomes for local empirical confidence calibration. */
-function gasf_crm_faces_calibration_samples( $limit = 5000 ) {
+/** Bounded explicit outcomes for one recognition engine's empirical calibration. */
+function gasf_crm_faces_calibration_samples( $raw_engine, $limit = 5000 ) {
+	$engine = gasf_crm_face_engine( $raw_engine );
+	if ( '' === $engine ) { return array(); }
 	$limit = min( 5000, max( 20, (int) $limit ) );
 	$ids = get_posts( array(
 		'post_type'      => 'attachment',
@@ -1130,11 +1320,13 @@ function gasf_crm_faces_calibration_samples( $limit = 5000 ) {
 	$out = array();
 	foreach ( $ids as $id ) {
 		foreach ( gasf_crm_face_predictions_for( $id ) as $record ) {
+			if ( $engine !== (string) ( $record['engine'] ?? '' ) ) { continue; }
 			if ( ! in_array( $record['outcome'], array( 'positive', 'negative' ), true ) ) { continue; }
 			$out[] = array(
 				'photo'      => (int) $id,
 				'name'       => (string) $record['name'],
 				'canonical'  => (string) $record['canonical'],
+				'engine'     => $engine,
 				'confidence' => (int) $record['confidence'],
 				'outcome'    => (string) $record['outcome'],
 			);
@@ -1145,6 +1337,7 @@ function gasf_crm_faces_calibration_samples( $limit = 5000 ) {
 }
 
 function gasf_crm_faces_calibration_report_clean( array $raw ) {
+	$engine = gasf_crm_face_engine( $raw['engine'] ?? '' );
 	$positive  = min( 5000, max( 0, (int) ( $raw['positive'] ?? 0 ) ) );
 	$negative  = min( 5000 - $positive, max( 0, (int) ( $raw['negative'] ?? 0 ) ) );
 	$evaluated = $positive + $negative;
@@ -1176,7 +1369,8 @@ function gasf_crm_faces_calibration_report_clean( array $raw ) {
 		);
 	}
 	return array(
-		'version'               => 1,
+		'version'               => 2,
+		'engine'                => $engine,
 		'evaluated'             => $evaluated,
 		'positive'              => $positive,
 		'negative'              => $negative,
@@ -1192,6 +1386,9 @@ function gasf_crm_faces_calibration_report_clean( array $raw ) {
 
 /** Store the local scanner's aggregate report under a short atomic option lock. */
 function gasf_crm_faces_calibration_report_store( array $raw ) {
+	if ( '' === gasf_crm_face_engine( $raw['engine'] ?? '' ) ) {
+		return new WP_Error( 'gasf_crm_bad', 'A recognition engine is required for calibration reporting.', array( 'status' => 400 ) );
+	}
 	$lock_key = 'gasf_crm_faces_calibration_lock';
 	$token = wp_generate_uuid4();
 	$now = time();
@@ -1209,7 +1406,11 @@ function gasf_crm_faces_calibration_report_store( array $raw ) {
 		$clean = gasf_crm_faces_calibration_report_clean( $raw );
 		update_option( 'gasf_crm_faces_calibration_report', $clean, false );
 		$stored = get_option( 'gasf_crm_faces_calibration_report', array() );
-		if ( ! is_array( $stored ) || (int) ( $stored['evaluated'] ?? -1 ) !== $clean['evaluated'] ) {
+		if (
+			! is_array( $stored )
+			|| (string) ( $stored['engine'] ?? '' ) !== $clean['engine']
+			|| (int) ( $stored['evaluated'] ?? -1 ) !== $clean['evaluated']
+		) {
 			return new WP_Error( 'gasf_crm_store', 'The calibration report could not be verified.', array( 'status' => 500 ) );
 		}
 		return $clean;
@@ -1387,9 +1588,10 @@ add_action( 'rest_api_init', function () {
 					if ( $faces_scanned ) {
 						$faces = (array) ( $item['faces'] ?? array() );
 						$found = (int) ( $item['found'] ?? 0 );
+						$engine = gasf_crm_face_engine( $item['engine'] ?? '' );
 						$accepted_names = 0;
 						$accepted_labels = 0;
-						$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels );
+						$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels, $engine );
 						$stored += $kept;
 						$auto_names += (int) $accepted_names;
 						$auto_labels += (int) $accepted_labels;
@@ -1405,7 +1607,6 @@ add_action( 'rest_api_init', function () {
 						gasf_crm_face_boxes_store( $id, $boxes, $found );
 						if ( $kept > 0 ) { update_post_meta( $id, '_gasf_face_suggested_at', current_time( 'mysql', true ) ); }
 						else { delete_post_meta( $id, '_gasf_face_suggested_at' ); }
-						$engine = trim( sanitize_text_field( (string) ( $item['engine'] ?? '' ) ) );
 						if ( '' !== $engine ) { update_post_meta( $id, '_gasf_face_engine', $engine ); }
 					}
 					if ( array_key_exists( 'caption', $item ) && gasf_crm_caption_suggestion_store(
@@ -1764,8 +1965,13 @@ add_action( 'rest_api_init', function () {
 			'permission_callback' => $guard,
 			'callback'            => function ( WP_REST_Request $req ) {
 				$limit = min( 5000, max( 20, (int) $req->get_param( 'limit' ) ?: 5000 ) );
+				$engine = gasf_crm_face_engine( $req->get_param( 'engine' ) );
+				if ( '' === $engine ) {
+					return new WP_Error( 'gasf_crm_bad', 'A recognition engine is required for calibration data.', array( 'status' => 400 ) );
+				}
 				return array(
-					'samples' => gasf_crm_faces_calibration_samples( $limit ),
+					'engine' => $engine,
+					'samples' => gasf_crm_faces_calibration_samples( $engine, $limit ),
 					'current_threshold' => gasf_crm_faces_auto_accept_threshold(),
 				);
 			},
@@ -1798,6 +2004,11 @@ add_action( 'rest_api_init', function () {
 			$after    = trim( (string) $req->get_param( 'after' ) );
 			$include_empty = rest_sanitize_boolean( $req->get_param( 'include_empty' ) );
 			$limit    = min( 200, max( 1, (int) $req->get_param( 'limit' ) ?: 100 ) );
+			$requested = $req->get_param( 'photos' );
+			if ( is_string( $requested ) ) { $requested = explode( ',', $requested ); }
+			$requested = array_slice( array_values( array_unique( array_filter(
+				array_map( 'intval', (array) $requested )
+			) ) ), 0, 50 );
 
 			if ( '' !== $after ) {
 				$ts = strtotime( $after );
@@ -1805,20 +2016,20 @@ add_action( 'rest_api_init', function () {
 				else { $after = gmdate( 'Y-m-d H:i:s', $ts ); }
 			}
 
-			$ids = get_posts( array(
+			$query = array(
 				'post_type'      => 'attachment',
 				'post_status'    => array( 'inherit', 'private' ),
-				'posts_per_page' => $limit,
+				'posts_per_page' => $requested ? count( $requested ) : $limit,
 				'fields'         => 'ids',
 				'no_found_rows'  => true,
-				'orderby'        => array( 'modified' => 'ASC', 'ID' => 'ASC' ),
+				'orderby'        => $requested ? 'post__in' : array( 'modified' => 'ASC', 'ID' => 'ASC' ),
 				'post_mime_type' => 'image',
-				'post__not_in'   => array(),
+				'post__in'       => $requested,
 				'meta_query'     => array(
 					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 				),
 				'tax_query'      => array(),
-				'date_query'     => '' !== $after
+				'date_query'     => ! $requested && '' !== $after
 					? array(
 						array(
 							'column'    => 'post_modified_gmt',
@@ -1827,29 +2038,32 @@ add_action( 'rest_api_init', function () {
 						),
 					)
 					: array(),
-			) );
+			);
+			$ids = get_posts( $query );
 
 			$out = array();
 			foreach ( $ids as $id ) {
-				if ( (int) $id <= $since ) { continue; }
+				if ( ! $requested && (int) $id <= $since ) { continue; }
 				$modified = (string) get_post_field( 'post_modified_gmt', $id );
 				if ( '0000-00-00 00:00:00' === $modified || '' === $modified ) {
 					$modified = (string) get_post_field( 'post_date_gmt', $id );
 				}
-				if ( '' !== $after ) {
+				if ( ! $requested && '' !== $after ) {
 					if ( $modified < $after ) { continue; }
 					if ( $modified === $after && (int) $id <= $after_id ) { continue; }
 				}
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$labels = gasf_crm_face_labels_for( $id );
-				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+				$person_facts = gasf_crm_face_person_facts( $id );
+				$people = array_values( wp_list_pluck( $person_facts, 'canonical_name' ) );
 				if ( ! $include_empty && ! $labels && ! $people ) { continue; }
 				$out[] = array(
 					'id'     => (int) $id,
 					'modified' => $modified,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
 					'people' => array_map( 'html_entity_decode', $people ),
+					'person_facts' => $person_facts,
 					'labels' => $labels,
 					'pipeline' => gasf_crm_faces_photo_state( $id ),
 				);
@@ -2045,7 +2259,12 @@ function gasf_crm_faces_admin_section() {
 		. '<p class="description" style="margin:6px 0 0">Enable this to accept suggestions at or above this confidence automatically. Matching label hints are also stored for learning.</p>';
 	wp_nonce_field( 'gasf_crm' );
 	echo '<input type="hidden" name="gasf_crm_action" value="faces_auto_accept_save"></form>';
-	if ( is_array( $calibration ) && (int) ( $calibration['evaluated'] ?? 0 ) > 0 ) {
+	if (
+		is_array( $calibration )
+		&& '' !== gasf_crm_face_engine( $calibration['engine'] ?? '' )
+		&& (int) ( $calibration['evaluated'] ?? 0 ) > 0
+	) {
+		$calibration_engine = gasf_crm_face_engine( $calibration['engine'] );
 		$recommended = $calibration['recommended_threshold'] ?? null;
 		$calibration_text = null === $recommended
 			? sprintf(
@@ -2061,7 +2280,7 @@ function gasf_crm_faces_admin_section() {
 				100 * (float) ( $calibration['target_precision'] ?? 0.99 )
 			);
 		echo '<p style="max-width:820px;padding:10px;border-left:4px solid #72aee6;background:#f0f6fc"><strong>Confidence calibration:</strong> '
-			. esc_html( $calibration_text )
+			. esc_html( '[' . $calibration_engine . '] ' . $calibration_text )
 			. ' This is advice only; the saved auto-accept setting is never changed automatically.</p>';
 	} else {
 		echo '<p class="description" style="max-width:820px">Confidence calibration has insufficient evidence. '

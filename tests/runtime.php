@@ -608,6 +608,8 @@ final class GASF_CRM_Selftest {
 	public function test_face_suggestions() {
 		$this->snapshot_option( 'gasf_crm_faces_auto_accept_threshold' );
 		update_option( 'gasf_crm_faces_auto_accept_threshold', 95, false );
+		$engine_a = 'stub:engine-a';
+		$engine_b = 'stub:engine-b';
 		$label_queue = $this->rest_get( '/gasf/v1/crm/photos/faces/label-queue', array( 'limit' => 1 ) );
 		$this->ok(
 			95 === (int) ( $label_queue['auto_accept_threshold'] ?? 0 ),
@@ -640,9 +642,11 @@ final class GASF_CRM_Selftest {
 
 		// High-confidence suggestions can be auto-accepted when enabled.
 		$auto = $this->library_photo( 'st-faces-auto' );
+		$auto_names = 0;
+		$auto_labels_stored = 0;
 		gasf_crm_faces_store( $auto, array(
 			array( 'box' => array( 8, 8, 32, 32 ), 'name' => 'Selftest Auto', 'confidence' => 0.99 ),
-		), 1 );
+		), 1, $auto_names, $auto_labels_stored, $engine_a );
 		$auto_people = (array) gasf_crm_photo_term_names( $auto, 'gasf_photo_person' );
 		$this->ok( in_array( 'Selftest Auto', $auto_people, true ),
 			'faces: high-confidence suggestions can auto-accept onto the photo' );
@@ -730,9 +734,14 @@ final class GASF_CRM_Selftest {
 
 		// Calibration records only explicit box-level positives and explicit rejections.
 		$cal_positive = $this->library_photo( 'st-faces-cal-positive' );
+		$cal_names = 0;
+		$cal_labels = 0;
 		gasf_crm_faces_store( $cal_positive, array(
 			array( 'box' => array( 12, 14, 36, 38 ), 'name' => 'Jürgen Calibration', 'confidence' => 0.93 ),
-		), 1 );
+		), 1, $cal_names, $cal_labels, $engine_a );
+		gasf_crm_faces_store( $cal_positive, array(
+			array( 'box' => array( 12, 14, 36, 38 ), 'name' => 'Jurgen Calibration', 'confidence' => 0.94 ),
+		), 1, $cal_names, $cal_labels, $engine_b );
 		gasf_crm_face_labels_store( $cal_positive, array(
 			array( 'box' => array( 12, 14, 36, 38 ), 'name' => 'Jurgen Calibration' ),
 		), true, true );
@@ -741,17 +750,18 @@ final class GASF_CRM_Selftest {
 		), true, true );
 		$positive_predictions = gasf_crm_face_predictions_for( $cal_positive );
 		$this->ok(
-			1 === count( $positive_predictions )
-			&& 'positive' === (string) ( $positive_predictions[0]['outcome'] ?? '' )
-			&& gasf_crm_face_canonical_key( 'Jürgen Calibration' ) === (string) ( $positive_predictions[0]['canonical'] ?? '' )
+			2 === count( $positive_predictions )
+			&& array( $engine_a, $engine_b ) === array_values( wp_list_pluck( $positive_predictions, 'engine' ) )
+			&& array( 'positive', 'positive' ) === array_values( wp_list_pluck( $positive_predictions, 'outcome' ) )
+			&& $positive_predictions[0]['key'] !== $positive_predictions[1]['key']
 			&& gasf_crm_face_name_same( 'Jürgen Calibration', 'Jurgen Calibration' ),
-			'faces: full alias matching creates one idempotent positive calibration outcome'
+			'faces: aliases match idempotently while each engine retains separate evidence'
 		);
 
 		$cal_corrected = $this->library_photo( 'st-faces-cal-corrected' );
 		gasf_crm_faces_store( $cal_corrected, array(
 			array( 'box' => array( 14, 16, 38, 40 ), 'name' => 'Old Calibration', 'confidence' => 0.92 ),
-		), 1 );
+		), 1, $cal_names, $cal_labels, $engine_a );
 		update_post_meta( $cal_corrected, '_gasf_face_boxes', array(
 			array( 'box' => array( 14, 16, 38, 40 ) ),
 		) );
@@ -771,7 +781,7 @@ final class GASF_CRM_Selftest {
 		$cal_negative = $this->library_photo( 'st-faces-cal-negative' );
 		gasf_crm_faces_store( $cal_negative, array(
 			array( 'box' => array( 18, 20, 34, 36 ), 'name' => 'Wrong Calibration', 'confidence' => 0.88 ),
-		), 1 );
+		), 1, $cal_names, $cal_labels, $engine_a );
 		$negative_first  = gasf_crm_face_reject( $cal_negative, 'Wrong Calibration' );
 		$negative_second = gasf_crm_face_reject( $cal_negative, 'wrong calibration' );
 		$negative_predictions = gasf_crm_face_predictions_for( $cal_negative );
@@ -782,7 +792,19 @@ final class GASF_CRM_Selftest {
 			&& 'negative' === (string) ( $negative_predictions[0]['outcome'] ?? '' ),
 			'faces: explicit rejection creates one durable, idempotent negative calibration outcome'
 		);
-		$cal_samples = gasf_crm_faces_calibration_samples( 5000 );
+		$cal_legacy = $this->library_photo( 'st-faces-cal-legacy' );
+		update_post_meta( $cal_legacy, '_gasf_face_predictions', array(
+			array(
+				'key'         => sha1( 'legacy-calibration' ),
+				'name'        => 'Legacy Calibration',
+				'confidence'  => 99,
+				'box'         => array( 4, 4, 24, 24 ),
+				'outcome'     => 'positive',
+				'recorded_at' => current_time( 'mysql', true ),
+				'outcome_at'  => current_time( 'mysql', true ),
+			),
+		) );
+		$cal_samples = gasf_crm_faces_calibration_samples( $engine_a, 5000 );
 		$cal_outcomes = array();
 		foreach ( $cal_samples as $sample ) {
 			if ( in_array( (int) ( $sample['photo'] ?? 0 ), array( $cal_positive, $cal_negative ), true ) ) {
@@ -792,12 +814,30 @@ final class GASF_CRM_Selftest {
 		sort( $cal_outcomes );
 		$this->ok(
 			array( 'negative', 'positive' ) === $cal_outcomes,
-			'faces: bounded calibration feed returns only explicit evaluated outcomes'
+			'faces: calibration feed returns only explicit outcomes for the requested engine'
+		);
+		$engine_b_feed = $this->rest_get( '/gasf/v1/crm/photos/faces/calibration', array(
+			'engine' => $engine_b,
+			'limit'  => 5000,
+		) );
+		$engine_b_samples = (array) ( $engine_b_feed['samples'] ?? array() );
+		$this->ok(
+			$engine_b === (string) ( $engine_b_feed['engine'] ?? '' )
+			&& 1 === count( $engine_b_samples )
+			&& $engine_b === (string) ( $engine_b_samples[0]['engine'] ?? '' )
+			&& $cal_positive === (int) ( $engine_b_samples[0]['photo'] ?? 0 ),
+			'faces: scanner calibration route isolates mixed evidence by requested engine'
+		);
+		$this->ok(
+			! gasf_crm_faces_calibration_samples( 'legacy-engine', 5000 )
+			&& is_wp_error( $this->rest_get( '/gasf/v1/crm/photos/faces/calibration', array( 'limit' => 20 ) ) ),
+			'faces: legacy engine-less evidence is preserved but excluded from recommendations'
 		);
 		$this->snapshot_option( 'gasf_crm_faces_calibration_report' );
 		$this->snapshot_option( 'gasf_crm_faces_calibration_lock' );
 		$threshold_before_report = gasf_crm_faces_auto_accept_threshold();
 		$stored_report = gasf_crm_faces_calibration_report_store( array(
+			'engine'                => $engine_a,
 			'evaluated'             => 700,
 			'positive'              => 700,
 			'negative'              => 0,
@@ -812,6 +852,7 @@ final class GASF_CRM_Selftest {
 		) );
 		$this->ok(
 			! is_wp_error( $stored_report )
+			&& $engine_a === (string) ( $stored_report['engine'] ?? '' )
 			&& 99 === (int) ( $stored_report['recommended_threshold'] ?? 0 )
 			&& $threshold_before_report === gasf_crm_faces_auto_accept_threshold(),
 			'faces: calibration reporting is bounded advice and never changes auto-accept'
@@ -1026,6 +1067,78 @@ final class GASF_CRM_Selftest {
 			$cleanup_term = get_term_by( 'name', $cleanup_name, 'gasf_photo_person' );
 			if ( $cleanup_term ) { wp_delete_term( (int) $cleanup_term->term_id, 'gasf_photo_person' ); }
 		}
+
+		// Alias labels, taxonomy renames, and merges keep one stable scanner identity.
+		$identity_suffix = (string) wp_rand( 100000, 999999 );
+		$identity_photo = $this->library_photo( 'st-face-identity-' . $identity_suffix );
+		update_post_meta( $identity_photo, '_gasf_face_boxes', array(
+			array( 'box' => array( 10, 10, 30, 30 ) ),
+			array( 'box' => array( 60, 10, 30, 30 ) ),
+		) );
+		gasf_crm_face_labels_record( $identity_photo, array(
+			array( 'i' => 0, 'name' => 'Juergen Identity ' . $identity_suffix ),
+			array( 'i' => 1, 'name' => 'Jurgen Identity ' . $identity_suffix ),
+		) );
+		$identity_labels = gasf_crm_face_labels_for( $identity_photo );
+		$identity_id = (int) ( $identity_labels[0]['person_id'] ?? 0 );
+		$identity_term = get_term( $identity_id, 'gasf_photo_person' );
+		$identity_term_name = $identity_term && ! is_wp_error( $identity_term )
+			? (string) $identity_term->name
+			: '';
+		$this->ok(
+			2 === count( $identity_labels )
+			&& $identity_id > 0
+			&& $identity_id === (int) ( $identity_labels[1]['person_id'] ?? 0 )
+			&& $identity_term
+			&& ! is_wp_error( $identity_term ),
+			'faces: expanded and plain-ASCII aliases share one stable taxonomy identity'
+		);
+
+		$renamed_identity = 'Jürgen Canonical ' . $identity_suffix;
+		$renamed_result = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term'   => $identity_id,
+			'name'   => $identity_term_name,
+			'into'   => $renamed_identity,
+			'op_id'  => 'selftest-face-identity-rename-' . $identity_suffix,
+		) );
+		$renamed_labels = gasf_crm_face_labels_for( $identity_photo );
+		$this->ok(
+			! is_wp_error( $renamed_result )
+			&& $identity_id === (int) ( $renamed_labels[0]['person_id'] ?? 0 )
+			&& $renamed_identity === (string) ( $renamed_labels[0]['canonical_name'] ?? '' ),
+			'faces: a taxonomy rename updates canonical label facts without changing identity'
+		);
+
+		$destination_name = 'Identity Destination ' . $identity_suffix;
+		$destination_insert = wp_insert_term( $destination_name, 'gasf_photo_person' );
+		$destination_id = is_wp_error( $destination_insert ) ? 0 : (int) $destination_insert['term_id'];
+		$merged_result = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action'    => 'merge',
+			'term'      => $identity_id,
+			'name'      => $renamed_identity,
+			'into_term' => $destination_id,
+			'into'      => $destination_name,
+			'op_id'     => 'selftest-face-identity-merge-' . $identity_suffix,
+		) );
+		$merged_labels = gasf_crm_face_labels_for( $identity_photo );
+		wp_set_object_terms( $identity_photo, array( $destination_id ), 'gasf_photo_person', false );
+		$identity_feed = $this->rest_get( '/gasf/v1/crm/photos/faces/confirmed', array(
+			'photos'       => (string) $identity_photo,
+			'include_empty' => 1,
+			'limit'        => 1,
+		) );
+		$identity_feed_photo = (array) ( $identity_feed['photos'][0] ?? array() );
+		$this->ok(
+			! is_wp_error( $merged_result )
+			&& ! term_exists( $identity_id, 'gasf_photo_person' )
+			&& $destination_id === (int) ( $merged_labels[0]['person_id'] ?? 0 )
+			&& $destination_name === (string) ( $merged_labels[0]['canonical_name'] ?? '' )
+			&& $destination_id === (int) ( $identity_feed_photo['person_facts'][0]['person_id'] ?? 0 )
+			&& $destination_id === (int) ( $identity_feed_photo['labels'][0]['person_id'] ?? 0 ),
+			'faces: a merge remaps label and confirmed-feed facts with no competing identity'
+		);
+		if ( $destination_id > 0 ) { wp_delete_term( $destination_id, 'gasf_photo_person' ); }
 
 		// Label-only photos are still offered to the learning feed.
 		$learn = $this->library_photo( 'st-face-learn-label-only' );

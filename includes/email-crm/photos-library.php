@@ -1177,6 +1177,8 @@ add_action( 'rest_api_init', function () {
 			if ( 'rename' === $action ) {
 				$to = trim( sanitize_text_field( (string) $req->get_param( 'into' ) ) );
 				if ( '' === $to ) { return new WP_Error( 'gasf_crm_bad', 'A new spelling is needed.', array( 'status' => 400 ) ); }
+				$affected_posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
+				$affected_posts = is_wp_error( $affected_posts ) ? array() : array_map( 'intval', $affected_posts );
 
 				// Already somebody else? Then this is a merge wearing the wrong
 				// hat, and doing it as a rename would fail on the duplicate slug
@@ -1206,6 +1208,20 @@ add_action( 'rest_api_init', function () {
 				if ( is_wp_error( $res ) ) {
 					gasf_crm_op_finish( $op, false );
 					return $res;
+				}
+				if ( function_exists( 'gasf_crm_face_labels_identity_remap' ) ) {
+					$remapped = gasf_crm_face_labels_identity_remap(
+						(int) $term->term_id,
+						(string) $term->name,
+						(int) $term->term_id,
+						$to
+					);
+					if ( is_wp_error( $remapped ) ) {
+						gasf_crm_log( 'Photo library: renamed person, but face-label display refresh was deferred: ' . $remapped->get_error_message() );
+					}
+				}
+				if ( function_exists( 'gasf_crm_faces_learning_touch' ) ) {
+					foreach ( $affected_posts as $pid ) { gasf_crm_faces_learning_touch( $pid ); }
 				}
 
 				// Same $term->count trap as the panel had. Worse here: this one
@@ -1259,6 +1275,18 @@ add_action( 'rest_api_init', function () {
 
 				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
 				$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
+				if ( function_exists( 'gasf_crm_face_labels_identity_remap' ) ) {
+					$remapped = gasf_crm_face_labels_identity_remap(
+						(int) $term->term_id,
+						(string) $term->name,
+						(int) $dest->term_id,
+						(string) $dest->name
+					);
+					if ( is_wp_error( $remapped ) ) {
+						gasf_crm_op_finish( $op, false );
+						return $remapped;
+					}
+				}
 
 				// Appended, never replacing: a photo may well have four other
 				// people on it, and merging one of them must not clear the rest.
