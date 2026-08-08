@@ -1056,6 +1056,7 @@ def _label_ui_html(label_flow=False, session_token=""):
 <html><head><meta charset="utf-8"><title>GASF Face Labeler</title>
 <style>
 body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
+:root{--face-border-width:1px;--face-border-color:rgba(96,165,250,.65);--face-fill-color:rgba(37,99,235,.04)}
 .top{position:sticky;top:0;z-index:20;padding:12px 16px;border-bottom:1px solid #26324a;background:#0f172a;
 display:flex;gap:12px;align-items:center;justify-content:space-between}
 .topactions{display:flex;gap:12px;align-items:center}
@@ -1074,14 +1075,15 @@ display:flex;gap:12px;align-items:center;justify-content:space-between}
 .gph{display:block;width:100%;aspect-ratio:1/1;border-radius:6px;background:#0b1220;border:1px dashed #334155}
 .gmeta{display:block;font-size:12px;padding:6px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .detail{display:grid;grid-template-columns:minmax(0,1fr) clamp(300px,34vw,430px);gap:14px;align-items:start}
+.detail.on{display:grid}
 .stage{position:relative;min-width:0;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
 .frame{position:relative;display:inline-block;max-width:100%;line-height:0}
 #photo{display:block;max-width:100%;max-height:calc(100vh - 130px);width:auto;height:auto;position:relative;z-index:1}
 #ov{position:absolute;inset:0;pointer-events:none;z-index:2}
-.fb{position:absolute;border:3px solid #60a5fa;background:rgba(37,99,235,.16);border-radius:7px;
-box-shadow:0 0 0 1px rgba(15,23,42,.75),0 0 0 1px rgba(15,23,42,.75) inset}
-.fb span{position:absolute;left:0;top:0;padding:2px 7px;background:#1d4ed8;border:1px solid #93c5fd;
-border-radius:0 0 7px 0;font-weight:800;font-size:clamp(14px,1.15vw,18px);line-height:1.15;min-width:1.5em;text-align:center}
+.fb{position:absolute;box-sizing:border-box;border:var(--face-border-width) solid var(--face-border-color);
+background:var(--face-fill-color);border-radius:5px}
+.fb span{position:absolute;left:0;top:0;padding:1px 4px;background:#1d4ed8;border:1px solid #93c5fd;
+border-radius:0 0 5px 0;font-weight:800;font-size:12px;line-height:1.15;min-width:1.2em;text-align:center}
 .fb-ext span{border-radius:999px;padding:1px 6px;font-size:12px;line-height:1.2;min-width:1.2em}
 .fb-ext-right-up span{left:100%;top:0;transform:translate(6px,-100%)}
 .fb-ext-right-down span{left:100%;top:0;transform:translate(6px,6px)}
@@ -1092,6 +1094,12 @@ display:flex;flex-direction:column;max-height:calc(100vh - 130px)}
 .muted{color:#94a3b8}
 .people{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
 .pchip{background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:3px 10px;font-size:12px}
+.boxprefs{display:grid;grid-template-columns:auto minmax(90px,1fr) 48px;gap:5px 8px;align-items:center;
+margin:0 0 10px;padding:8px;border:1px solid #26324a;border-radius:6px;background:#0b1220}
+.boxprefs strong{grid-column:1/-1;font-size:12px}
+.boxprefs label{font-size:12px;color:#cbd5e1}
+.boxprefs input{width:100%}
+.boxprefs output{font-size:12px;color:#94a3b8;text-align:right}
 .rows{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto}
 .row{display:grid;grid-template-columns:64px 1fr auto;gap:6px;align-items:center}
 .row label{font-size:12px;color:#cbd5e1}
@@ -1129,6 +1137,11 @@ display:flex;flex-direction:column;max-height:calc(100vh - 130px)}
       <div class="muted">People already on this photo</div><div class="people" id="people"></div>
         <datalist id="peopleListLocal"></datalist>
         <datalist id="peopleListGlobal"></datalist>
+      <div class="boxprefs">
+        <strong>Face box visibility</strong>
+        <label for="boxWidth">Outline</label><input id="boxWidth" type="range" min="0" max="5" step="1" value="1"><output id="boxWidthValue">1 px</output>
+        <label for="boxOpacity">Opacity</label><input id="boxOpacity" type="range" min="20" max="100" step="5" value="65"><output id="boxOpacityValue">65%</output>
+      </div>
       <div class="rows" id="rows"></div>
       <div class="muted">Names save automatically when you move to another photo.</div>
       <div class="acts">
@@ -1163,6 +1176,17 @@ async function j(url,opt){
 }
 function setText(id,t){document.getElementById(id).textContent=t;}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function applyBoxVisibility(){
+  const width=Number(document.getElementById('boxWidth').value||1);
+  const opacity=Number(document.getElementById('boxOpacity').value||65);
+  const alpha=Math.max(.2,Math.min(1,opacity/100));
+  const root=document.documentElement.style;
+  root.setProperty('--face-border-width',`${width}px`);
+  root.setProperty('--face-border-color',`rgba(96,165,250,${alpha})`);
+  root.setProperty('--face-fill-color',`rgba(37,99,235,${(alpha*.06).toFixed(3)})`);
+  setText('boxWidthValue',`${width} px`);
+  setText('boxOpacityValue',`${opacity}%`);
+}
 function showOnly(id){
   document.querySelectorAll('.main > .view').forEach(v=>v.classList.toggle('on',v.id===id));
 }
@@ -1211,7 +1235,7 @@ function drawBoxes(p){
     const ww=Math.max(minW,Math.min(100-left,b[2]*100/w));
     const hh=Math.max(minH,Math.min(100-top,b[3]*100/h));
     const pxW=(ww*ow)/100, pxH=(hh*oh)/100;
-    const tiny = pxW < 52 || pxH < 52;
+    const tiny = pxW < 70 || pxH < 70;
     const side = (left + ww > 84) ? 'left' : 'right';
     const vert = top < 8 ? 'down' : 'up';
     const d=document.createElement('div');
@@ -1327,6 +1351,9 @@ function applyFilter(){
   setText('stat','');
 }
 async function init(){
+  document.getElementById('boxWidth').addEventListener('input',applyBoxVisibility);
+  document.getElementById('boxOpacity').addEventListener('input',applyBoxVisibility);
+  applyBoxVisibility();
   const m=await j('/api/meta');
   allGallery = (m.gallery||[]);
   (m.people||[]).forEach(addName);
@@ -2687,8 +2714,12 @@ def selftest():
             headers = {"X-GASF-Label-Token": token}
             page = requests.get(label_url, timeout=3)
             check_that(
-                page.status_code == 200 and "Finish labeling" in page.text,
-                "label UI: authenticated page renders finish action",
+                page.status_code == 200
+                and "Finish labeling" in page.text
+                and ".detail.on{display:grid}" in page.text
+                and 'id="boxWidth"' in page.text
+                and 'id="boxOpacity"' in page.text,
+                "label UI: detail keeps side controls and exposes box visibility settings",
             )
             cleared = requests.post(
                 base + "/api/save",
