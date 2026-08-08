@@ -1008,7 +1008,7 @@ async function init(){
   if (gf) {
     gf.onchange = applyFilter;
     const has = s => allGallery.some(g => g.status === s);
-    gf.value = has('partial') ? 'partial' : (has('untagged') ? 'untagged' : 'all');
+    gf.value = has('untagged') ? 'untagged' : (has('partial') ? 'partial' : 'all');
   }
   refreshNameList();
   applyFilter();
