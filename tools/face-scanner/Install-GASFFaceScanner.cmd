@@ -1,7 +1,9 @@
 @echo off
 setlocal
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install-GASFFaceScanner.ps1"
+pushd "%~dp0" >nul
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%CD%\Install-GASFFaceScanner.ps1"
 set "code=%ERRORLEVEL%"
+popd >nul
 echo.
 if not "%code%"=="0" echo Installation failed with exit code %code%.
 pause

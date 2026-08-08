@@ -25,7 +25,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2
-$payload = Join-Path $PSScriptRoot "payload"
+$scriptRoot = $PSScriptRoot
+$payload = Join-Path $scriptRoot "payload"
 $requiredPayload = @(
     "scan.py",
     "scan-gui.py",
@@ -35,6 +36,27 @@ $requiredPayload = @(
     "config.example.json",
     "README.md"
 )
+
+function Resolve-PayloadRoot(
+    [string]$ScriptRoot,
+    [string[]]$RequiredFiles
+) {
+    $candidates = @(
+        (Join-Path $ScriptRoot "payload"),
+        $ScriptRoot
+    )
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path $candidate -PathType Container)) { continue }
+        $complete = $true
+        foreach ($name in $RequiredFiles) {
+            if (Test-Path (Join-Path $candidate $name) -PathType Leaf) { continue }
+            $complete = $false
+            break
+        }
+        if ($complete) { return $candidate }
+    }
+    return $null
+}
 
 function Invoke-Native(
     [string]$FilePath,
@@ -217,11 +239,9 @@ function New-ScannerShortcut([string]$ShortcutPath, [string]$Pythonw, [string]$A
     $shortcut.Save()
 }
 
-foreach ($name in $requiredPayload) {
-    $path = Join-Path $payload $name
-    if (-not (Test-Path $path -PathType Leaf)) {
-        throw "Installer payload is incomplete: $name is missing. Extract the entire ZIP before running."
-    }
+$payload = Resolve-PayloadRoot -ScriptRoot $scriptRoot -RequiredFiles $requiredPayload
+if (-not $payload) {
+    throw "Installer files are incomplete. Required scanner files were not found either in '$scriptRoot\\payload' or next to Install-GASFFaceScanner.ps1."
 }
 if ($CaptionTimeout -lt 15 -or $CaptionTimeout -gt 300) {
     throw "CaptionTimeout must be between 15 and 300 seconds."
