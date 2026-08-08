@@ -762,6 +762,10 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                 prefill[str(best_i)] = name
 
         labeled = len(prefill)
+        # A one-face photo that already has exactly one person tag is already
+        # learnable without box labels; keep label mode focused on ambiguous work.
+        if labeled == 0 and len(boxes) == 1 and len(people) == 1:
+            continue
         if labeled <= 0:
             status = "untagged"
         elif labeled < len(boxes):
