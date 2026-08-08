@@ -1206,7 +1206,8 @@ add_action( 'rest_api_init', function () {
 						(string) $term->name,
 						(int) $term->term_id,
 						$to,
-						static function() use ( &$res, $term, $to ) {
+						static function() use ( &$res, $term, $to, $affected_posts ) {
+							$touch_snapshots = array();
 							$res = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
 								'name' => $to,
 								'slug' => sanitize_title( gasf_photo_translit( $to ) ),
@@ -1219,6 +1220,45 @@ add_action( 'rest_api_init', function () {
 									'slug' => (string) $term->slug,
 								) );
 								return new WP_Error( 'gasf_crm_save', 'The renamed person could not be verified.', array( 'status' => 500 ) );
+							}
+							if ( function_exists( 'gasf_crm_faces_learning_touch' ) ) {
+								foreach ( $affected_posts as $pid ) {
+									$pid = (int) $pid;
+									if ( $pid <= 0 ) { continue; }
+									$touch_snapshots[ $pid ] = function_exists( 'gasf_crm_faces_learning_snapshot' )
+										? gasf_crm_faces_learning_snapshot( $pid )
+										: array();
+									if ( gasf_crm_faces_learning_touch( $pid ) ) { continue; }
+									$restore_fail = array();
+									if ( function_exists( 'gasf_crm_faces_learning_restore' ) ) {
+										foreach ( $touch_snapshots as $sid => $snapshot ) {
+											if ( ! $snapshot ) { continue; }
+											if ( gasf_crm_faces_learning_restore( (int) $sid, $snapshot ) ) { continue; }
+											$restore_fail[] = (int) $sid;
+										}
+									}
+									$reverted = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
+										'name' => (string) $term->name,
+										'slug' => (string) $term->slug,
+									) );
+									if ( is_wp_error( $reverted ) ) { return $reverted; }
+									$back = get_term( (int) $term->term_id, 'gasf_photo_person' );
+									if ( ! $back || is_wp_error( $back ) || (string) $term->name !== (string) $back->name ) {
+										return new WP_Error( 'gasf_crm_store', 'The rename rollback could not be verified.', array( 'status' => 500 ) );
+									}
+									if ( $restore_fail ) {
+										return new WP_Error(
+											'gasf_crm_rollback',
+											'The rename failed, and not every learning revision could be restored.',
+											array( 'status' => 500, 'photos' => $restore_fail )
+										);
+									}
+									return new WP_Error(
+										'gasf_crm_store',
+										'The renamed person was saved, but a tagged photo learning revision could not be advanced.',
+										array( 'status' => 500 )
+									);
+								}
 							}
 							return $res;
 						}
@@ -1240,7 +1280,23 @@ add_action( 'rest_api_init', function () {
 					return $res;
 				}
 				if ( function_exists( 'gasf_crm_faces_learning_touch' ) ) {
-					foreach ( $affected_posts as $pid ) { gasf_crm_faces_learning_touch( $pid ); }
+					foreach ( $affected_posts as $pid ) {
+						if ( gasf_crm_faces_learning_touch( $pid ) ) { continue; }
+						$reverted = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
+							'name' => (string) $term->name,
+							'slug' => (string) $term->slug,
+						) );
+						if ( is_wp_error( $reverted ) ) {
+							gasf_crm_op_finish( $op, false );
+							return $reverted;
+						}
+						gasf_crm_op_finish( $op, false );
+						return new WP_Error(
+							'gasf_crm_store',
+							'The renamed person was saved, but a tagged photo learning revision could not be advanced.',
+							array( 'status' => 500 )
+						);
+					}
 				}
 
 				// Same $term->count trap as the panel had. Worse here: this one
@@ -1297,13 +1353,20 @@ add_action( 'rest_api_init', function () {
 				$move_terms = static function() use ( $posts, $term, $dest ) {
 					$attempted = array();
 					$had_dest = array();
-					$rollback = static function() use ( &$attempted, &$had_dest, $term, $dest ) {
+					$touch_snapshots = array();
+					$rollback = static function() use ( &$attempted, &$had_dest, &$touch_snapshots, $term, $dest ) {
 						foreach ( array_reverse( $attempted ) as $pid ) {
 							wp_set_object_terms( $pid, array( (int) $term->term_id ), 'gasf_photo_person', true );
 							if ( empty( $had_dest[ $pid ] ) ) {
 								wp_remove_object_terms( $pid, array( (int) $dest->term_id ), 'gasf_photo_person' );
 							}
 							if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+							if (
+								isset( $touch_snapshots[ $pid ] )
+								&& function_exists( 'gasf_crm_faces_learning_restore' )
+							) {
+								gasf_crm_faces_learning_restore( $pid, (array) $touch_snapshots[ $pid ] );
+							}
 						}
 					};
 
@@ -1312,6 +1375,9 @@ add_action( 'rest_api_init', function () {
 					foreach ( $posts as $pid ) {
 						$attempted[] = $pid;
 						$had_dest[ $pid ] = has_term( (int) $dest->term_id, 'gasf_photo_person', $pid );
+						$touch_snapshots[ $pid ] = function_exists( 'gasf_crm_faces_learning_snapshot' )
+							? gasf_crm_faces_learning_snapshot( $pid )
+							: array();
 						$added = wp_set_object_terms( $pid, array( (int) $dest->term_id ), 'gasf_photo_person', true );
 						if ( is_wp_error( $added ) ) {
 							$rollback();
@@ -1332,6 +1398,14 @@ add_action( 'rest_api_init', function () {
 							return new WP_Error( 'term_merge_verify_failed', 'A merged photo identity could not be verified.' );
 						}
 						if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+						if ( function_exists( 'gasf_crm_faces_learning_touch' ) && ! gasf_crm_faces_learning_touch( $pid ) ) {
+							$rollback();
+							return new WP_Error(
+								'gasf_crm_store',
+								'A merged photo learning revision could not be advanced.',
+								array( 'status' => 500, 'photo' => (int) $pid )
+							);
+						}
 					}
 
 					$deleted = wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
@@ -1381,31 +1455,54 @@ add_action( 'rest_api_init', function () {
 				if ( ! empty( $op['duplicate'] ) ) {
 					return array( 'ok' => true, 'duplicate' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => 0 );
 				}
-				/*
-				 * Removes the NAME, not the photos.
-				 *
-				 * For somebody entered by mistake, or a name that turned out to
-				 * be nobody — "Unknown", a caption fragment somebody typed into
-				 * the wrong box. The pictures stay exactly where they are and
-				 * keep every other person on them; they simply stop claiming
-				 * this one is in them.
-				 */
-				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
-				$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
-
-				wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
-
-				// Titles and download names are built from the people on a photo,
-				// so they are now wrong on every one of these until rebuilt.
-				foreach ( $posts as $pid ) {
-					if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+				$identity_lock = function_exists( 'gasf_crm_faces_identity_lock_acquire' )
+					? gasf_crm_faces_identity_lock_acquire( 300, 10, 50000 )
+					: 'none';
+				if ( '' === $identity_lock ) {
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error( 'gasf_crm_busy', 'A person identity update is already in progress. Try again in a moment.', array( 'status' => 409 ) );
 				}
+				try {
+					/*
+					 * Removes the NAME, not the photos.
+					 *
+					 * For somebody entered by mistake, or a name that turned out to
+					 * be nobody — "Unknown", a caption fragment somebody typed into
+					 * the wrong box. The pictures stay exactly where they are and
+					 * keep every other person on them; they simply stop claiming
+					 * this one is in them.
+					 */
+					$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
+					$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
 
-				gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s) — user %d',
-					$term->name, count( $posts ), get_current_user_id() ) );
+					$deleted = wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
+					if ( is_wp_error( $deleted ) || false === $deleted ) {
+						gasf_crm_op_finish( $op, false );
+						return is_wp_error( $deleted )
+							? $deleted
+							: new WP_Error( 'gasf_crm_store', 'The person name could not be removed.', array( 'status' => 500 ) );
+					}
 
-				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
-				return array( 'ok' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => count( $posts ) );
+					// Titles and download names are built from the people on a photo,
+					// so they are now wrong on every one of these until rebuilt.
+					foreach ( $posts as $pid ) {
+						if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+					}
+
+					gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s) — user %d',
+						$term->name, count( $posts ), get_current_user_id() ) );
+
+					gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+					return array( 'ok' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => count( $posts ) );
+				} finally {
+					if (
+						function_exists( 'gasf_crm_faces_identity_unlock' )
+						&& '' !== (string) $identity_lock
+						&& 'none' !== $identity_lock
+					) {
+						gasf_crm_faces_identity_unlock( $identity_lock );
+					}
+				}
 			}
 
 			return new WP_Error( 'gasf_crm_bad', 'Unknown action.', array( 'status' => 400 ) );

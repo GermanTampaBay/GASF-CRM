@@ -1133,8 +1133,118 @@ final class GASF_CRM_Selftest {
 			'faces: a busy label-only photo aborts rename before taxonomy or revision changes'
 		);
 
+		$rollback_one = $this->library_photo( 'st-face-remap-rollback-a-' . $identity_suffix );
+		$rollback_two = $this->library_photo( 'st-face-remap-rollback-b-' . $identity_suffix );
+		update_post_meta( $rollback_one, '_gasf_face_labels', array(
+			array(
+				'name' => $identity_term_name,
+				'person_id' => $identity_id,
+				'canonical_name' => $identity_term_name,
+				'box' => array( 12, 12, 20, 20 ),
+			),
+		) );
+		update_post_meta( $rollback_two, '_gasf_face_labels', array(
+			array(
+				'name' => $identity_term_name,
+				'person_id' => $identity_id,
+				'canonical_name' => $identity_term_name,
+				'box' => array( 40, 12, 20, 20 ),
+			),
+		) );
+		$rollback_one_before = (string) get_post_field( 'post_modified_gmt', $rollback_one );
+		$forced_second_photo = false;
+		$force_second_error = static function ( $error, $photo_id ) use ( $rollback_two, &$forced_second_photo ) {
+			if ( (int) $photo_id !== (int) $rollback_two ) { return $error; }
+			$forced_second_photo = true;
+			return new WP_Error( 'gasf_crm_selftest', 'forced second-photo remap failure', array( 'status' => 500 ) );
+		};
+		add_filter( 'gasf_crm_face_labels_remap_force_error', $force_second_error, 10, 4 );
+		$failed_remap = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term'   => $identity_id,
+			'name'   => $identity_term_name,
+			'into'   => 'Jürgen Forced Rollback ' . $identity_suffix,
+			'op_id'  => 'selftest-face-identity-remap-rollback-' . $identity_suffix,
+		) );
+		remove_filter( 'gasf_crm_face_labels_remap_force_error', $force_second_error, 10 );
+		$identity_after_remap_failure = get_term( $identity_id, 'gasf_photo_person' );
+		$rollback_one_labels = gasf_crm_face_labels_for( $rollback_one );
+		$rollback_two_labels = gasf_crm_face_labels_for( $rollback_two );
+		$this->ok(
+			$forced_second_photo
+			&& is_wp_error( $failed_remap )
+			&& 500 === (int) ( $failed_remap->get_error_data()['status'] ?? 0 )
+			&& $identity_term_name === (string) ( $identity_after_remap_failure->name ?? '' )
+			&& $identity_id === (int) ( $rollback_one_labels[0]['person_id'] ?? 0 )
+			&& $identity_term_name === (string) ( $rollback_one_labels[0]['canonical_name'] ?? '' )
+			&& $identity_id === (int) ( $rollback_two_labels[0]['person_id'] ?? 0 )
+			&& $identity_term_name === (string) ( $rollback_two_labels[0]['canonical_name'] ?? '' )
+			&& $rollback_one_before === (string) get_post_field( 'post_modified_gmt', $rollback_one ),
+			'faces: second-photo remap failure rolls back earlier label writes and revisions'
+		);
+
+		$identity_touch_before = (string) get_post_field( 'post_modified_gmt', $identity_photo );
+		$touch_fail_filter = static function ( $forced, $photo_id ) use ( $identity_photo ) {
+			if ( (int) $photo_id !== (int) $identity_photo ) { return $forced; }
+			return false;
+		};
+		add_filter( 'gasf_crm_faces_learning_touch_force', $touch_fail_filter, 10, 2 );
+		$failed_touch = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term'   => $identity_id,
+			'name'   => $identity_term_name,
+			'into'   => 'Jürgen Touch Failure ' . $identity_suffix,
+			'op_id'  => 'selftest-face-identity-touch-failure-' . $identity_suffix,
+		) );
+		remove_filter( 'gasf_crm_faces_learning_touch_force', $touch_fail_filter, 10 );
+		$identity_after_touch_failure = get_term( $identity_id, 'gasf_photo_person' );
+		$identity_labels_after_touch_failure = gasf_crm_face_labels_for( $identity_photo );
+		$this->ok(
+			is_wp_error( $failed_touch )
+			&& 500 === (int) ( $failed_touch->get_error_data()['status'] ?? 0 )
+			&& $identity_term_name === (string) ( $identity_after_touch_failure->name ?? '' )
+			&& $identity_id === (int) ( $identity_labels_after_touch_failure[0]['person_id'] ?? 0 )
+			&& $identity_term_name === (string) ( $identity_labels_after_touch_failure[0]['canonical_name'] ?? '' )
+			&& $identity_touch_before === (string) get_post_field( 'post_modified_gmt', $identity_photo ),
+			'faces: remap learning-touch failure aborts and restores identity changes'
+		);
+
+		$tag_only = $this->library_photo( 'st-face-tag-touch-' . $identity_suffix );
+		wp_set_object_terms( $tag_only, array( $identity_id ), 'gasf_photo_person', false );
+		$tag_only_before = (string) get_post_field( 'post_modified_gmt', $tag_only );
+		$tag_touch_fail_filter = static function ( $forced, $photo_id ) use ( $tag_only ) {
+			if ( (int) $photo_id !== (int) $tag_only ) { return $forced; }
+			return false;
+		};
+		add_filter( 'gasf_crm_faces_learning_touch_force', $tag_touch_fail_filter, 10, 2 );
+		$failed_tag_touch = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term'   => $identity_id,
+			'name'   => $identity_term_name,
+			'into'   => 'Jürgen Tagged Touch Failure ' . $identity_suffix,
+			'op_id'  => 'selftest-face-identity-tagged-touch-failure-' . $identity_suffix,
+		) );
+		remove_filter( 'gasf_crm_faces_learning_touch_force', $tag_touch_fail_filter, 10 );
+		$identity_after_tag_touch_failure = get_term( $identity_id, 'gasf_photo_person' );
+		$this->ok(
+			is_wp_error( $failed_tag_touch )
+			&& 500 === (int) ( $failed_tag_touch->get_error_data()['status'] ?? 0 )
+			&& $identity_term_name === (string) ( $identity_after_tag_touch_failure->name ?? '' )
+			&& has_term( $identity_id, 'gasf_photo_person', $tag_only )
+			&& $tag_only_before === (string) get_post_field( 'post_modified_gmt', $tag_only ),
+			'faces: tagged-photo touch failure aborts rename before canonical identity changes'
+		);
+
+		$serialized_photo = $this->library_photo( 'st-face-identity-serialized-' . $identity_suffix );
+		update_post_meta( $serialized_photo, '_gasf_face_boxes', array(
+			array( 'box' => array( 18, 18, 22, 22 ) ),
+		) );
+		$blocked_during_remap = -1;
+		$blocked_elapsed = 0.0;
 		$remap_hook = null;
-		$remap_hook = static function ( $from_id ) use ( $identity_id, $identity_photo, &$remap_hook ) {
+		$remap_hook = static function ( $from_id ) use (
+			$identity_id, $identity_photo, $serialized_photo, &$remap_hook, &$blocked_during_remap, &$blocked_elapsed, $identity_suffix
+		) {
 			if ( (int) $from_id !== $identity_id ) { return; }
 			$raw = get_post_meta( $identity_photo, '_gasf_face_labels', true );
 			$raw = is_array( $raw ) ? $raw : array();
@@ -1143,6 +1253,11 @@ final class GASF_CRM_Selftest {
 				'box'  => array( 20, 55, 20, 20 ),
 			);
 			update_post_meta( $identity_photo, '_gasf_face_labels', $raw );
+			$t0 = microtime( true );
+			$blocked_during_remap = gasf_crm_face_labels_record( $serialized_photo, array(
+				array( 'i' => 0, 'name' => 'Serialized During Rename ' . $identity_suffix ),
+			) );
+			$blocked_elapsed = microtime( true ) - $t0;
 			remove_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook );
 		};
 		add_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook, 10, 1 );
@@ -1155,14 +1270,24 @@ final class GASF_CRM_Selftest {
 		) );
 		remove_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook );
 		$renamed_labels = gasf_crm_face_labels_for( $identity_photo );
+		$serialized_during = gasf_crm_face_labels_for( $serialized_photo );
+		$stored_after_rename = gasf_crm_face_labels_record( $serialized_photo, array(
+			array( 'i' => 0, 'name' => $renamed_identity ),
+		) );
+		$serialized_after = gasf_crm_face_labels_for( $serialized_photo );
 		$this->ok(
 			! is_wp_error( $renamed_result )
 			&& $identity_id === (int) ( $renamed_labels[0]['person_id'] ?? 0 )
 			&& $renamed_identity === (string) ( $renamed_labels[0]['canonical_name'] ?? '' )
 			&& 3 === count( $renamed_labels )
 			&& 'Concurrent Keep' === (string) ( $renamed_labels[2]['name'] ?? '' )
-			&& (string) get_post_field( 'post_modified_gmt', $identity_photo ) > $identity_modified,
-			'faces: rename rereads locked labels, preserves concurrent additions, and advances learning'
+			&& (string) get_post_field( 'post_modified_gmt', $identity_photo ) > $identity_modified
+			&& 0 === (int) $blocked_during_remap
+			&& $blocked_elapsed < 2
+			&& empty( $serialized_during )
+			&& $stored_after_rename > 0
+			&& $identity_id === (int) ( $serialized_after[0]['person_id'] ?? 0 ),
+			'faces: identity lock serializes concurrent label creation without deadlock'
 		);
 
 		$destination_name = 'Identity Destination ' . $identity_suffix;
