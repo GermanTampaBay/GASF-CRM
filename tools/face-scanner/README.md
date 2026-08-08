@@ -158,7 +158,7 @@ face rectangles use the same orientation Edge displays.
 | `python scan.py --discover` | Refresh unresolved observations, cluster them locally, and open the loopback-only People Discovery contact-sheet board. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
 | `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning, `--label`, and `--discover`. Useful for "new uploads only" runs. |
-| `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
+| `python scan.py --status` | Active/retained corpus counts and quality, what is waiting, and the latest conservative calibration recommendation. No ML is loaded. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
 | `python scan.py --selftest` | Exercise the non-ML plumbing. Needs no backend, no config, no network. |
 | `python scan-gui.py` | Checkbox launcher UI for `scan.py` (blocks unsupported option combos, shows inline output). |
@@ -176,6 +176,7 @@ python scan-gui.py
 - Tick options, click **Start**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
 - In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
+- The label gallery keeps its existing filters and adds optional **Active learning**. It ranks a bounded top subset using unresolved-cluster size, corpus weakness, boundary uncertainty, appearance novelty, crop quality, and underrepresented dates when known. The score and every embedding stay local.
 - In discovery mode, each contact sheet is a conservative, engine-isolated cluster from the current date/limit preparation scope. Open it, deselect mistakes, type one known or new person name, and confirm. That one name applies to every selected face. Unselected faces remain unknown and are reclustered; **Dismiss selected locally** suppresses the same local face using its rectangle and embedding, even if detector order changes, without changing or deleting the WordPress photo.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
 - The labeler has live outline/opacity settings plus zoom, fit, center, and pan controls. You can also drag the image to pan, double-click to fit, and use Ctrl+wheel to zoom.
@@ -250,6 +251,16 @@ That second path means group photos can now teach the model without guessing
 which name belongs to which face. A person is not offered as a suggestion until
 it has **at least three** examples.
 
+Each reference is scored locally from face pixel size, crop sharpness, and
+detector-box edge clipping. The database retains every current confirmed
+reference, but matching uses at most 12 quality-first, diverse references per
+person and engine. Near-duplicates are inactive rather than deleted, historical
+date/appearance diversity receives a selection bonus, and a person with usable
+vectors is never selected below the three-reference floor. Relearning replaces
+one photo's truth and recomputes affected selections in one SQLite transaction.
+No pose score is invented: neither supported backend currently exposes one
+reliably through the shared abstraction.
+
 ### People Discovery stays local
 
 `--discover` stores unresolved observations and their clusters only in
@@ -323,7 +334,24 @@ produced it**, and the scanner only ever compares a face against references from
 the same engine. Switching engines is therefore safe: the new one simply
 relearns into its own vectors and never misreads the other's. Unknown
 observations and clusters carry the same engine boundary. `--status` shows
-the counts per engine and marks the active one.
+active/retained counts and average objective quality per engine.
+
+## Confidence calibration
+
+WordPress retains a bounded, non-biometric history of offered name, confidence,
+photo, and rectangle facts after a suggestion disappears. A matching explicit
+face-box label or auto-accepted box is positive; **Not in photo** is negative.
+No-action and unrelated person tags do not count, and negative outcomes never
+become face vectors.
+
+The scanner groups explicit outcomes into five-point confidence bands and tests
+candidate thresholds with a 99% Wilson confidence lower bound. It recommends a
+threshold only after the configured minimum sample count and only when that
+conservative floor meets the target precision (99% by default). `--status`,
+normal scan completion, and the WordPress face admin panel show the concise
+result. A recommendation is advice: it never changes the saved auto-accept
+setting. `calibration_target_precision` may only be 0.99 or higher, and
+`calibration_min_samples` has a hard floor of 20.
 
 ## Tuning the tolerance
 

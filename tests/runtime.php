@@ -651,6 +651,12 @@ final class GASF_CRM_Selftest {
 		$auto_labels = (array) get_post_meta( $auto, '_gasf_face_labels', true );
 		$this->ok( 1 === count( $auto_labels ),
 			'faces: auto-accepted matches are stored as label hints for learning' );
+		$auto_predictions = gasf_crm_face_predictions_for( $auto );
+		$this->ok(
+			1 === count( $auto_predictions )
+			&& 'pending' === (string) ( $auto_predictions[0]['outcome'] ?? '' ),
+			'faces: machine auto-accept does not count as human calibration evidence'
+		);
 		$at = get_term_by( 'name', 'Selftest Auto', 'gasf_photo_person' );
 		if ( $at ) { wp_delete_term( (int) $at->term_id, 'gasf_photo_person' ); }
 
@@ -721,6 +727,95 @@ final class GASF_CRM_Selftest {
 		);
 		$other_term = get_term_by( 'name', 'Other Candidate', 'gasf_photo_person' );
 		if ( $other_term ) { wp_delete_term( (int) $other_term->term_id, 'gasf_photo_person' ); }
+
+		// Calibration records only explicit box-level positives and explicit rejections.
+		$cal_positive = $this->library_photo( 'st-faces-cal-positive' );
+		gasf_crm_faces_store( $cal_positive, array(
+			array( 'box' => array( 12, 14, 36, 38 ), 'name' => 'Jürgen Calibration', 'confidence' => 0.93 ),
+		), 1 );
+		gasf_crm_face_labels_store( $cal_positive, array(
+			array( 'box' => array( 12, 14, 36, 38 ), 'name' => 'Jurgen Calibration' ),
+		), true, true );
+		gasf_crm_face_labels_store( $cal_positive, array(
+			array( 'box' => array( 12, 14, 36, 38 ), 'name' => 'Jurgen Calibration' ),
+		), true, true );
+		$positive_predictions = gasf_crm_face_predictions_for( $cal_positive );
+		$this->ok(
+			1 === count( $positive_predictions )
+			&& 'positive' === (string) ( $positive_predictions[0]['outcome'] ?? '' )
+			&& gasf_crm_face_canonical_key( 'Jürgen Calibration' ) === (string) ( $positive_predictions[0]['canonical'] ?? '' )
+			&& gasf_crm_face_name_same( 'Jürgen Calibration', 'Jurgen Calibration' ),
+			'faces: full alias matching creates one idempotent positive calibration outcome'
+		);
+
+		$cal_corrected = $this->library_photo( 'st-faces-cal-corrected' );
+		gasf_crm_faces_store( $cal_corrected, array(
+			array( 'box' => array( 14, 16, 38, 40 ), 'name' => 'Old Calibration', 'confidence' => 0.92 ),
+		), 1 );
+		update_post_meta( $cal_corrected, '_gasf_face_boxes', array(
+			array( 'box' => array( 14, 16, 38, 40 ) ),
+		) );
+		gasf_crm_face_labels_record( $cal_corrected, array(
+			array( 'i' => 0, 'name' => 'Old Calibration' ),
+		) );
+		gasf_crm_face_labels_record( $cal_corrected, array(
+			array( 'i' => 0, 'name' => 'Corrected Calibration' ),
+		) );
+		$corrected_predictions = gasf_crm_face_predictions_for( $cal_corrected );
+		$this->ok(
+			1 === count( $corrected_predictions )
+			&& 'negative' === (string) ( $corrected_predictions[0]['outcome'] ?? '' ),
+			'faces: a form correction on the same box supersedes the old positive outcome'
+		);
+
+		$cal_negative = $this->library_photo( 'st-faces-cal-negative' );
+		gasf_crm_faces_store( $cal_negative, array(
+			array( 'box' => array( 18, 20, 34, 36 ), 'name' => 'Wrong Calibration', 'confidence' => 0.88 ),
+		), 1 );
+		$negative_first  = gasf_crm_face_reject( $cal_negative, 'Wrong Calibration' );
+		$negative_second = gasf_crm_face_reject( $cal_negative, 'wrong calibration' );
+		$negative_predictions = gasf_crm_face_predictions_for( $cal_negative );
+		$this->ok(
+			true === $negative_first
+			&& false === $negative_second
+			&& 1 === count( $negative_predictions )
+			&& 'negative' === (string) ( $negative_predictions[0]['outcome'] ?? '' ),
+			'faces: explicit rejection creates one durable, idempotent negative calibration outcome'
+		);
+		$cal_samples = gasf_crm_faces_calibration_samples( 5000 );
+		$cal_outcomes = array();
+		foreach ( $cal_samples as $sample ) {
+			if ( in_array( (int) ( $sample['photo'] ?? 0 ), array( $cal_positive, $cal_negative ), true ) ) {
+				$cal_outcomes[] = (string) ( $sample['outcome'] ?? '' );
+			}
+		}
+		sort( $cal_outcomes );
+		$this->ok(
+			array( 'negative', 'positive' ) === $cal_outcomes,
+			'faces: bounded calibration feed returns only explicit evaluated outcomes'
+		);
+		$this->snapshot_option( 'gasf_crm_faces_calibration_report' );
+		$this->snapshot_option( 'gasf_crm_faces_calibration_lock' );
+		$threshold_before_report = gasf_crm_faces_auto_accept_threshold();
+		$stored_report = gasf_crm_faces_calibration_report_store( array(
+			'evaluated'             => 700,
+			'positive'              => 700,
+			'negative'              => 0,
+			'target_precision'      => 0.99,
+			'minimum_samples'       => 30,
+			'recommended_threshold' => 99,
+			'recommendation_samples' => 700,
+			'lower_bound'           => 0.9906,
+			'bands'                 => array(
+				array( 'band' => '95-99%', 'total' => 700, 'positive' => 700 ),
+			),
+		) );
+		$this->ok(
+			! is_wp_error( $stored_report )
+			&& 99 === (int) ( $stored_report['recommended_threshold'] ?? 0 )
+			&& $threshold_before_report === gasf_crm_faces_auto_accept_threshold(),
+			'faces: calibration reporting is bounded advice and never changes auto-accept'
+		);
 
 		// A photo with no faces is still marked looked-at, or the queue loops.
 		$blank = $this->library_photo( 'st-faces-none' );
