@@ -818,10 +818,12 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 .detail{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:14px}
 .stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
 .frame{position:relative;display:inline-block;max-width:100%;line-height:0}
-#photo{display:block;max-width:100%;height:auto}
-#ov{position:absolute;inset:0;pointer-events:none}
-.fb{position:absolute;border:2px solid #60a5fa;background:rgba(37,99,235,.14);border-radius:6px}
-.fb span{position:absolute;left:-1px;top:-1px;padding:2px 6px;background:#1d4ed8;border-radius:0 0 6px 0;font-weight:700;font-size:12px}
+#photo{display:block;max-width:100%;height:auto;position:relative;z-index:1}
+#ov{position:absolute;inset:0;pointer-events:none;z-index:2}
+.fb{position:absolute;border:3px solid #60a5fa;background:rgba(37,99,235,.16);border-radius:7px;
+box-shadow:0 0 0 1px rgba(15,23,42,.75),0 0 0 1px rgba(15,23,42,.75) inset}
+.fb span{position:absolute;left:0;top:0;padding:2px 7px;background:#1d4ed8;border:1px solid #93c5fd;
+border-radius:0 0 7px 0;font-weight:800;font-size:clamp(14px,1.15vw,18px);line-height:1.15;min-width:1.5em;text-align:center}
 .side{border:1px solid #2d3748;border-radius:8px;padding:12px;background:#111827}
 .muted{color:#94a3b8}
 .people{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
@@ -907,15 +909,22 @@ function drawBoxes(p){
   const ov=document.getElementById('ov'); ov.innerHTML='';
   if(!p||!p.boxes||!p.boxes.length){return;}
   const img=document.getElementById('photo'), w=img.naturalWidth||1, h=img.naturalHeight||1;
+  const ow=ov.clientWidth||img.clientWidth||1, oh=ov.clientHeight||img.clientHeight||1;
+  const minW=Math.max(0.35, (10*100)/ow), minH=Math.max(0.35, (10*100)/oh);
   p.boxes.forEach((b,i)=>{
     const left=Math.max(0,Math.min(100,b[0]*100/w));
     const top=Math.max(0,Math.min(100,b[1]*100/h));
-    const ww=Math.max(.2,Math.min(100-left,b[2]*100/w));
-    const hh=Math.max(.2,Math.min(100-top,b[3]*100/h));
+    const ww=Math.max(minW,Math.min(100-left,b[2]*100/w));
+    const hh=Math.max(minH,Math.min(100-top,b[3]*100/h));
     const d=document.createElement('div'); d.className='fb';
     d.style.cssText=`left:${left}%;top:${top}%;width:${ww}%;height:${hh}%`;
     d.innerHTML=`<span>${i+1}</span>`; ov.appendChild(d);
   });
+}
+function drawCurrent(){
+  const img=document.getElementById('photo');
+  if(!current||!img||!img.complete||(img.naturalWidth||0)<1||(img.naturalHeight||0)<1){ return; }
+  drawBoxes(current);
 }
 function render(p){
   current=p;
@@ -924,7 +933,9 @@ function render(p){
   setText('sub', `${p.boxes.length} face box(es)`);
   setText('stat', `${pos+1} / ${count}`);
   const img=document.getElementById('photo');
-  img.onload=()=>drawBoxes(p); img.src=p.image;
+  img.onload=()=>drawCurrent(); img.src=p.image;
+  if(img.complete && (img.naturalWidth||0)>0){ requestAnimationFrame(drawCurrent); }
+  else { setTimeout(drawCurrent, 80); }
   const ppl=document.getElementById('people');
   ppl.innerHTML=(p.people||[]).map(n=>`<span class="pchip">${esc(n)}</span>`).join('');
   (p.people||[]).forEach(addName);
@@ -1016,6 +1027,8 @@ document.getElementById('back').onclick=async()=>{ if(pos>0){ pos -= 1; await lo
 document.getElementById('next').onclick=async()=>{ if(pos+1 < count){ pos += 1; await load(activeGallery[pos].global_i); } };
 document.getElementById('exit').onclick=()=>{ showGallery(); setText('title','Photo gallery'); setText('sub', gallerySub()); setText('stat',''); };
 document.getElementById('done').onclick=async()=>{ await j('/api/done',{method:'POST'}); setText('sub','Done. You can close this tab.'); };
+window.addEventListener('resize', ()=>drawCurrent());
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ setTimeout(drawCurrent, 60); } });
 init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e)); });
 </script></body></html>"""
 

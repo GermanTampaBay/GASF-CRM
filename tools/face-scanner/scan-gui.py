@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
@@ -262,15 +263,26 @@ class ScanGui(tk.Tk):
             cmd.append("--quiet")
         after = self.v_uploaded_after.get().strip()
         if after:
+            self._validate_ymd(after, "Uploaded after")
             cmd += ["--uploaded-after", after]
         before = self.v_uploaded_before.get().strip()
         if before:
+            self._validate_ymd(before, "Uploaded before")
             cmd += ["--uploaded-before", before]
+        if after and before and after > before:
+            raise ValueError("Uploaded after must be on or before Uploaded before.")
 
         engine = self.v_engine.get().strip()
         if engine and engine != "auto":
             cmd += ["--engine", engine]
         return cmd
+
+    @staticmethod
+    def _validate_ymd(raw, label):
+        try:
+            datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError as e:
+            raise ValueError(f"{label} must be YYYY-MM-DD.") from e
 
     def _set_running(self, running):
         self.btn_run.configure(state="disabled" if running else "normal")
