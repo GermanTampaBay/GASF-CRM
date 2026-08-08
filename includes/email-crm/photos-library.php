@@ -1199,26 +1199,45 @@ add_action( 'rest_api_init', function () {
 					return array( 'ok' => true, 'duplicate' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => 0 );
 				}
 
-				$res = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
-					'name' => $to,
-					// The slug follows the name, or a corrected spelling keeps
-					// answering to the old one in URLs and exports forever.
-					'slug' => sanitize_title( gasf_photo_translit( $to ) ),
-				) );
-				if ( is_wp_error( $res ) ) {
-					gasf_crm_op_finish( $op, false );
-					return $res;
-				}
 				if ( function_exists( 'gasf_crm_face_labels_identity_remap' ) ) {
+					$res = null;
 					$remapped = gasf_crm_face_labels_identity_remap(
 						(int) $term->term_id,
 						(string) $term->name,
 						(int) $term->term_id,
-						$to
+						$to,
+						static function() use ( &$res, $term, $to ) {
+							$res = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
+								'name' => $to,
+								'slug' => sanitize_title( gasf_photo_translit( $to ) ),
+							) );
+							if ( is_wp_error( $res ) ) { return $res; }
+							$stored = get_term( (int) $term->term_id, 'gasf_photo_person' );
+							if ( ! $stored || is_wp_error( $stored ) || $to !== (string) $stored->name ) {
+								wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
+									'name' => (string) $term->name,
+									'slug' => (string) $term->slug,
+								) );
+								return new WP_Error( 'gasf_crm_save', 'The renamed person could not be verified.', array( 'status' => 500 ) );
+							}
+							return $res;
+						}
 					);
 					if ( is_wp_error( $remapped ) ) {
-						gasf_crm_log( 'Photo library: renamed person, but face-label display refresh was deferred: ' . $remapped->get_error_message() );
+						gasf_crm_op_finish( $op, false );
+						return $remapped;
 					}
+				} else {
+					$res = wp_update_term( (int) $term->term_id, 'gasf_photo_person', array(
+						'name' => $to,
+						// The slug follows the name, or a corrected spelling keeps
+						// answering to the old one in URLs and exports forever.
+						'slug' => sanitize_title( gasf_photo_translit( $to ) ),
+					) );
+				}
+				if ( is_wp_error( $res ) ) {
+					gasf_crm_op_finish( $op, false );
+					return $res;
 				}
 				if ( function_exists( 'gasf_crm_faces_learning_touch' ) ) {
 					foreach ( $affected_posts as $pid ) { gasf_crm_faces_learning_touch( $pid ); }
@@ -1275,28 +1294,79 @@ add_action( 'rest_api_init', function () {
 
 				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
 				$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
+				$move_terms = static function() use ( $posts, $term, $dest ) {
+					$attempted = array();
+					$had_dest = array();
+					$rollback = static function() use ( &$attempted, &$had_dest, $term, $dest ) {
+						foreach ( array_reverse( $attempted ) as $pid ) {
+							wp_set_object_terms( $pid, array( (int) $term->term_id ), 'gasf_photo_person', true );
+							if ( empty( $had_dest[ $pid ] ) ) {
+								wp_remove_object_terms( $pid, array( (int) $dest->term_id ), 'gasf_photo_person' );
+							}
+							if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+						}
+					};
+
+					// Appended, never replacing: a photo may well have four other
+					// people on it, and merging one of them must not clear the rest.
+					foreach ( $posts as $pid ) {
+						$attempted[] = $pid;
+						$had_dest[ $pid ] = has_term( (int) $dest->term_id, 'gasf_photo_person', $pid );
+						$added = wp_set_object_terms( $pid, array( (int) $dest->term_id ), 'gasf_photo_person', true );
+						if ( is_wp_error( $added ) ) {
+							$rollback();
+							return $added;
+						}
+						$removed = wp_remove_object_terms( $pid, array( (int) $term->term_id ), 'gasf_photo_person' );
+						if ( is_wp_error( $removed ) || false === $removed ) {
+							$rollback();
+							return is_wp_error( $removed )
+								? $removed
+								: new WP_Error( 'term_merge_remove_failed', 'The source person could not be removed from a photo.' );
+						}
+						if (
+							! has_term( (int) $dest->term_id, 'gasf_photo_person', $pid )
+							|| has_term( (int) $term->term_id, 'gasf_photo_person', $pid )
+						) {
+							$rollback();
+							return new WP_Error( 'term_merge_verify_failed', 'A merged photo identity could not be verified.' );
+						}
+						if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+					}
+
+					$deleted = wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
+					if ( is_wp_error( $deleted ) || false === $deleted ) {
+						$rollback();
+						return is_wp_error( $deleted )
+							? $deleted
+							: new WP_Error( 'term_merge_delete_failed', 'The source person could not be removed.' );
+					}
+					$remaining = get_term( (int) $term->term_id, 'gasf_photo_person' );
+					if ( $remaining && ! is_wp_error( $remaining ) ) {
+						$rollback();
+						return new WP_Error( 'term_merge_delete_failed', 'The source person still exists after the merge.' );
+					}
+					return true;
+				};
 				if ( function_exists( 'gasf_crm_face_labels_identity_remap' ) ) {
 					$remapped = gasf_crm_face_labels_identity_remap(
 						(int) $term->term_id,
 						(string) $term->name,
 						(int) $dest->term_id,
-						(string) $dest->name
+						(string) $dest->name,
+						$move_terms
 					);
 					if ( is_wp_error( $remapped ) ) {
 						gasf_crm_op_finish( $op, false );
 						return $remapped;
 					}
+				} else {
+					$moved = $move_terms();
+					if ( is_wp_error( $moved ) ) {
+						gasf_crm_op_finish( $op, false );
+						return $moved;
+					}
 				}
-
-				// Appended, never replacing: a photo may well have four other
-				// people on it, and merging one of them must not clear the rest.
-				foreach ( $posts as $pid ) {
-					wp_set_object_terms( $pid, array( (int) $dest->term_id ), 'gasf_photo_person', true );
-					wp_remove_object_terms( $pid, array( (int) $term->term_id ), 'gasf_photo_person' );
-					if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
-				}
-
-				wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
 
 				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s) — user %d',
 					$term->name, $dest->name, count( $posts ), get_current_user_id() ) );

@@ -165,14 +165,7 @@ function gasf_crm_face_name_keys( $name ) {
 	$keys = function_exists( 'gasf_photo_person_keys' )
 		? gasf_photo_person_keys( $clean )
 		: array( strtolower( html_entity_decode( $clean, ENT_QUOTES ) ) );
-	$keys = array_values( array_unique( array_filter( array_map( 'strval', (array) $keys ) ) ) );
-	foreach ( $keys as $key ) {
-		// The shared catalogue matcher deliberately treats German umlauts,
-		// expanded spellings, and plain ASCII spellings as one person.
-		$folded = strtr( $key, array( 'ae' => 'a', 'oe' => 'o', 'ue' => 'u' ) );
-		if ( '' !== $folded ) { $keys[] = $folded; }
-	}
-	return array_values( array_unique( $keys ) );
+	return array_values( array_unique( array_filter( array_map( 'strval', (array) $keys ) ) ) );
 }
 
 function gasf_crm_face_name_same( $a, $b ) {
@@ -1000,7 +993,7 @@ function gasf_crm_face_person_facts( $attachment_id ) {
  * All relevant photo locks are acquired before the first write, so a busy
  * scanner cannot leave a half-remapped identity.
  */
-function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_name ) {
+function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_name, $commit = null ) {
 	$from_id = max( 0, (int) $from_id );
 	$to_id   = max( 0, (int) $to_id );
 	$from_name = trim( sanitize_text_field( (string) $from_name ) );
@@ -1009,63 +1002,109 @@ function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_
 		return new WP_Error( 'gasf_crm_bad', 'Valid source and destination person identities are required.', array( 'status' => 400 ) );
 	}
 
-	$ids = get_posts( array(
-		'post_type'      => 'attachment',
-		'post_status'    => array( 'inherit', 'private' ),
-		'posts_per_page' => -1,
-		'fields'         => 'ids',
-		'no_found_rows'  => true,
-		'meta_query'     => array(
-			array( 'key' => '_gasf_face_labels', 'compare' => 'EXISTS' ),
-		),
-	) );
-	$plans = array();
-	foreach ( $ids as $id ) {
-		$raw = get_post_meta( (int) $id, '_gasf_face_labels', true );
-		if ( ! is_array( $raw ) ) { continue; }
-		$changed = false;
-		foreach ( $raw as &$label ) {
-			if ( ! is_array( $label ) ) { continue; }
-			$person_id = (int) ( $label['person_id'] ?? 0 );
-			$name = (string) ( $label['canonical_name'] ?? $label['name'] ?? '' );
-			if ( $person_id !== $from_id && ( $person_id > 0 || ! gasf_crm_face_name_same( $from_name, $name ) ) ) {
-				continue;
-			}
-			$label['name'] = $to_name;
-			$label['person_id'] = $to_id;
-			$label['canonical_name'] = $to_name;
-			$changed = true;
-		}
-		unset( $label );
-		if ( $changed ) { $plans[ (int) $id ] = $raw; }
-	}
-	if ( ! $plans ) { return 0; }
+	$label_ids = static function () {
+		$ids = get_posts( array(
+			'post_type'      => 'attachment',
+			'post_status'    => array( 'inherit', 'private' ),
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+			'no_found_rows'  => true,
+			'meta_query'     => array(
+				array( 'key' => '_gasf_face_labels', 'compare' => 'EXISTS' ),
+			),
+		) );
+		$ids = array_values( array_unique( array_map( 'intval', $ids ) ) );
+		sort( $ids, SORT_NUMERIC );
+		return $ids;
+	};
 
 	$locks = array();
-	foreach ( array_keys( $plans ) as $id ) {
-		$locks[ $id ] = gasf_crm_faces_try_lock( $id, 'label' );
-		if ( '' !== $locks[ $id ] ) { continue; }
-		foreach ( $locks as $held_id => $token ) {
-			if ( '' !== $token ) { gasf_crm_faces_unlock( $held_id, 'label', $token ); }
+	$ids = array();
+	for ( $attempt = 0; $attempt < 3; $attempt++ ) {
+		$ids = $label_ids();
+		if ( 0 === $attempt ) {
+			do_action( 'gasf_crm_face_labels_remap_before_lock', $from_id, $to_id );
 		}
-		return new WP_Error( 'gasf_crm_busy', 'A face label is being updated. Try the person change again in a moment.', array( 'status' => 409 ) );
+		foreach ( $ids as $id ) {
+			$locks[ $id ] = gasf_crm_faces_try_lock( $id, 'label' );
+			if ( '' !== $locks[ $id ] ) { continue; }
+			foreach ( $locks as $held_id => $token ) {
+				if ( '' !== $token ) { gasf_crm_faces_unlock( $held_id, 'label', $token ); }
+			}
+			return new WP_Error( 'gasf_crm_busy', 'A face label is being updated. Try the person change again in a moment.', array( 'status' => 409 ) );
+		}
+		if ( $ids === $label_ids() ) { break; }
+		foreach ( $locks as $held_id => $token ) {
+			gasf_crm_faces_unlock( $held_id, 'label', $token );
+		}
+		$locks = array();
+		$ids = array();
+	}
+	if ( ! $ids && $label_ids() ) {
+		return new WP_Error( 'gasf_crm_busy', 'Face labels kept changing during the person update. Try again.', array( 'status' => 409 ) );
 	}
 
 	try {
-		foreach ( $plans as $id => $labels ) {
+		$changed_posts = 0;
+		$originals = array();
+		foreach ( $ids as $id ) {
+			$labels = get_post_meta( $id, '_gasf_face_labels', true );
+			if ( ! is_array( $labels ) ) { continue; }
+			$original = $labels;
+			$changed = false;
+			$changed_indexes = array();
+			foreach ( $labels as $index => &$label ) {
+				if ( ! is_array( $label ) ) { continue; }
+				$person_id = (int) ( $label['person_id'] ?? 0 );
+				$name = (string) ( $label['canonical_name'] ?? $label['name'] ?? '' );
+				if ( $person_id !== $from_id && ( $person_id > 0 || ! gasf_crm_face_name_same( $from_name, $name ) ) ) {
+					continue;
+				}
+				$label['name'] = $to_name;
+				$label['person_id'] = $to_id;
+				$label['canonical_name'] = $to_name;
+				$changed = true;
+				$changed_indexes[] = $index;
+			}
+			unset( $label );
+			if ( ! $changed ) { continue; }
+			$originals[ $id ] = $original;
 			update_post_meta( $id, '_gasf_face_labels', array_values( $labels ) );
 			$stored = get_post_meta( $id, '_gasf_face_labels', true );
 			if ( ! is_array( $stored ) || count( $stored ) !== count( $labels ) ) {
 				return new WP_Error( 'gasf_crm_store', 'Canonical face-label identities could not be verified.', array( 'status' => 500 ) );
 			}
+			foreach ( $changed_indexes as $index ) {
+				if (
+					! isset( $stored[ $index ] )
+					|| $to_id !== (int) ( $stored[ $index ]['person_id'] ?? 0 )
+					|| $to_name !== (string) ( $stored[ $index ]['canonical_name'] ?? '' )
+				) {
+					return new WP_Error( 'gasf_crm_store', 'Canonical face-label identities could not be verified.', array( 'status' => 500 ) );
+				}
+			}
 			gasf_crm_faces_learning_touch( $id );
+			$changed_posts++;
+		}
+		if ( is_callable( $commit ) ) {
+			$commit_result = call_user_func( $commit );
+			if ( is_wp_error( $commit_result ) ) {
+				foreach ( $originals as $id => $labels ) {
+					update_post_meta( $id, '_gasf_face_labels', array_values( $labels ) );
+					gasf_crm_faces_learning_touch( $id );
+					if ( get_post_meta( $id, '_gasf_face_labels', true ) !== array_values( $labels ) ) {
+						gasf_crm_log( 'Face-label identity rollback could not restore photo ' . $id . '.' );
+					}
+				}
+				return $commit_result;
+			}
 		}
 	} finally {
 		foreach ( $locks as $id => $token ) {
 			gasf_crm_faces_unlock( $id, 'label', $token );
 		}
 	}
-	return count( $plans );
+	return $changed_posts;
 }
 
 /** Store, clear, and read local-model caption suggestions (separate from truth). */
