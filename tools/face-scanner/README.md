@@ -70,6 +70,7 @@ The first real run downloads the `buffalo_l` model pack (~280 MB) into
 | `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
+| `python scan.py --label --label-flow` | One-step refinement pass: label faces, then auto-run learn, then auto-scan queue once. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
 | `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning and `--label`. Useful for "new uploads only" runs. |
 | `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
@@ -89,6 +90,7 @@ python scan-gui.py
 
 - Tick options, click **Go**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
+- In label mode, leave **After --label, run --learn + one scan pass** on for the streamlined one-shot workflow.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
 - `scan.py` path is hardcoded in the launcher so you can run the GUI from any folder.
 

@@ -1005,7 +1005,11 @@ async function init(){
   allGallery = (m.gallery||[]);
   (m.people||[]).forEach(addName);
   const gf=document.getElementById('gfilter');
-  if (gf) { gf.onchange = applyFilter; }
+  if (gf) {
+    gf.onchange = applyFilter;
+    const has = s => allGallery.some(g => g.status === s);
+    gf.value = has('partial') ? 'partial' : (has('untagged') ? 'untagged' : 'all');
+  }
   refreshNameList();
   applyFilter();
   if(!count){ setText('title','Nothing to label'); return; }
@@ -1684,6 +1688,8 @@ def main():
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
     ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
+    ap.add_argument("--label-flow", action="store_true",
+                    help="with --label: after closing the UI, run learn then one scan pass")
     ap.add_argument("--label-limit", type=int, default=500, metavar="N",
                     help="how many recent confirmed photos to load in --label mode (default: 500)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
@@ -1739,6 +1745,13 @@ def main():
         stored = local_label(api, conn, backend, tolerance, args.label_limit, uploaded_after, uploaded_before)
         if verbose:
             print(f"stored {stored} explicit face label(s)")
+        if args.label_flow:
+            if verbose:
+                print("label flow: learning from confirmed labels")
+            learn(api, conn, backend, verbose)
+            if verbose:
+                print("label flow: scanning queue with refreshed references")
+            scan(api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before)
         return
 
     while True:

@@ -30,6 +30,7 @@ class ScanGui(tk.Tk):
 
         self.v_learn = tk.BooleanVar(value=False)
         self.v_label = tk.BooleanVar(value=False)
+        self.v_label_flow = tk.BooleanVar(value=True)
         self.v_watch = tk.BooleanVar(value=False)
         self.v_status = tk.BooleanVar(value=False)
         self.v_check = tk.BooleanVar(value=False)
@@ -71,6 +72,13 @@ class ScanGui(tk.Tk):
             self.v_label,
             "--label",
             "Open local face-label UI (browser flow).",
+            self._on_flag_change,
+        )
+        self.cb_label_flow = self._option_row(
+            opts,
+            self.v_label_flow,
+            "After --label, run --learn + one scan pass",
+            "One-step workflow: save labels, refresh references, then scan queue.",
             self._on_flag_change,
         )
         self.cb_watch = self._option_row(
@@ -212,6 +220,7 @@ class ScanGui(tk.Tk):
             self.v_learn.set(False)
         if self.v_watch.get():
             self.v_label.set(False)
+            self.v_label_flow.set(False)
             self.v_status.set(False)
             self.v_check.set(False)
             self.v_selftest.set(False)
@@ -225,6 +234,7 @@ class ScanGui(tk.Tk):
 
         self.cb_learn.configure(state="disabled" if lock_learn else "normal")
         self.cb_watch.configure(state="disabled" if lock_watch else "normal")
+        self.cb_label_flow.configure(state="normal" if self.v_label.get() else "disabled")
 
         for cb in (self.cb_label, self.cb_status, self.cb_check, self.cb_selftest):
             cb.configure(state="disabled" if watch else "normal")
@@ -248,6 +258,8 @@ class ScanGui(tk.Tk):
             if limit < 1:
                 raise ValueError("Label limit must be >= 1.")
             cmd += ["--label", "--label-limit", str(limit)]
+            if self.v_label_flow.get():
+                cmd.append("--label-flow")
         if self.v_watch.get():
             seconds = int(self.v_watch_seconds.get().strip() or "900")
             if seconds < 1:
