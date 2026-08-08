@@ -439,6 +439,11 @@ final class GASF_CRM_Selftest {
 	public function test_face_suggestions() {
 		$this->snapshot_option( 'gasf_crm_faces_auto_accept_threshold' );
 		update_option( 'gasf_crm_faces_auto_accept_threshold', 95, false );
+		$label_queue = $this->rest_get( '/gasf/v1/crm/photos/faces/label-queue', array( 'limit' => 1 ) );
+		$this->ok(
+			95 === (int) ( $label_queue['auto_accept_threshold'] ?? 0 ),
+			'faces: label queue exposes the server threshold for mature-corpus filtering'
+		);
 
 		$id = $this->library_photo( 'st-faces' );
 

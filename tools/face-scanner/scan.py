@@ -4,6 +4,7 @@ GASF-CRM face scanner — runs on a private machine, never on the web host.
 
     python scan.py                 # scan whatever is waiting, then stop
     python scan.py --learn         # refresh the reference set first
+    python scan.py --label --label-flow  # mature learn/scan/label refinement loop
     python scan.py --watch 900     # keep going, learning then scanning, every 15 min
     python scan.py --uploaded-after 2026-08-01   # only scan newer uploads
     python scan.py --status        # what do I know, and what is waiting
@@ -945,6 +946,7 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
         data = api.get("/confirmed", **q)
 
     photos = list(data.get("photos", []) or [])
+    known_threshold = max(0, min(100, int(data.get("auto_accept_threshold") or 0)))
     people_names = []
     try:
         pd = api.get("/people")
@@ -1009,17 +1011,11 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                     used.add(best_i)
                     prefill[str(best_i)] = name
 
-            labeled = len(prefill)
+            status = _label_item_status(len(boxes), prefill, hints, known_threshold)
             # A one-face photo that already has exactly one person tag is already
             # learnable without box labels; keep label mode focused on ambiguous work.
-            if labeled == 0 and len(boxes) == 1 and len(people) == 1:
+            if status == "untagged" and len(boxes) == 1 and len(people) == 1:
                 continue
-            if labeled <= 0:
-                status = "untagged"
-            elif labeled < len(boxes):
-                status = "partial"
-            else:
-                status = "full"
 
             items.append(
                 {
@@ -1030,6 +1026,7 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                     "hints": hints,
                     "prefill": prefill,
                     "status": status,
+                    "known_threshold": known_threshold,
                     # Lightweight preview only. Full image is loaded on demand per photo.
                     "thumb": _thumb_data_uri(image_bytes),
                 }
@@ -1048,6 +1045,28 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
         seen.add(k)
         dedup.append(n)
     return items, dedup
+
+
+def _label_item_status(face_count, prefill, hints, known_threshold):
+    """Classify corpus work, counting strict known matches as already resolved."""
+    resolved = set()
+    for raw in (prefill or {}).keys():
+        try:
+            resolved.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    if known_threshold > 0:
+        for hint in hints or []:
+            try:
+                if hint.get("name") and int(hint.get("confidence") or 0) >= known_threshold:
+                    resolved.add(int(hint["index"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+    if not resolved:
+        return "untagged"
+    if len(resolved) < max(0, int(face_count)):
+        return "partial"
+    return "full"
 
 
 def _label_ui_html(label_flow=False, session_token=""):
@@ -1125,6 +1144,7 @@ margin:0 0 10px;padding:8px;border:1px solid #26324a;border-radius:6px;backgroun
     <div class="ghead"><h3>Photo gallery</h3><label class="muted">Show
       <select id="gfilter">
         <option value="all">All photos</option>
+        <option value="needs">Needs labeling</option>
         <option value="partial">Partially tagged</option>
         <option value="untagged">Untagged</option>
       </select>
@@ -1195,7 +1215,7 @@ function showDetail(){ showOnly('detailView'); }
 function showFinish(){ showOnly('finishView'); }
 function gallerySub(){
   const f = (document.getElementById('gfilter')||{}).value || 'all';
-  const nouns = {all:'photo', partial:'partially tagged photo', untagged:'untagged photo'};
+  const nouns = {all:'photo', needs:'photo needing labels', partial:'partially tagged photo', untagged:'untagged photo'};
   const noun = nouns[f] || 'photo';
   if(!count){ return `No ${noun}s in this batch.`; }
   return `Click a photo to open it (${count} ${noun}${count===1?'':'s'} in this view).`;
@@ -1341,7 +1361,8 @@ function paintGallery(){
 }
 function applyFilter(){
   const f = (document.getElementById('gfilter')||{}).value || 'all';
-  activeGallery = allGallery.filter(g => f === 'all' ? true : g.status === f);
+  activeGallery = allGallery.filter(g =>
+    f === 'all' ? true : (f === 'needs' ? g.status !== 'full' : g.status === f));
   count = activeGallery.length;
   pos = 0;
   paintGallery();
@@ -1360,8 +1381,7 @@ async function init(){
   const gf=document.getElementById('gfilter');
   if (gf) {
     gf.onchange = applyFilter;
-    const has = s => allGallery.some(g => g.status === s);
-    gf.value = has('untagged') ? 'untagged' : (has('partial') ? 'partial' : 'all');
+    gf.value = 'needs';
   }
   refreshNameList();
   applyFilter();
@@ -1378,8 +1398,23 @@ function collectLabels(){
   refreshNameList();
   return labels;
 }
-function updateGalleryStatus(photoId, labels){
-  const status = !labels.length ? 'untagged' : (current && labels.length >= current.boxes.length ? 'full' : 'partial');
+function currentCorpusStatus(){
+  if(!current){return 'untagged';}
+  const resolved=new Set();
+  document.querySelectorAll('#rows input[data-i]').forEach(inp=>{
+    if(inp.value.trim()){resolved.add(Number(inp.getAttribute('data-i')));}
+  });
+  const threshold=Number(current.known_threshold||0);
+  if(threshold>0){
+    (current.hints||[]).forEach(h=>{
+      if(h.name && Number(h.confidence||0)>=threshold){resolved.add(Number(h.index));}
+    });
+  }
+  if(!resolved.size){return 'untagged';}
+  return resolved.size >= (current.boxes||[]).length ? 'full' : 'partial';
+}
+function updateGalleryStatus(photoId){
+  const status=currentCorpusStatus();
   const item = allGallery.find(g=>Number(g.id)===Number(photoId));
   if(item){ item.status=status; }
 }
@@ -1394,7 +1429,7 @@ async function saveCurrentOnly(){
   saveBtn.textContent='Saving...';
   try{
     const out = await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})});
-    updateGalleryStatus(current.id,labels);
+    updateGalleryStatus(current.id);
     dirty=false;
     return Number((out && out.stored) || 0);
   } finally {
@@ -1431,7 +1466,7 @@ async function pollFinish(){
     if(s.status==='done'){
       setText('finishTitle','Labeling finished');
       setText('finishMessage',labelFlow
-        ? 'Your labels are saved. Learning and scanning are continuing in ScanGUI.'
+        ? 'Your labels are saved. References are refreshing, then one final scan will run in ScanGUI.'
         : 'Your labels are saved. You can close this tab.');
       document.getElementById('finishSpinner').hidden=true;
       document.getElementById('finish').disabled=true;
@@ -1931,11 +1966,23 @@ def learn(api, conn, backend, verbose=True):
 # --------------------------------------------------------------------------- scan
 
 
-def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", uploaded_before=""):
+def scan(
+    api,
+    conn,
+    backend,
+    tolerance,
+    cfg,
+    verbose=True,
+    uploaded_after="",
+    uploaded_before="",
+    include_captions=True,
+):
     references = load_references(conn, backend.name)
-    caption_key = caption_scan_key(cfg)
+    caption_key = caption_scan_key(cfg) if include_captions else ""
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
+        if not include_captions:
+            print("caption pipeline: deferred until after labeling")
         if caption_key:
             print(
                 f"caption pipeline: {cfg_caption_model(cfg)}, "
@@ -2434,6 +2481,19 @@ def selftest():
     check_that(name == "Hans" and conf > 0.5, "identify: picks the nearer person")
     name, _ = identify(np.array([5.0, 5.0, 5.0], dtype=np.float32), refs, backend, 0.5)
     check_that(name is None, "identify: refuses when nobody is within tolerance")
+    known_hints = [
+        {"index": 0, "name": "Hans", "confidence": 98},
+        {"index": 1, "name": "Greta", "confidence": 97},
+    ]
+    check_that(
+        _label_item_status(2, {}, known_hints, 95) == "full",
+        "label queue: high-confidence known faces do not require more corpus labels",
+    )
+    check_that(
+        _label_item_status(2, {}, known_hints[:1], 95) == "partial"
+        and _label_item_status(2, {}, known_hints, 0) == "untagged",
+        "label queue: unresolved faces remain visible and disabled auto-accept resolves nothing",
+    )
 
     # box packing: css (top,right,bottom,left) -> [x, y, w, h] for the server.
     top, right, bottom, left = 20, 90, 60, 30
@@ -2770,11 +2830,95 @@ def selftest():
         globals()["_collect_label_items"] = original_collect
         globals()["_open_preview_html"] = original_open
 
+    # Mature label flow resolves known faces before asking for human work, then
+    # incorporates the new labels before the full face/caption scan.
+    original_learn = globals()["learn"]
+    original_scan = globals()["scan"]
+    original_label = globals()["local_label"]
+    flow_events = []
+    try:
+        globals()["learn"] = lambda *args, **kwargs: flow_events.append("learn")
+        globals()["scan"] = lambda *args, **kwargs: flow_events.append(
+            "scan-full" if kwargs.get("include_captions", True) else "scan-faces"
+        )
+        globals()["local_label"] = lambda *args, **kwargs: flow_events.append("label") or 2
+        flow_stored = run_label_refinement(
+            None, None, None, 0.5, {}, 500, "", "", verbose=False
+        )
+        check_that(
+            flow_events == ["learn", "scan-faces", "label", "learn", "scan-full"]
+            and flow_stored == 2,
+            "label flow: learn and face-scan before labeling, then relearn and fully scan",
+        )
+    finally:
+        globals()["learn"] = original_learn
+        globals()["scan"] = original_scan
+        globals()["local_label"] = original_label
+
     print("\n" + ("selftest passed." if not failures else f"selftest FAILED: {len(failures)} problem(s)."))
     return 0 if not failures else 1
 
 
 # --------------------------------------------------------------------------- main
+
+
+def run_label_refinement(
+    api,
+    conn,
+    backend,
+    tolerance,
+    cfg,
+    label_limit,
+    uploaded_after="",
+    uploaded_before="",
+    verbose=True,
+):
+    """Resolve mature-corpus work first, then learn from the human remainder."""
+    if verbose:
+        print("label flow 1/5: learning new and corrected confirmed labels")
+    learn(api, conn, backend, verbose)
+    if verbose:
+        print("label flow 2/5: face-scanning new photos before opening the labeler")
+    scan(
+        api,
+        conn,
+        backend,
+        tolerance,
+        cfg,
+        verbose,
+        uploaded_after,
+        uploaded_before,
+        include_captions=False,
+    )
+    if verbose:
+        print("label flow 3/5: opening unresolved faces for human labeling")
+    stored = local_label(
+        api,
+        conn,
+        backend,
+        tolerance,
+        label_limit,
+        uploaded_after,
+        uploaded_before,
+        label_flow=True,
+    )
+    if verbose:
+        print(f"label flow 4/5: learning {stored} explicit label change(s)")
+    learn(api, conn, backend, verbose)
+    if verbose:
+        print("label flow 5/5: final face and caption scan with refreshed references")
+    scan(
+        api,
+        conn,
+        backend,
+        tolerance,
+        cfg,
+        verbose,
+        uploaded_after,
+        uploaded_before,
+        include_captions=True,
+    )
+    return stored
 
 
 def main():
@@ -2792,7 +2936,7 @@ def main():
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
     ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
     ap.add_argument("--label-flow", action="store_true",
-                    help="with --label: after closing the UI, run learn then one scan pass")
+                    help="with --label: learn/scan first, label unresolved faces, then relearn/rescan")
     ap.add_argument("--label-limit", type=int, default=500, metavar="N",
                     help="how many recent confirmed photos to load in --label mode (default: 500)")
     ap.add_argument("--watch", type=int, metavar="SECONDS", help="keep running, pausing this long between passes")
@@ -2845,25 +2989,31 @@ def main():
                 "label window: "
                 f"{uploaded_after or 'start'} .. {uploaded_before or 'now'}"
             )
-        stored = local_label(
-            api,
-            conn,
-            backend,
-            tolerance,
-            args.label_limit,
-            uploaded_after,
-            uploaded_before,
-            args.label_flow,
-        )
+        if args.label_flow:
+            stored = run_label_refinement(
+                api,
+                conn,
+                backend,
+                tolerance,
+                cfg,
+                args.label_limit,
+                uploaded_after,
+                uploaded_before,
+                verbose,
+            )
+        else:
+            stored = local_label(
+                api,
+                conn,
+                backend,
+                tolerance,
+                args.label_limit,
+                uploaded_after,
+                uploaded_before,
+                False,
+            )
         if verbose:
             print(f"stored {stored} explicit face label(s)")
-        if args.label_flow:
-            if verbose:
-                print("label flow: learning from confirmed labels")
-            learn(api, conn, backend, verbose)
-            if verbose:
-                print("label flow: scanning queue with refreshed references")
-            scan(api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before)
         return
 
     while True:

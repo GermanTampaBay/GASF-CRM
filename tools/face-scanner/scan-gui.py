@@ -78,8 +78,8 @@ class ScanGui(tk.Tk):
         self.cb_label_flow = self._option_row(
             opts,
             self.v_label_flow,
-            "After --label, run --learn + one scan pass",
-            "One-step workflow: save labels, refresh references, then scan queue.",
+            "Refinement flow: Learn -> Scan -> Label -> Learn -> Scan",
+            "Recommended: resolve familiar faces before asking you to label the remainder.",
             self._on_flag_change,
         )
         self.cb_watch = self._option_row(

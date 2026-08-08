@@ -49,6 +49,57 @@ wanted; it is deliberately not enabled by default.
 The ZIP excludes credentials, face vectors, logs, caches, and Git metadata.
 See `INSTALL-LAPTOP.txt` inside it for the short transfer instructions.
 
+### Move an existing face corpus securely
+
+`faces.db` contains biometric vectors, so the installer deliberately never
+places it in the transfer ZIP. A new laptop can rebuild those vectors from
+confirmed WordPress labels, but an encrypted direct transfer avoids that
+recomputation and preserves the incremental-learning watermarks.
+
+1. Close ScanGUI and the browser labeler on both computers. If the optional
+   task is installed, stop it before copying:
+
+   ```powershell
+   Get-ScheduledTask -TaskName "GASF Face Scanner" -ErrorAction SilentlyContinue |
+     Stop-ScheduledTask
+   ```
+
+2. On the old computer, locate `faces.db` beside `scan.py`, record its hash, and
+   copy it only to a BitLocker-encrypted USB drive or an AES-256-encrypted
+   archive. Do not email it, put the raw file in cloud storage, or include
+   `config.json`.
+
+   ```powershell
+   $old = "C:\path\to\old\face-scanner\faces.db"
+   Get-FileHash -Algorithm SHA256 $old
+   Copy-Item -LiteralPath $old -Destination "E:\faces.db"
+   ```
+
+3. Install the scanner normally on the laptop, close it, preserve any database
+   it created, and copy the transferred database into the installed folder:
+
+   ```powershell
+   $app = Join-Path $env:LOCALAPPDATA "GASF Face Scanner"
+   $dest = Join-Path $app "faces.db"
+   if (Test-Path $dest) {
+     Move-Item -LiteralPath $dest -Destination (Join-Path $app "faces.db.before-migration")
+   }
+   Copy-Item -LiteralPath "E:\faces.db" -Destination $dest
+   Get-FileHash -Algorithm SHA256 $dest
+   ```
+
+4. Confirm the destination hash matches the old computer, then launch ScanGUI
+   and run `--status`. Keep the rollback file until the corpus counts look
+   correct. The database stores each vector's engine, so engine isolation
+   remains intact after transfer.
+
+5. Remove the transfer copy from the encrypted media. Once the laptop is
+   proven and the old scanner is retired, remove the old `faces.db` too; avoid
+   keeping unnecessary biometric replicas.
+
+The scanner credential is separate. Let the installer write `config.json` from
+its hidden key prompt rather than moving the old credential file.
+
 ### Manual/developer setup
 
 ```powershell
@@ -101,7 +152,7 @@ The first real run downloads the `buffalo_l` model pack (~280 MB) into
 | `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
-| `python scan.py --label --label-flow` | One-step refinement pass: label faces, then auto-run learn, then auto-scan queue once. |
+| `python scan.py --label --label-flow` | Mature refinement pass: learn corrections, face-scan new photos, label only unresolved work, relearn those labels, then run the full face/caption scan. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
 | `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning and `--label`. Useful for "new uploads only" runs. |
 | `python scan.py --status` | Who it knows, how many examples each, what is waiting. No ML or server needed. |
@@ -121,7 +172,7 @@ python scan-gui.py
 
 - Tick options, click **Start**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
-- In label mode, leave **After --label, run --learn + one scan pass** on for the streamlined one-shot workflow.
+- In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
 - The launcher finds `scan.py` beside itself, so the folder can move without editing code.
 

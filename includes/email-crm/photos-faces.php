@@ -1145,7 +1145,10 @@ add_action( 'rest_api_init', function () {
 					'pipeline' => gasf_crm_faces_photo_state( $id ),
 				);
 			}
-			return array( 'photos' => $out );
+			return array(
+				'photos' => $out,
+				'auto_accept_threshold' => gasf_crm_faces_auto_accept_threshold(),
+			);
 		},
 	) );
 
