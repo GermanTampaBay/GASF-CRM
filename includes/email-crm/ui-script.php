@@ -991,7 +991,7 @@ function gasf_crm_render_inbox_script() {
 	 * "Hans Muller" are three people as far as a taxonomy is concerned.
 	 * Suggesting the existing spelling is what keeps them one.
 	 */
-	var PEOPLE = null, peopleLoading = null;
+	var PEOPLE = null, CANONICAL_PEOPLE = null, peopleLoading = null;
 
 	function loadPeople(force){
 		if (PEOPLE && !force) { return Promise.resolve(PEOPLE); }
@@ -1001,10 +1001,29 @@ function gasf_crm_render_inbox_script() {
 			// normalise names identically. Two copies of this would drift, and
 			// the half that drifted would be the half nobody tests.
 			PEOPLE = gasfPrepare(r.people || []);
+			CANONICAL_PEOPLE = gasfPrepare(r.canonical_people || r.people || []);
 			peopleLoading = null;
 			return PEOPLE;
-		}).catch(function(){ PEOPLE = []; peopleLoading = null; return PEOPLE; });
+		}).catch(function(){ PEOPLE = []; CANONICAL_PEOPLE = []; peopleLoading = null; return PEOPLE; });
 		return peopleLoading;
+	}
+
+	function loadCanonicalPeople(force){
+		return loadPeople(force).then(function(){ return CANONICAL_PEOPLE || []; });
+	}
+
+	function canonicalPerson(value, term){
+		var termId = parseInt(term, 10) || 0;
+		if (termId) {
+			for (var i = 0; i < (CANONICAL_PEOPLE || []).length; i++) {
+				if ((parseInt(CANONICAL_PEOPLE[i].id, 10) || 0) === termId) { return CANONICAL_PEOPLE[i]; }
+			}
+			return null;
+		}
+		var matches = (CANONICAL_PEOPLE || []).filter(function(p){
+			return p.value === value || p.label === value;
+		});
+		return matches.length === 1 ? matches[0] : null;
 	}
 
 	/* Two normalised forms per name, because German has two conventions and
@@ -1263,7 +1282,7 @@ function gasf_crm_render_inbox_script() {
 			// keystroke after the one that opened the list: type "Mü" and you got
 			// suggestions, type "Mül" and they vanished and never came back.
 			close();
-			items = gasfPeopleMatch(q, PEOPLE, taken);
+			items = gasfPeopleMatch(q, input.classList.contains('nminto') ? CANONICAL_PEOPLE : PEOPLE, taken);
 			if (!items.length) { return; }
 
 			var box = document.createElement('div');
@@ -1288,6 +1307,7 @@ function gasf_crm_render_inbox_script() {
 		function choose(input, p){
 			if (!p) { return; }
 			input.value = p.value;   // the RAW term, so it matches what is stored
+			input.dataset.term = String(p.id || '');
 			close();
 			input.dispatchEvent(new Event('change', { bubbles: true }));
 		}
@@ -1302,6 +1322,7 @@ function gasf_crm_render_inbox_script() {
 
 		document.addEventListener('input', function(ev){
 			if (!ev.target.classList || !ev.target.classList.contains('p-person')) { return; }
+			delete ev.target.dataset.term;
 			loadPeople().then(function(){ paint(ev.target); });
 		});
 
@@ -3227,17 +3248,22 @@ function gasf_crm_render_inbox_script() {
 			b.classList.toggle('on', b.dataset.sort === nsort);
 		});
 
-		loadPeople(true).then(function(list){
+		loadCanonicalPeople(true).then(function(list){
 			if (!list.length) { box.innerHTML = '<span class="muted">Nobody has been named in a photo yet.</span>'; return; }
 
 			box.innerHTML = sortNames(list).map(function(p){
-				return '<div class="nrow" data-name="' + esc(p.value) + '">' +
+				return '<div class="nrow" data-term="' + p.id + '">' +
 					'<div class="nmain">' +
 						'<input type="text" class="nname" value="' + esc(p.label) + '" aria-label="Name">' +
 						'<span class="nct">' + p.n + '</span>' +
 						'<button class="btn sec nsave ico" type="button" aria-label="Save" title="Save">' + ICO_SAVE + '</button>' +
 						'<button class="btn sec nmerge" type="button" title="Merge this person into another">Merge…</button>' +
 						'<button class="btn sec ndel ico" type="button" aria-label="Remove" title="Remove this name from every photo">' + ICO_DEL + '</button>' +
+					'</div>' +
+					'<div class="npublic-row">' +
+						'<label class="npublic"><input type="checkbox" class="npublic-toggle"' + (p.public_name_opt_out ? ' checked' : '') + '> ' +
+							'<span>Hide this name from public photo lists and filters</span></label>' +
+						'<span class="nprivacy-msg" role="status"></span>' +
 					'</div>' +
 					// The merge target box carries class p-person on purpose: the
 					// name suggestions are wired by delegation on that class, so
@@ -3252,30 +3278,71 @@ function gasf_crm_render_inbox_script() {
 			}).join('');
 
 			Array.prototype.forEach.call(box.querySelectorAll('.nrow'), function(row){
-				var from  = row.dataset.name;
 				var input = row.querySelector('.nname');
 				var mrow  = row.querySelector('.nmerge-row');
 				var minto = row.querySelector('.nminto');
+				var termId = parseInt(row.dataset.term, 10) || 0;
+				var source = canonicalPerson('', termId);
+				if (!source) { return; }
+				var from = source.value;
+				var fromLabel = source.label;
+				var publicToggle = row.querySelector('.npublic-toggle');
+				var privacyMsg = row.querySelector('.nprivacy-msg');
+
+				publicToggle.onchange = function(){
+					var wanted = publicToggle.checked;
+					publicToggle.disabled = true;
+					privacyMsg.textContent = 'Saving…';
+					api('/photos/person', { method:'POST', body: JSON.stringify({
+						action: 'public-name',
+						term: termId,
+						name: from,
+						public_name_opt_out: wanted,
+						op_id: nextOpId('photo-person-public-name-' + termId + '-' + (wanted ? 'hide' : 'show'))
+					}) }).then(function(r){
+						publicToggle.checked = !!r.public_name_opt_out;
+						publicToggle.disabled = false;
+						privacyMsg.textContent = 'Saved.';
+					}).catch(function(e){
+						publicToggle.checked = !wanted;
+						publicToggle.disabled = false;
+						privacyMsg.textContent = e.message;
+					});
+				};
 
 				row.querySelector('.nsave').onclick = function(){
 					var to = input.value.trim();
-					if (!to || to === from) { return; }
-					if (!confirm('Rename “' + from + '” to “' + to + '” on every photo?')) { return; }
-					person('rename', from, to);
+					if (!to || to === from || to === fromLabel) { return; }
+					if (!confirm('Rename “' + fromLabel + '” to “' + to + '” on every photo?')) { return; }
+					person('rename', termId, from, to, 0);
 				};
 
 				row.querySelector('.nmerge').onclick = function(){
 					mrow.hidden = !mrow.hidden;
-					if (!mrow.hidden) { minto.value = ''; minto.focus(); }
+					if (!mrow.hidden) {
+						minto.value = '';
+						delete minto.dataset.term;
+						minto.setCustomValidity('');
+						minto.focus();
+					}
 				};
 				row.querySelector('.nmcancel').onclick = function(){ mrow.hidden = true; };
 
 				var doMerge = function(){
-					var to = minto.value.trim();
-					if (!to || to === from) { return; }
-					if (!confirm('Merge “' + from + '” into “' + to + '”?\n\nEvery photo of ' + from +
-						' will be tagged ' + to + ' instead, and ' + from + ' is removed.')) { return; }
-					person('merge', from, to);
+					var entered = minto.value;
+					if (!entered.trim()) { return; }
+					var dest = canonicalPerson(entered, minto.dataset.term);
+					if (!dest) {
+						minto.setCustomValidity('Choose an existing name from the suggestions.');
+						minto.reportValidity();
+						return;
+					}
+					var intoTermId = parseInt(dest.id, 10) || 0;
+					if (!intoTermId || intoTermId === termId) { return; }
+					minto.setCustomValidity('');
+					if (!confirm('Merge “' + fromLabel + '” into “' + dest.label + '”?\n\nEvery photo of ' + fromLabel +
+						' will be tagged ' + dest.label + ' instead, and ' + fromLabel + ' is removed.')) { return; }
+					person('merge', termId, from, dest.value, intoTermId);
 				};
 				row.querySelector('.nmgo').onclick = doMerge;
 				minto.addEventListener('keydown', function(ev){
@@ -3285,8 +3352,8 @@ function gasf_crm_render_inbox_script() {
 				});
 
 				row.querySelector('.ndel').onclick = function(){
-					if (!confirm('Remove the name “' + from + '” from every photo?\n\nThe photos themselves are not deleted and keep everyone else on them — they just stop saying ' + from + ' is in them.')) { return; }
-					person('delete', from, '');
+					if (!confirm('Remove the name “' + fromLabel + '” from every photo?\n\nThe photos themselves are not deleted and keep everyone else on them — they just stop saying ' + fromLabel + ' is in them.')) { return; }
+					person('delete', termId, from, '', 0);
 				};
 			});
 		});
@@ -3408,11 +3475,11 @@ function gasf_crm_render_inbox_script() {
 			.catch(function(e){ msg.textContent = e.message; });
 	}
 
-	function person(action, name, into){
+	function person(action, term, name, into, intoTerm){
 		var box = document.getElementById('lnameslist');
 		api('/photos/person', { method:'POST', body: JSON.stringify({
-			action: action, name: name, into: into,
-			op_id: nextOpId('photo-person-' + action + '-' + name + '-' + into)
+			action: action, term: term, name: name, into: into, into_term: intoTerm,
+			op_id: nextOpId('photo-person-' + action + '-' + term + '-' + intoTerm + '-' + into)
 		}) })
 			.then(function(r){
 				box.insertAdjacentHTML('beforebegin',

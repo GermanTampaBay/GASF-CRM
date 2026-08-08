@@ -41,6 +41,9 @@ final class GASF_CRM_Selftest {
 	/** Attachment ids this run created; the shutdown hook reaps them. */
 	private $made = array();
 
+	/** Synthetic person terms this run created; cleaned independently of tested actions. */
+	private $made_people = array();
+
 	/** Options snapshotted before a test altered them. */
 	private $saved_options = array();
 
@@ -68,6 +71,11 @@ final class GASF_CRM_Selftest {
 	public function cleanup() {
 		foreach ( $this->made as $id ) {
 			if ( get_post( $id ) ) { wp_delete_attachment( $id, true ); }
+		}
+		foreach ( $this->made_people as $term_id ) {
+			if ( term_exists( $term_id, 'gasf_photo_person' ) ) {
+				wp_delete_term( $term_id, 'gasf_photo_person' );
+			}
 		}
 		foreach ( $this->saved_options as $name => $val ) {
 			if ( null === $val ) { delete_option( $name ); }
@@ -197,6 +205,12 @@ final class GASF_CRM_Selftest {
 		return call_user_func( $this->rest_cb( $route ), $req );
 	}
 
+	private function person_term( $name ) {
+		$term = wp_insert_term( $name, 'gasf_photo_person' );
+		if ( ! is_wp_error( $term ) ) { $this->made_people[] = (int) $term['term_id']; }
+		return $term;
+	}
+
 	/* ---------------------------------------------------------------- tests */
 
 	/** The whole matrix, one photo pushed through every state. */
@@ -216,6 +230,161 @@ final class GASF_CRM_Selftest {
 					"consent matrix: $state/$use is " . ( $w[ $i ] ? 'yes' : 'no' ) );
 			}
 		}
+	}
+
+	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
+	public function test_public_name_opt_out() {
+		$suffix = (string) wp_rand( 100000, 999999 );
+		$source_name = 'Selftest Public Name ' . $suffix;
+		$renamed_name = 'Selftest Public Renamed ' . $suffix;
+		$dest_name = 'Selftest Public Destination ' . $suffix;
+		$other_name = 'Selftest Public Other ' . $suffix;
+		$source = $this->person_term( $source_name );
+		$dest = $this->person_term( $dest_name );
+		$other = $this->person_term( $other_name );
+		if ( ! $this->ok( ! is_wp_error( $source ) && ! is_wp_error( $dest ) && ! is_wp_error( $other ),
+			'public names: synthetic canonical people are created' ) ) { return; }
+
+		$source_id = (int) $source['term_id'];
+		$dest_id = (int) $dest['term_id'];
+		$other_id = (int) $other['term_id'];
+		$photo = $this->library_photo( 'st-public-name' );
+		wp_set_object_terms( $photo, array( $source_id ), 'gasf_photo_person', false );
+
+		$this->ok( gasf_photo_person_may_show_public_name( $source_id )
+			&& gasf_photo_person_name_may_show_publicly( $source_name ),
+			'public names: a canonical person is public by default' );
+		$before = wp_list_pluck( gasf_photo_public_people(), 'value' );
+		$this->ok( in_array( $source_name, $before, true ),
+			'public names: a default-public person appears in the public suggestion list' );
+
+		$op_id = 'selftest-public-name-' . $suffix;
+		$hidden = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'public-name',
+			'term' => $source_id,
+			'name' => $source_name,
+			'public_name_opt_out' => true,
+			'op_id' => $op_id,
+		) );
+		$this->ok( ! is_wp_error( $hidden ) && ! empty( $hidden['public_name_opt_out'] )
+			&& metadata_exists( 'term', $source_id, GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META )
+			&& ! gasf_photo_person_may_show_public_name( $source_id ),
+			'public names: the volunteer action persists an explicit opt-out' );
+		$duplicate = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'public-name',
+			'term' => $source_id,
+			'name' => $source_name,
+			'public_name_opt_out' => true,
+			'op_id' => $op_id,
+		) );
+		$this->ok( ! empty( $duplicate['duplicate'] ) && ! empty( $duplicate['public_name_opt_out'] ),
+			'public names: retrying the same toggle is idempotent' );
+
+		$near_duplicate = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'public-name',
+			'term' => $source_id,
+			'name' => $source_name . ' Jr.',
+			'public_name_opt_out' => false,
+			'op_id' => 'selftest-public-near-' . $suffix,
+		) );
+		$this->ok( is_wp_error( $near_duplicate ) && ! gasf_photo_person_may_show_public_name( $source_id ),
+			'public names: a near-duplicate spelling cannot change the canonical person' );
+
+		$shown = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'public-name',
+			'term' => $source_id,
+			'name' => $source_name,
+			'public_name_opt_out' => false,
+			'op_id' => 'selftest-public-show-' . $suffix,
+		) );
+		$this->ok( ! is_wp_error( $shown ) && empty( $shown['public_name_opt_out'] )
+			&& metadata_exists( 'term', $source_id, GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META )
+			&& 0 === (int) get_term_meta( $source_id, GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META, true )
+			&& gasf_photo_person_may_show_public_name( $source_id ),
+			'public names: clearing the opt-out persists an explicit false state' );
+		$this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'public-name',
+			'term' => $source_id,
+			'name' => $source_name,
+			'public_name_opt_out' => true,
+			'op_id' => 'selftest-public-rehide-' . $suffix,
+		) );
+
+		$after = wp_list_pluck( gasf_photo_public_people(), 'value' );
+		$this->ok( ! in_array( $source_name, $after, true ),
+			'public names: an opted-out person is absent from the public suggestion list' );
+
+		$people = $this->rest_get( '/gasf/v1/crm/photos/people' );
+		$people_row = array();
+		foreach ( (array) ( $people['people'] ?? array() ) as $row ) {
+			if ( $source_id === (int) ( $row['id'] ?? 0 ) ) { $people_row = $row; break; }
+		}
+		$this->ok( ! empty( $people_row['public_name_opt_out'] ),
+			'public names: the authenticated people data exposes current state' );
+
+		$scanner_people = $this->rest_get( '/gasf/v1/crm/photos/faces/people' );
+		$this->ok( in_array( $source_name, (array) ( $scanner_people['people'] ?? array() ), true ),
+			'public names: the private scanner people feed still includes opted-out people' );
+		$confirmed = $this->rest_get( '/gasf/v1/crm/photos/faces/confirmed', array(
+			'after' => gmdate( 'Y-m-d H:i:s', time() - MINUTE_IN_SECONDS ),
+			'limit' => 200,
+		) );
+		$confirmed_person = false;
+		foreach ( (array) ( $confirmed['photos'] ?? array() ) as $row ) {
+			if ( $photo === (int) ( $row['id'] ?? 0 )
+				&& in_array( $source_name, (array) ( $row['people'] ?? array() ), true ) ) {
+				$confirmed_person = true;
+			}
+		}
+		$this->ok( $confirmed_person,
+			'public names: the private confirmed learning feed still includes opted-out people' );
+
+		$renamed = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term' => $source_id,
+			'name' => $source_name,
+			'into' => $renamed_name,
+			'op_id' => 'selftest-public-rename-' . $suffix,
+		) );
+		$renamed_term = get_term( $source_id, 'gasf_photo_person' );
+		$this->ok( ! is_wp_error( $renamed ) && $renamed_term
+			&& $renamed_name === (string) $renamed_term->name
+			&& ! gasf_photo_person_may_show_public_name( $source_id ),
+			'public names: rename retains the opt-out term metadata' );
+
+		$merged = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'merge',
+			'term' => $source_id,
+			'name' => $renamed_name,
+			'into' => $dest_name,
+			'into_term' => $dest_id,
+			'op_id' => 'selftest-public-merge-source-' . $suffix,
+		) );
+		$this->ok( ! is_wp_error( $merged ) && ! term_exists( $source_id, 'gasf_photo_person' )
+			&& ! gasf_photo_person_may_show_public_name( $dest_id ),
+			'public names: merging an opted-out source preserves opt-out on the destination' );
+
+		$merged_into_opted = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'merge',
+			'term' => $other_id,
+			'name' => $other_name,
+			'into' => $dest_name,
+			'into_term' => $dest_id,
+			'op_id' => 'selftest-public-merge-dest-' . $suffix,
+		) );
+		$this->ok( ! is_wp_error( $merged_into_opted ) && ! term_exists( $other_id, 'gasf_photo_person' )
+			&& ! gasf_photo_person_may_show_public_name( $dest_id ),
+			'public names: merging into an opted-out destination keeps the opt-out' );
+
+		$deleted = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'delete',
+			'term' => $dest_id,
+			'name' => $dest_name,
+			'op_id' => 'selftest-public-delete-' . $suffix,
+		) );
+		$this->ok( ! is_wp_error( $deleted ) && ! term_exists( $dest_id, 'gasf_photo_person' )
+			&& ! metadata_exists( 'term', $dest_id, GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META ),
+			'public names: deleting the person removes its opt-out metadata with the term' );
 	}
 
 	/** The zip export obeys the policy, and says how many it left out. */

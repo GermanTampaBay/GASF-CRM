@@ -960,6 +960,7 @@ add_action( 'rest_api_init', function () {
 			$counts = function_exists( 'gasf_photo_person_counts' ) ? gasf_photo_person_counts() : array();
 
 			$out = array();
+			$canonical = array();
 			$by_key = array();
 			foreach ( $terms as $t ) {
 				$row = array(
@@ -973,7 +974,11 @@ add_action( 'rest_api_init', function () {
 					// when a name entered the collection — terms carry no date —
 					// and it is what the panel's "recently added" order reads.
 					'id'    => (int) $t->term_id,
+					'public_name_opt_out' => function_exists( 'gasf_photo_person_public_name_opted_out' )
+						? gasf_photo_person_public_name_opted_out( $t )
+						: false,
 				);
+				$canonical[] = $row;
 				$keys = function_exists( 'gasf_photo_person_keys' )
 					? gasf_photo_person_keys( (string) $row['label'] )
 					: array( strtolower( (string) $row['label'] ) );
@@ -997,13 +1002,20 @@ add_action( 'rest_api_init', function () {
 			// This is only the default. The panel re-sorts client-side on the
 			// volunteer's choice, and the suggestion matcher does its own ranking
 			// (score, then photo count), so neither depends on arrival order.
-			usort( $out, function ( $a, $b ) {
+			$sort_people = function ( $a, $b ) {
 				$ka = function_exists( 'gasf_photo_translit' ) ? gasf_photo_translit( $a['label'] ) : $a['label'];
 				$kb = function_exists( 'gasf_photo_translit' ) ? gasf_photo_translit( $b['label'] ) : $b['label'];
 				return strnatcasecmp( $ka, $kb ) ?: strnatcasecmp( $a['label'], $b['label'] );
-			} );
+			};
+			usort( $out, $sort_people );
+			usort( $canonical, $sort_people );
 
-			return array( 'people' => $out );
+			return array(
+				// Suggestions stay collapsed across equivalent spellings.
+				'people'           => $out,
+				// Management must expose every exact term so none is unmanageable.
+				'canonical_people' => $canonical,
+			);
 		},
 	) );
 
@@ -1045,12 +1057,14 @@ add_action( 'rest_api_init', function () {
 	 * second person. Fixing "Nichaolas Freiburg" on one picture is not what
 	 * anybody means by fixing it.
 	 *
-	 * Two operations, because they are two different mistakes:
+	 * Three operations:
 	 *   rename — one person, spelled wrong. Changes the name everywhere at once,
 	 *            because a term IS shared; nothing is re-tagged.
 	 *   merge  — one person entered twice under different names ("Erna" and
 	 *            "Erna Wirtz"). Every photo of the first is moved onto the
 	 *            second and the first is retired.
+	 *   public-name — records whether public lists and filters may show the
+	 *                 canonical name, without changing private use or tagging.
 	 */
 	register_rest_route( 'gasf/v1', '/crm/photos/person', array(
 		'methods'             => 'POST',
@@ -1059,36 +1073,86 @@ add_action( 'rest_api_init', function () {
 			if ( ! gasf_crm_photos_available() ) {
 				return new WP_Error( 'gasf_crm_nocatalog', 'The Photo Catalogue module is switched off.', array( 'status' => 503 ) );
 			}
-			$find_person_term = function ( $raw ) {
-				$name = trim( (string) $raw );
-				if ( '' === $name ) { return null; }
-				$terms = get_terms( array( 'taxonomy' => 'gasf_photo_person', 'hide_empty' => false ) );
-				if ( is_wp_error( $terms ) ) { return null; }
-				foreach ( $terms as $t ) {
-					$same = function_exists( 'gasf_photo_person_same' )
-						? gasf_photo_person_same( $name, (string) $t->name )
-						: ( 0 === strcasecmp( html_entity_decode( $name, ENT_QUOTES ), html_entity_decode( (string) $t->name, ENT_QUOTES ) ) );
-					if ( $same ) { return $t; }
-				}
-				return null;
-			};
-
 			$action = (string) $req->get_param( 'action' );
-			$name   = trim( (string) $req->get_param( 'name' ) );
-			$into   = trim( (string) $req->get_param( 'into' ) );
-			$term   = $find_person_term( $name );
+			$name   = (string) $req->get_param( 'name' );
+			$into   = (string) $req->get_param( 'into' );
+			$term_id = (int) $req->get_param( 'term' );
+			$into_term_id = (int) $req->get_param( 'into_term' );
 
-			if ( ! $term || is_wp_error( $term ) ) {
+			if ( 'public-name' === $action ) {
+				$term = get_term( $term_id, 'gasf_photo_person' );
+				if ( ! $term || is_wp_error( $term ) || $name !== (string) $term->name ) {
+					return new WP_Error(
+						'gasf_crm_404',
+						'That exact person is no longer in the collection. Reload the names panel and try again.',
+						array( 'status' => 404 )
+					);
+				}
+
+				$raw_opt_out = $req->get_param( 'public_name_opt_out' );
+				if ( ! is_bool( $raw_opt_out ) && ! in_array( $raw_opt_out, array( 0, 1, '0', '1' ), true ) ) {
+					return new WP_Error( 'gasf_crm_bad', 'Choose whether this name should be hidden publicly.', array( 'status' => 400 ) );
+				}
+				$opt_out = rest_sanitize_boolean( $raw_opt_out );
+				$scope = 'photo-person:public-name:' . $term_id . ':' . ( $opt_out ? '1' : '0' );
+				$op = gasf_crm_op_start( $scope, $req, 20 * MINUTE_IN_SECONDS );
+				if ( is_wp_error( $op ) ) { return $op; }
+				if ( ! empty( $op['duplicate'] ) ) {
+					return array(
+						'ok'                  => true,
+						'duplicate'           => true,
+						'action'              => 'public-name',
+						'term'                => $term_id,
+						'name'                => $term->name,
+						'public_name_opt_out' => function_exists( 'gasf_photo_person_public_name_opted_out' )
+							? gasf_photo_person_public_name_opted_out( $term )
+							: ( '1' === (string) get_term_meta( $term_id, '_gasf_public_name_opt_out', true ) ),
+					);
+				}
+
+				$meta_key = defined( 'GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META' )
+					? GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META
+					: '_gasf_public_name_opt_out';
+				update_term_meta( $term_id, $meta_key, $opt_out ? 1 : 0 );
+				$stored = metadata_exists( 'term', $term_id, $meta_key )
+					&& (int) get_term_meta( $term_id, $meta_key, true ) === ( $opt_out ? 1 : 0 );
+				if ( ! $stored ) {
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error( 'gasf_crm_save', 'The public-name preference did not persist.', array( 'status' => 500 ) );
+				}
+
+				gasf_crm_log( sprintf(
+					'Photo library: public name opt-out %s for “%s” — %s (user %d)',
+					$opt_out ? 'enabled' : 'cleared',
+					$term->name,
+					gasf_crm_display_name( get_current_user_id() ),
+					get_current_user_id()
+				) );
+
+				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+				return array(
+					'ok'                  => true,
+					'action'              => 'public-name',
+					'term'                => $term_id,
+					'name'                => $term->name,
+					'public_name_opt_out' => $opt_out,
+				);
+			}
+
+			$term = get_term( $term_id, 'gasf_photo_person' );
+
+			if ( ! $term || is_wp_error( $term ) || $name !== (string) $term->name ) {
 				$scope = '';
 				if ( 'rename' === $action ) {
-					$scope = 'photo-person:rename:' . md5( $name . '|' . trim( sanitize_text_field( $into ) ) );
+					$scope = 'photo-person:rename:' . $term_id . ':' . md5( trim( sanitize_text_field( $into ) ) );
 				} elseif ( 'merge' === $action ) {
-					$scope = 'photo-person:merge:' . md5( $name . '|' . $into );
+					$scope = 'photo-person:merge:' . $term_id . ':' . $into_term_id;
 				} elseif ( 'delete' === $action ) {
-					$scope = 'photo-person:delete:' . md5( $name );
+					$scope = 'photo-person:delete:' . $term_id;
 				}
 				if ( '' !== $scope ) {
 					$op = gasf_crm_op_start( $scope, $req, 20 * MINUTE_IN_SECONDS );
+					if ( is_wp_error( $op ) ) { return $op; }
 					if ( is_array( $op ) && ! empty( $op['duplicate'] ) ) {
 						return array(
 							'ok'        => true,
@@ -1103,7 +1167,11 @@ add_action( 'rest_api_init', function () {
 						gasf_crm_op_finish( $op, false );
 					}
 				}
-				return new WP_Error( 'gasf_crm_404', 'No such person in the collection.', array( 'status' => 404 ) );
+				return new WP_Error(
+					'gasf_crm_404',
+					'That exact person is no longer in the collection. Reload the names panel and try again.',
+					array( 'status' => 404 )
+				);
 			}
 
 			if ( 'rename' === $action ) {
@@ -1113,7 +1181,9 @@ add_action( 'rest_api_init', function () {
 				// Already somebody else? Then this is a merge wearing the wrong
 				// hat, and doing it as a rename would fail on the duplicate slug
 				// and leave the volunteer with an error they cannot act on.
-				$clash = $find_person_term( $to );
+				$clash = function_exists( 'gasf_photo_person_term_by_exact_name' )
+					? gasf_photo_person_term_by_exact_name( $to )
+					: get_term_by( 'name', $to, 'gasf_photo_person' );
 				if ( $clash && ! is_wp_error( $clash ) && (int) $clash->term_id !== (int) $term->term_id ) {
 					return new WP_Error(
 						'gasf_crm_exists',
@@ -1121,7 +1191,7 @@ add_action( 'rest_api_init', function () {
 						array( 'status' => 409 )
 					);
 				}
-				$op = gasf_crm_op_start( 'photo-person:rename:' . md5( $name . '|' . $to ), $req, 20 * MINUTE_IN_SECONDS );
+				$op = gasf_crm_op_start( 'photo-person:rename:' . $term_id . ':' . md5( $to ), $req, 20 * MINUTE_IN_SECONDS );
 				if ( is_wp_error( $op ) ) { return $op; }
 				if ( ! empty( $op['duplicate'] ) ) {
 					return array( 'ok' => true, 'duplicate' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => 0 );
@@ -1152,18 +1222,39 @@ add_action( 'rest_api_init', function () {
 			}
 
 			if ( 'merge' === $action ) {
-				$into = trim( (string) $req->get_param( 'into' ) );
-				$dest = $find_person_term( $into );
-				if ( ! $dest || is_wp_error( $dest ) ) {
-					return new WP_Error( 'gasf_crm_404', 'No such person to merge into.', array( 'status' => 404 ) );
+				$dest = get_term( $into_term_id, 'gasf_photo_person' );
+				if ( ! $dest || is_wp_error( $dest ) || $into !== (string) $dest->name ) {
+					return new WP_Error(
+						'gasf_crm_404',
+						'That exact merge destination is no longer in the collection. Reload the names panel and try again.',
+						array( 'status' => 404 )
+					);
 				}
 				if ( (int) $dest->term_id === (int) $term->term_id ) {
 					return new WP_Error( 'gasf_crm_bad', 'Those are the same person already.', array( 'status' => 400 ) );
 				}
-				$op = gasf_crm_op_start( 'photo-person:merge:' . md5( $name . '|' . $into ), $req, 20 * MINUTE_IN_SECONDS );
+				$op = gasf_crm_op_start( 'photo-person:merge:' . $term_id . ':' . $into_term_id, $req, 20 * MINUTE_IN_SECONDS );
 				if ( is_wp_error( $op ) ) { return $op; }
 				if ( ! empty( $op['duplicate'] ) ) {
 					return array( 'ok' => true, 'duplicate' => true, 'action' => 'merge', 'from' => $term->name, 'to' => $dest->name, 'photos' => 0 );
+				}
+
+				// Privacy follows the person conservatively: either opt-out wins.
+				$source_opted_out = function_exists( 'gasf_photo_person_public_name_opted_out' )
+					? gasf_photo_person_public_name_opted_out( $term )
+					: ( '1' === (string) get_term_meta( (int) $term->term_id, '_gasf_public_name_opt_out', true ) );
+				$dest_opted_out = function_exists( 'gasf_photo_person_public_name_opted_out' )
+					? gasf_photo_person_public_name_opted_out( $dest )
+					: ( '1' === (string) get_term_meta( (int) $dest->term_id, '_gasf_public_name_opt_out', true ) );
+				if ( $source_opted_out && ! $dest_opted_out ) {
+					$meta_key = defined( 'GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META' )
+						? GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META
+						: '_gasf_public_name_opt_out';
+					update_term_meta( (int) $dest->term_id, $meta_key, 1 );
+					if ( '1' !== (string) get_term_meta( (int) $dest->term_id, $meta_key, true ) ) {
+						gasf_crm_op_finish( $op, false );
+						return new WP_Error( 'gasf_crm_save', 'The public-name preference did not survive the merge.', array( 'status' => 500 ) );
+					}
 				}
 
 				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
@@ -1187,7 +1278,7 @@ add_action( 'rest_api_init', function () {
 			}
 
 			if ( 'delete' === $action ) {
-				$op = gasf_crm_op_start( 'photo-person:delete:' . md5( $name ), $req, 20 * MINUTE_IN_SECONDS );
+				$op = gasf_crm_op_start( 'photo-person:delete:' . $term_id, $req, 20 * MINUTE_IN_SECONDS );
 				if ( is_wp_error( $op ) ) { return $op; }
 				if ( ! empty( $op['duplicate'] ) ) {
 					return array( 'ok' => true, 'duplicate' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => 0 );

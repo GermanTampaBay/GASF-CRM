@@ -517,7 +517,7 @@ function gasf_crm_render_inbox() {
 
 	<div class="card pad lnamespanel" id="lnamespanel" hidden>
 		<h3 style="margin:0 0 4px">Names in the collection</h3>
-		<p class="muted" style="margin:0 0 10px">Correct a spelling and it changes on every photo at once. If the same person is in here twice, merge them &mdash; both sets of photos are kept.</p>
+		<p class="muted" style="margin:0 0 10px">Correct a spelling and it changes on every photo at once. If the same person is in here twice, merge them &mdash; both sets of photos are kept. The privacy checkbox hides a name from public photo lists and filters; it does not remove tags, hide the name from volunteers, or stop private face matching.</p>
 		<?php
 		/*
 		 * Three orders, because a volunteer opens this panel with one of three

@@ -306,6 +306,10 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .nmain,.nmerge-row{display:flex;gap:6px;align-items:center}
 .nmerge-row{margin-top:6px}
 .nmerge-row .pwrap{flex:1 1 auto;position:relative;min-width:0}
+.npublic-row{display:flex;gap:8px;align-items:center;justify-content:space-between;margin-top:7px}
+.npublic{display:flex;gap:6px;align-items:flex-start;font-size:12px;line-height:1.35;cursor:pointer}
+.nrow .npublic input{flex:0 0 auto;width:auto;min-width:0;margin:2px 0 0;padding:0}
+.nprivacy-msg{color:var(--gasf-muted);font-size:11px;flex:0 0 auto}
 .nrow input{flex:1 1 auto;min-width:0;width:100%;padding:5px 7px;border:1px solid var(--gasf-border);border-radius:4px;
 	font:inherit;font-size:13px;background:var(--gasf-surface);color:var(--gasf-text)}
 .nrow .ndel{color:#b02d2e}

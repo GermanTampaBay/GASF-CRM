@@ -49,6 +49,7 @@ if ( true ) {
 	 * under a roof it is far worse.
 	 */
 	define( 'GASF_PHOTO_DEFAULT_RADIUS_M', 150 );
+	define( 'GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META', '_gasf_public_name_opt_out' );
 
 	/* ---------------------------------------------------------------------
 	 * Taxonomies
@@ -438,6 +439,7 @@ function gasfPrepare(list){
 		// dropped. id rides along for the CRM's "recently added" ordering; the
 		// public form has no use for it and sends none, hence the 0.
 		return { value: p.value, label: p.label, n: p.n || 0, id: p.id || 0,
+		         public_name_opt_out: !!p.public_name_opt_out,
 		         a: gasfPnorm(p.label, true), b: gasfPnorm(p.label, false) };
 	});
 }
@@ -476,6 +478,52 @@ JS;
 	}
 
 	/**
+	 * Resolve one canonical person by its stored name, without fuzzy matching.
+	 *
+	 * Public-name privacy must never let a near-duplicate spelling select a
+	 * different person's preference. Callers writing policy metadata should
+	 * prefer a term id and use this only when a canonical stored name is all
+	 * they have.
+	 */
+	function gasf_photo_person_term_by_exact_name( $name ) {
+		$name = trim( (string) $name );
+		if ( '' === $name ) { return null; }
+
+		$terms = get_terms( array( 'taxonomy' => 'gasf_photo_person', 'hide_empty' => false ) );
+		if ( is_wp_error( $terms ) ) { return null; }
+		foreach ( $terms as $term ) {
+			if ( $name === (string) $term->name ) { return $term; }
+		}
+		return null;
+	}
+
+	/** Whether a canonical person term explicitly opts out of public name lists. */
+	function gasf_photo_person_public_name_opted_out( $person ) {
+		$term = $person instanceof WP_Term ? $person : get_term( (int) $person, 'gasf_photo_person' );
+		if ( ! $term || is_wp_error( $term ) || 'gasf_photo_person' !== $term->taxonomy ) { return false; }
+		return '1' === (string) get_term_meta( (int) $term->term_id, GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META, true );
+	}
+
+	/**
+	 * Policy for future public name lists and filters.
+	 *
+	 * Existing people remain public by default. Invalid or non-person terms are
+	 * refused because the caller has not identified a canonical person whose
+	 * preference can be checked.
+	 */
+	function gasf_photo_person_may_show_public_name( $person ) {
+		$term = $person instanceof WP_Term ? $person : get_term( (int) $person, 'gasf_photo_person' );
+		if ( ! $term || is_wp_error( $term ) || 'gasf_photo_person' !== $term->taxonomy ) { return false; }
+		return ! gasf_photo_person_public_name_opted_out( $term );
+	}
+
+	/** Name form of the public-name policy; the stored canonical name must match exactly. */
+	function gasf_photo_person_name_may_show_publicly( $canonical_name ) {
+		$term = gasf_photo_person_term_by_exact_name( $canonical_name );
+		return $term ? gasf_photo_person_may_show_public_name( $term ) : false;
+	}
+
+	/**
 	 * Names it is safe to suggest on the PUBLIC tagging page.
 	 *
 	 * Only people who already appear on a photo the public can see — where the
@@ -484,8 +532,10 @@ JS;
 	 * unauthenticated page would hand anyone holding a photo link a roster of
 	 * club members, which is the same mistake the place picker made.
 	 *
-	 * Here that is 48 of 51 names. The three held back appear only on photos
-	 * still awaiting review.
+	 * An explicit public-name opt-out also removes the person from this list.
+	 * The preference does not rewrite photo tags, titles, or private metadata.
+	 *
+	 * Names found only on photos awaiting review remain held back as well.
 	 */
 	function gasf_photo_public_people() {
 		/*
@@ -501,6 +551,7 @@ JS;
 
 		$out = array();
 		foreach ( $terms as $t ) {
+			if ( ! gasf_photo_person_may_show_public_name( $t ) ) { continue; }
 			$ids = get_objects_in_term( array( $t->term_id ), 'gasf_photo_person' );
 			$public = 0;
 			foreach ( (array) $ids as $pid ) {
