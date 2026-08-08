@@ -766,6 +766,31 @@ def state_set(conn, k, v):
     conn.commit()
 
 
+def replace_photo_references(conn, photo_id, engine, references):
+    """Make one photo's vectors exactly match its current confirmed truth."""
+    rows = list(references)
+    old_count = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM refs WHERE photo_id = ? AND engine = ?",
+            (photo_id, engine),
+        ).fetchone()[0]
+    )
+    with conn:
+        conn.execute(
+            "DELETE FROM refs WHERE photo_id = ? AND engine = ?",
+            (photo_id, engine),
+        )
+        conn.executemany(
+            """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                (person, photo_id, engine, face_key, vector.astype(np.float32).tobytes())
+                for person, face_key, vector in rows
+            ],
+        )
+    return old_count, len(rows)
+
+
 def load_references(conn, engine):
     """person -> stacked vectors for this engine, for people with enough
     examples to trust. Vectors from other engines are invisible here."""
@@ -1334,10 +1359,6 @@ function updateGalleryStatus(photoId, labels){
 async function saveCurrentOnly(){
   if(!current || !dirty || saving){return 0;}
   const labels=collectLabels();
-  if(!labels.length){
-    dirty=false;
-    return 0;
-  }
   saving=true;
   const saveBtn=document.getElementById('save');
   const finishBtn=document.getElementById('finish');
@@ -1427,12 +1448,13 @@ async function beginFinish(){
   setText('finishTitle','Finishing labeling...');
   setText('finishMessage','Saving any names on the current photo.');
   showFinish();
-  const labels=dirty ? collectLabels() : [];
+  const save=dirty;
+  const labels=save ? collectLabels() : [];
   try{
     await j('/api/finish',{
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({photo:current?current.id:0,labels})
+      body:JSON.stringify({photo:current?current.id:0,labels,save})
     });
     pollFinish();
   } catch(e){
@@ -1617,8 +1639,6 @@ def local_label(
                 labels = [l for l in (data.get("labels") or []) if isinstance(l, dict)]
                 if photo < 1:
                     return self._write(400, json.dumps({"error": "Missing photo id"}))
-                if not labels:
-                    return self._write(200, json.dumps({"ok": True, "stored": 0, "saved_total": state["saved"]}))
                 try:
                     out = api.post("/label", {"photo": photo, "labels": labels})
                 except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
@@ -1635,20 +1655,21 @@ def local_label(
                 except (TypeError, ValueError):
                     return self._write(400, json.dumps({"error": "Invalid photo id"}))
                 labels = [l for l in (data.get("labels") or []) if isinstance(l, dict)]
-                if labels and photo < 1:
+                save = bool(data.get("save"))
+                if save and photo < 1:
                     return self._write(400, json.dumps({"error": "Missing photo id"}))
                 with state["lock"]:
                     if state["finish"]["status"] == "saving":
                         return self._write(409, json.dumps({"error": "Finish is already in progress"}))
                     state["finish"] = {
                         "status": "saving",
-                        "message": "Saving the current photo to WordPress..." if labels else "Closing the labeling session...",
+                        "message": "Saving the current photo to WordPress..." if save else "Closing the labeling session...",
                     }
 
                 def finish():
                     try:
                         kept = 0
-                        if labels:
+                        if save:
                             out = api.post("/label", {"photo": photo, "labels": labels})
                             kept = int(out.get("stored") or 0)
                         with state["lock"]:
@@ -1731,7 +1752,8 @@ def learn(api, conn, backend, verbose=True):
     wk_id = state_key(backend.name, "learned_id")
     since_mod = state_get(conn, wk_mod, "")
     since_id = int(state_get(conn, wk_id, "0") or 0)
-    added = skipped = processed = 0
+    include_empty = bool(since_mod)
+    added = removed = skipped = processed = 0
     learned_ids = set()
     beat = _HeartbeatTicker(
         verbose,
@@ -1745,6 +1767,8 @@ def learn(api, conn, backend, verbose=True):
     try:
         while True:
             params = {"limit": 100}
+            if include_empty:
+                params["include_empty"] = 1
             if since_mod:
                 params.update({"after": since_mod, "after_id": since_id})
             elif since_id > 0:
@@ -1774,12 +1798,17 @@ def learn(api, conn, backend, verbose=True):
                                 print(f"  #{p['id']}: {e}")
                             continue
                         if not found:
+                            old_count, _ = replace_photo_references(
+                                conn, photo_id, backend.name, []
+                            )
+                            removed += old_count
+                            learned_ids.add(photo_id)
                             skipped += 1
                             continue
 
                         det_boxes = [css_box_to_xywh(b) for (b, _) in found]
                         used = set()
-                        matched = 0
+                        replacements = []
                         for li, lbl in enumerate(labels):
                             name = str(lbl.get("name") or "").strip()
                             box = lbl.get("box") or []
@@ -1798,22 +1827,23 @@ def learn(api, conn, backend, verbose=True):
                             used.add(best_i)
                             _, vector = found[best_i]
                             face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
-                            conn.execute(
-                                """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-                                   VALUES (?, ?, ?, ?, ?)
-                                   ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
-                                       person = excluded.person,
-                                       vector = excluded.vector""",
-                                (name, photo_id, backend.name, face_key, vector.astype(np.float32).tobytes()),
-                            )
-                            added += 1
-                            matched += 1
-                            learned_ids.add(photo_id)
-                        if matched == 0:
+                            replacements.append((name, face_key, vector))
+                        old_count, new_count = replace_photo_references(
+                            conn, photo_id, backend.name, replacements
+                        )
+                        removed += old_count
+                        added += new_count
+                        learned_ids.add(photo_id)
+                        if new_count == 0:
                             skipped += 1
                         continue
 
                     if len(people) != 1:
+                        old_count, _ = replace_photo_references(
+                            conn, photo_id, backend.name, []
+                        )
+                        removed += old_count
+                        learned_ids.add(photo_id)
                         skipped += 1
                         continue
                     try:
@@ -1823,19 +1853,23 @@ def learn(api, conn, backend, verbose=True):
                             print(f"  #{p['id']}: {e}")
                         continue
                     if len(found) != 1:
+                        old_count, _ = replace_photo_references(
+                            conn, photo_id, backend.name, []
+                        )
+                        removed += old_count
+                        learned_ids.add(photo_id)
                         skipped += 1
                         continue
 
                     _, vector = found[0]
-                    conn.execute(
-                        """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-                           VALUES (?, ?, ?, ?, ?)
-                           ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
-                               person = excluded.person,
-                               vector = excluded.vector""",
-                        (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
+                    old_count, new_count = replace_photo_references(
+                        conn,
+                        photo_id,
+                        backend.name,
+                        [(people[0].strip(), "0", vector)],
                     )
-                    added += 1
+                    removed += old_count
+                    added += new_count
                     learned_ids.add(photo_id)
                 finally:
                     processed += 1
@@ -1854,7 +1888,10 @@ def learn(api, conn, backend, verbose=True):
         beat.stop()
 
     if verbose:
-        print(f"learned: {added} new reference face(s); {skipped} photo(s) too ambiguous to learn from")
+        print(
+            f"learned: {added} current reference face(s), {removed} prior row(s) reconciled; "
+            f"{skipped} photo(s) too ambiguous to learn from"
+        )
     if learned_ids:
         try:
             api.post("/learned", {"photos": sorted(learned_ids), "engine": backend.name})
@@ -2342,6 +2379,14 @@ def selftest():
         name = "stub:selftest"
         dim = 3
 
+        def embed(self, image_bytes):
+            return [
+                (
+                    (10, 30, 30, 10),
+                    np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                )
+            ]
+
         def distances(self, matrix, vector):
             return np.linalg.norm(matrix - vector, axis=1)
 
@@ -2402,6 +2447,67 @@ def selftest():
             state_get(conn, _caption_fail_key("pipeline-a", 301), "0") == "0",
             "db: successful captions clear their failure counter",
         )
+
+        class LearnApi:
+            def __init__(self, photo):
+                self.photo = photo
+                self.served = False
+                self.get_params = []
+
+            def get(self, path, **params):
+                if path != "/confirmed":
+                    raise RuntimeError(f"unexpected learn path {path}")
+                self.get_params.append(params)
+                if self.served:
+                    return {"photos": []}
+                self.served = True
+                return {"photos": [self.photo]}
+
+            def image(self, _url):
+                return b"face"
+
+            def post(self, path, _payload):
+                if path != "/learned":
+                    raise RuntimeError(f"unexpected learn path {path}")
+                return {"ok": True}
+
+        first = LearnApi({
+            "id": 501,
+            "modified": "2026-08-08 01:00:00",
+            "url": "selftest://501",
+            "people": [],
+            "labels": [{"name": "Anna", "box": [10, 10, 20, 20]}],
+        })
+        learn(first, conn, backend, verbose=False)
+        corrected = LearnApi({
+            "id": 501,
+            "modified": "2026-08-08 01:00:01",
+            "url": "selftest://501",
+            "people": [],
+            "labels": [{"name": "Berta", "box": [10, 10, 20, 20]}],
+        })
+        learn(corrected, conn, backend, verbose=False)
+        rows = conn.execute(
+            "SELECT person FROM refs WHERE photo_id = 501 AND engine = ?",
+            (backend.name,),
+        ).fetchall()
+        check_that(
+            rows == [("Berta",)] and corrected.get_params[0].get("include_empty") == 1,
+            "learn: correcting a face replaces its old reference and requests removals",
+        )
+        removed = LearnApi({
+            "id": 501,
+            "modified": "2026-08-08 01:00:02",
+            "url": "selftest://501",
+            "people": [],
+            "labels": [],
+        })
+        learn(removed, conn, backend, verbose=False)
+        left = conn.execute(
+            "SELECT COUNT(*) FROM refs WHERE photo_id = 501 AND engine = ?",
+            (backend.name,),
+        ).fetchone()[0]
+        check_that(left == 0, "learn: removing confirmed truth deletes the photo's stale references")
         conn.close()
 
         # migration: a pre-engine database is stamped as dlib, not reinterpreted.
@@ -2526,11 +2632,13 @@ def selftest():
     opened = {}
     opened_event = threading.Event()
     label_result = {}
+    label_posts = []
 
     class StubApi:
         def post(self, path, payload):
             if path != "/label":
                 raise RuntimeError(f"unexpected stub path {path}")
+            label_posts.append(payload)
             return {"stored": len(payload.get("labels") or [])}
 
     def stub_collect(*args, **kwargs):
@@ -2582,12 +2690,25 @@ def selftest():
                 page.status_code == 200 and "Finish labeling" in page.text,
                 "label UI: authenticated page renders finish action",
             )
+            cleared = requests.post(
+                base + "/api/save",
+                headers=headers,
+                json={"photo": 7, "labels": []},
+                timeout=3,
+            )
+            check_that(
+                cleared.status_code == 200
+                and label_posts
+                and label_posts[-1].get("labels") == [],
+                "label UI: clearing every name persists an empty replacement",
+            )
             accepted = requests.post(
                 base + "/api/finish",
                 headers=headers,
                 json={
                     "photo": 7,
                     "labels": [{"name": "Anna", "box": [10, 10, 20, 20]}],
+                    "save": True,
                 },
                 timeout=3,
             )

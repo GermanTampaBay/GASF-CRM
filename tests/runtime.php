@@ -585,12 +585,34 @@ final class GASF_CRM_Selftest {
 			array( 'i' => 0, 'name' => 'Jürgen Example' ),
 			array( 'i' => 1, 'name' => 'Juergen Example' ),
 		) );
+		$label_modified = (string) get_post_field( 'post_modified_gmt', $lab );
 		$n2 = gasf_crm_face_labels_record( $lab, array(
 			array( 'i' => 0, 'name' => 'Jürgen Example' ),
 			array( 'i' => 1, 'name' => 'Juergen Example' ),
 		) );
 		$this->ok( 2 === $n1, 'faces: two explicit labels are stored on first save' );
 		$this->ok( 0 === $n2, 'faces: saving the same explicit labels again is idempotent' );
+		$this->ok(
+			$label_modified === (string) get_post_field( 'post_modified_gmt', $lab ),
+			'faces: an unchanged label save does not advance the learning cursor'
+		);
+		$corrected = gasf_crm_face_labels_store( $lab, array(
+			array( 'name' => 'Corrected Example', 'box' => array( 10, 10, 30, 30 ) ),
+		), true );
+		$this->ok(
+			$corrected > 0
+			&& 'Corrected Example' === (string) ( gasf_crm_face_labels_for( $lab )[0]['name'] ?? '' )
+			&& (string) get_post_field( 'post_modified_gmt', $lab ) > $label_modified,
+			'faces: replacing a corrected label advances the incremental learning cursor'
+		);
+		$corrected_modified = (string) get_post_field( 'post_modified_gmt', $lab );
+		$cleared = gasf_crm_face_labels_store( $lab, array(), true );
+		$this->ok(
+			$cleared > 0
+			&& ! gasf_crm_face_labels_for( $lab )
+			&& (string) get_post_field( 'post_modified_gmt', $lab ) > $corrected_modified,
+			'faces: clearing explicit labels records a learnable removal'
+		);
 		$term = get_term_by( 'name', 'Jürgen Example', 'gasf_photo_person' );
 		$this->ok( (bool) $term, 'faces: scanner labels create a person term for next-photo suggestions' );
 		$alias = get_term_by( 'name', 'Juergen Example', 'gasf_photo_person' );
@@ -600,6 +622,8 @@ final class GASF_CRM_Selftest {
 			wp_delete_term( (int) $alias->term_id, 'gasf_photo_person' );
 		}
 		if ( $term ) { wp_delete_term( (int) $term->term_id, 'gasf_photo_person' ); }
+		$corrected_term = get_term_by( 'name', 'Corrected Example', 'gasf_photo_person' );
+		if ( $corrected_term ) { wp_delete_term( (int) $corrected_term->term_id, 'gasf_photo_person' ); }
 
 		// Label-only photos are still offered to the learning feed.
 		$learn = $this->library_photo( 'st-face-learn-label-only' );
@@ -614,6 +638,31 @@ final class GASF_CRM_Selftest {
 		$ids = array();
 		foreach ( (array) ( $feed['photos'] ?? array() ) as $p ) { $ids[] = (int) ( $p['id'] ?? 0 ); }
 		$this->ok( in_array( $learn, $ids, true ), 'faces: confirmed feed includes label-only photos for learning' );
+
+		// Removing the final person is emitted as an empty reconciliation record.
+		$removed = $this->library_photo( 'st-face-learn-removal' );
+		wp_set_object_terms( $removed, array( 'Removed Example' ), 'gasf_photo_person', false );
+		$before_remove = (string) get_post_field( 'post_modified_gmt', $removed );
+		wp_set_object_terms( $removed, array(), 'gasf_photo_person', false );
+		$after_remove = (string) get_post_field( 'post_modified_gmt', $removed );
+		$feed = $this->rest_get( '/gasf/v1/crm/photos/faces/confirmed', array(
+			'limit'         => 200,
+			'after'         => $before_remove,
+			'after_id'      => $removed,
+			'include_empty' => 1,
+		) );
+		$empty_change = false;
+		foreach ( (array) ( $feed['photos'] ?? array() ) as $p ) {
+			if ( $removed === (int) ( $p['id'] ?? 0 ) && empty( $p['people'] ) && empty( $p['labels'] ) ) {
+				$empty_change = true;
+			}
+		}
+		$this->ok(
+			$after_remove > $before_remove && $empty_change,
+			'faces: removing the final person advances and emits an empty reconciliation record'
+		);
+		$removed_term = get_term_by( 'name', 'Removed Example', 'gasf_photo_person' );
+		if ( $removed_term ) { wp_delete_term( (int) $removed_term->term_id, 'gasf_photo_person' ); }
 	}
 
 	/** The scanner key: hashed at rest, and the only way through the guard. */

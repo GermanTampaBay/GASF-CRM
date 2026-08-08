@@ -42,6 +42,50 @@ define( 'GASF_CRM_FACES_MIN_CONFIDENCE', 0.45 );
 /** Default percent threshold for WP-side auto-accept; 0 disables. */
 define( 'GASF_CRM_FACES_AUTO_ACCEPT_DEFAULT', 95 );
 
+/**
+ * Advance the cursor used by the home scanner after confirmed face truth changes.
+ *
+ * Term and post-meta writes do not normally update an attachment's modified
+ * date. The confirmed feed is ordered by that date, so advance it explicitly
+ * and monotonically even when two edits land in the same second.
+ */
+function gasf_crm_faces_learning_touch( $attachment_id ) {
+	global $wpdb;
+
+	$id   = (int) $attachment_id;
+	$post = $id ? get_post( $id ) : null;
+	if ( ! $post || 'attachment' !== $post->post_type ) { return false; }
+
+	$old_ts  = strtotime( (string) $post->post_modified_gmt . ' UTC' );
+	$next_ts = max( time(), false === $old_ts ? 0 : $old_ts + 1 );
+	$gmt      = gmdate( 'Y-m-d H:i:s', $next_ts );
+	$local    = get_date_from_gmt( $gmt, 'Y-m-d H:i:s' );
+	$updated  = $wpdb->update(
+		$wpdb->posts,
+		array( 'post_modified' => $local, 'post_modified_gmt' => $gmt ),
+		array( 'ID' => $id ),
+		array( '%s', '%s' ),
+		array( '%d' )
+	);
+	if ( false === $updated ) {
+		gasf_crm_log( 'CRM faces: could not advance learning revision for photo #' . $id );
+		return false;
+	}
+	clean_post_cache( $id );
+	return true;
+}
+
+/** Person-term corrections and removals must be visible to incremental learning. */
+add_action( 'set_object_terms', function ( $object_id, $terms, $tt_ids, $taxonomy, $append, $old_tt_ids ) {
+	if ( 'gasf_photo_person' !== $taxonomy ) { return; }
+	$old = array_values( array_unique( array_map( 'intval', (array) $old_tt_ids ) ) );
+	$new = array_values( array_unique( array_map( 'intval', (array) $tt_ids ) ) );
+	sort( $old );
+	sort( $new );
+	$changed = $append ? (bool) array_diff( $new, $old ) : ( $new !== $old );
+	if ( $changed ) { gasf_crm_faces_learning_touch( $object_id ); }
+}, 10, 6 );
+
 /* =====================================================================
  * The machine credential
  * ================================================================== */
@@ -305,11 +349,12 @@ function gasf_crm_face_boxes_for( $attachment_id ) {
  * Each entry points at a face suggestion rectangle plus the chosen name.
  *
  * @param array $map [ ['i'=>0,'name'=>'...'], ... ] where i indexes faces_for().
- * @return int number of labels applied from this save
+ * @param bool  $replace Replace the complete saved label set, including with empty.
+ * @return int number of labels added, corrected, or removed by this save
  */
-function gasf_crm_face_labels_store( $attachment_id, array $labels ) {
+function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = false ) {
 	$id = (int) $attachment_id;
-	if ( ! $id || ! $labels ) { return 0; }
+	if ( ! $id || ( ! $labels && ! $replace ) ) { return 0; }
 
 	$next = array();
 	foreach ( $labels as $l ) {
@@ -322,7 +367,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels ) {
 			'box'  => array_values( $box ),
 		);
 	}
-	if ( ! $next ) { return 0; }
+	if ( ! $next && ! $replace ) { return 0; }
 
 	$have = get_post_meta( $id, '_gasf_face_labels', true );
 	$all  = array();
@@ -334,20 +379,36 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels ) {
 			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ) );
 		}
 	}
+	$same_name = static function ( $a, $b ) {
+		return function_exists( 'gasf_photo_person_same' )
+			? gasf_photo_person_same( (string) $a, (string) $b )
+			: ( strtolower( html_entity_decode( (string) $a, ENT_QUOTES ) ) === strtolower( html_entity_decode( (string) $b, ENT_QUOTES ) ) );
+	};
 	$changed = 0;
-	foreach ( $next as $k => $v ) {
-		$old = isset( $all[ $k ] ) ? (string) ( $all[ $k ]['name'] ?? '' ) : '';
-		$same = function_exists( 'gasf_photo_person_same' )
-			? gasf_photo_person_same( $old, (string) $v['name'] )
-			: ( strtolower( html_entity_decode( $old, ENT_QUOTES ) ) === strtolower( html_entity_decode( (string) $v['name'], ENT_QUOTES ) ) );
-		if ( ! isset( $all[ $k ] ) || ! $same ) {
-			$all[ $k ] = $v;
-			$changed++;
+	if ( $replace ) {
+		foreach ( array_unique( array_merge( array_keys( $all ), array_keys( $next ) ) ) as $k ) {
+			if ( ! isset( $all[ $k ], $next[ $k ] ) || ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] ) ) {
+				$changed++;
+			}
+		}
+		$all = $next;
+	} else {
+		foreach ( $next as $k => $v ) {
+			$old = isset( $all[ $k ] ) ? (string) ( $all[ $k ]['name'] ?? '' ) : '';
+			if ( ! isset( $all[ $k ] ) || ! $same_name( $old, $v['name'] ) ) {
+				$all[ $k ] = $v;
+				$changed++;
+			}
 		}
 	}
 	if ( $changed > 0 ) {
-		update_post_meta( $id, '_gasf_face_labels', array_values( $all ) );
+		if ( $all ) {
+			update_post_meta( $id, '_gasf_face_labels', array_values( $all ) );
+		} else {
+			delete_post_meta( $id, '_gasf_face_labels' );
+		}
 		update_post_meta( $id, '_gasf_face_labeled_at', current_time( 'mysql', true ) );
+		gasf_crm_faces_learning_touch( $id );
 	}
 	gasf_crm_face_person_terms_ensure( wp_list_pluck( $next, 'name' ) );
 	return $changed;
@@ -993,16 +1054,13 @@ add_action( 'rest_api_init', function () {
 			if ( ! $id || ! gasf_crm_photo_in_library( $id ) || get_post_meta( $id, '_gasf_photo_flyer', true ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
-			if ( ! $labels ) {
-				return new WP_Error( 'gasf_crm_bad', 'No labels supplied.', array( 'status' => 400 ) );
-			}
 			$valid = 0;
 			foreach ( $labels as $l ) {
 				$name = trim( sanitize_text_field( (string) ( $l['name'] ?? '' ) ) );
 				$box  = array_map( 'intval', (array) ( $l['box'] ?? array() ) );
 				if ( '' !== $name && 4 === count( $box ) && $box[2] > 0 && $box[3] > 0 ) { $valid++; }
 			}
-			if ( $valid < 1 ) {
+			if ( $labels && $valid < 1 ) {
 				return new WP_Error( 'gasf_crm_bad', 'No valid labels in that request.', array( 'status' => 400 ) );
 			}
 			$lock = gasf_crm_faces_try_lock( $id, 'label' );
@@ -1010,7 +1068,7 @@ add_action( 'rest_api_init', function () {
 				return new WP_Error( 'gasf_crm_busy', 'That photo is being updated by another scanner pass. Try again in a moment.', array( 'status' => 409 ) );
 			}
 			try {
-				$stored = gasf_crm_face_labels_store( $id, $labels );
+				$stored = gasf_crm_face_labels_store( $id, $labels, true );
 			} finally {
 				gasf_crm_faces_unlock( $id, 'label', $lock );
 			}
@@ -1145,6 +1203,7 @@ add_action( 'rest_api_init', function () {
 			$since    = (int) $req->get_param( 'since' ); // Legacy cursor, kept for older scanners.
 			$after_id = max( 0, (int) $req->get_param( 'after_id' ) );
 			$after    = trim( (string) $req->get_param( 'after' ) );
+			$include_empty = rest_sanitize_boolean( $req->get_param( 'include_empty' ) );
 			$limit    = min( 200, max( 1, (int) $req->get_param( 'limit' ) ?: 100 ) );
 
 			if ( '' !== $after ) {
@@ -1192,7 +1251,7 @@ add_action( 'rest_api_init', function () {
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$labels = gasf_crm_face_labels_for( $id );
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
-				if ( ! $labels && ! $people ) { continue; }
+				if ( ! $include_empty && ! $labels && ! $people ) { continue; }
 				$out[] = array(
 					'id'     => (int) $id,
 					'modified' => $modified,
