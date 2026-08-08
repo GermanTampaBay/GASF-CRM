@@ -172,6 +172,157 @@ function gasf_crm_face_name_same( $a, $b ) {
 	return (bool) array_intersect( gasf_crm_face_name_keys( $a ), gasf_crm_face_name_keys( $b ) );
 }
 
+/** Normalized reporting identity; linkage compares the complete alias key set. */
+function gasf_crm_face_canonical_key( $name ) {
+	$keys = gasf_crm_face_name_keys( $name );
+	return $keys ? (string) $keys[0] : '';
+}
+
+function gasf_crm_face_box_iou( array $a, array $b ) {
+	if ( 4 !== count( $a ) || 4 !== count( $b ) ) { return 0.0; }
+	$a = array_map( 'intval', array_values( $a ) );
+	$b = array_map( 'intval', array_values( $b ) );
+	$ax2 = $a[0] + max( 0, $a[2] );
+	$ay2 = $a[1] + max( 0, $a[3] );
+	$bx2 = $b[0] + max( 0, $b[2] );
+	$by2 = $b[1] + max( 0, $b[3] );
+	$iw = max( 0, min( $ax2, $bx2 ) - max( $a[0], $b[0] ) );
+	$ih = max( 0, min( $ay2, $by2 ) - max( $a[1], $b[1] ) );
+	$intersection = $iw * $ih;
+	$union = max( 0, $a[2] ) * max( 0, $a[3] ) + max( 0, $b[2] ) * max( 0, $b[3] ) - $intersection;
+	return $union > 0 ? $intersection / $union : 0.0;
+}
+
+/** Sanitized prediction history retained after suggestion chips disappear. */
+function gasf_crm_face_predictions_for( $attachment_id ) {
+	$id  = (int) $attachment_id;
+	$raw = get_post_meta( $id, '_gasf_face_predictions', true );
+	if ( ! is_array( $raw ) ) { return array(); }
+	$out = array();
+	foreach ( $raw as $item ) {
+		if ( ! is_array( $item ) ) { continue; }
+		$name = trim( sanitize_text_field( (string) ( $item['name'] ?? '' ) ) );
+		$box  = array_map( 'intval', (array) ( $item['box'] ?? array() ) );
+		$canonical = gasf_crm_face_canonical_key( $name );
+		$outcome = sanitize_key( (string) ( $item['outcome'] ?? 'pending' ) );
+		if ( '' === $name || '' === $canonical || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		if ( ! in_array( $outcome, array( 'pending', 'positive', 'negative' ), true ) ) { $outcome = 'pending'; }
+		$out[] = array(
+			'key'         => preg_replace( '/[^a-f0-9]/', '', strtolower( (string) ( $item['key'] ?? '' ) ) ),
+			'name'        => $name,
+			'canonical'   => $canonical,
+			'confidence'  => min( 100, max( 0, (int) ( $item['confidence'] ?? 0 ) ) ),
+			'box'         => array_values( $box ),
+			'outcome'     => $outcome,
+			'recorded_at' => trim( sanitize_text_field( (string) ( $item['recorded_at'] ?? '' ) ) ),
+			'outcome_at'  => trim( sanitize_text_field( (string) ( $item['outcome_at'] ?? '' ) ) ),
+		);
+	}
+	return $out;
+}
+
+function gasf_crm_face_predictions_write( $attachment_id, array $records ) {
+	$id = (int) $attachment_id;
+	if ( ! $id ) { return false; }
+	$resolved = array();
+	$pending  = array();
+	foreach ( array_slice( $records, -160 ) as $record ) {
+		if ( 'pending' === (string) ( $record['outcome'] ?? 'pending' ) ) { $pending[] = $record; }
+		else { $resolved[] = $record; }
+	}
+	if ( count( $resolved ) >= 100 ) {
+		$keep = array_slice( $resolved, -100 );
+	} else {
+		$keep = array_merge( $resolved, array_slice( $pending, -( 100 - count( $resolved ) ) ) );
+	}
+	update_post_meta( $id, '_gasf_face_predictions', array_values( $keep ) );
+	return count( gasf_crm_face_predictions_for( $id ) ) === count( $keep );
+}
+
+/** Upsert predictions offered to a human while preserving already-known outcomes. */
+function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
+	$id = (int) $attachment_id;
+	if ( ! $id ) { return 0; }
+	$all = gasf_crm_face_predictions_for( $id );
+	$changed = 0;
+	foreach ( array_slice( $faces, 0, 60 ) as $face ) {
+		$name = trim( sanitize_text_field( (string) ( $face['name'] ?? '' ) ) );
+		$canonical = gasf_crm_face_canonical_key( $name );
+		$box = array_map( 'intval', (array) ( $face['box'] ?? array() ) );
+		$confidence = (int) ( $face['confidence'] ?? 0 );
+		if ( $confidence <= 1 ) { $confidence = (int) round( min( 1, max( 0, (float) ( $face['confidence'] ?? 0 ) ) ) * 100 ); }
+		$confidence = min( 100, max( 0, $confidence ) );
+		if ( '' === $canonical || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		$match = -1;
+		foreach ( $all as $i => $old ) {
+			if (
+				gasf_crm_face_name_same( $name, (string) ( $old['name'] ?? '' ) )
+				&& gasf_crm_face_box_iou( $box, (array) ( $old['box'] ?? array() ) ) >= 0.35
+			) {
+				$match = $i;
+				break;
+			}
+		}
+		if ( $match >= 0 ) {
+			if ( 'pending' === $all[ $match ]['outcome'] ) {
+				$updated = $all[ $match ];
+				$updated['name'] = $name;
+				$updated['canonical'] = $canonical;
+				$updated['confidence'] = $confidence;
+				$updated['box'] = array_values( $box );
+				if ( $updated !== $all[ $match ] ) {
+					$all[ $match ] = $updated;
+					$changed++;
+				}
+			}
+			continue;
+		}
+		$key = sha1( $id . ':' . $canonical . ':' . implode( ',', $box ) );
+		$all[] = array(
+			'key'         => $key,
+			'name'        => $name,
+			'canonical'   => $canonical,
+			'confidence'  => $confidence,
+			'box'         => array_values( $box ),
+			'outcome'     => 'pending',
+			'recorded_at' => current_time( 'mysql', true ),
+			'outcome_at'  => '',
+		);
+		$changed++;
+	}
+	if ( $changed > 0 && ! gasf_crm_face_predictions_write( $id, $all ) ) {
+		gasf_crm_log( 'CRM faces: could not verify calibration predictions for photo #' . $id );
+		return 0;
+	}
+	return $changed;
+}
+
+/** Apply an explicit box-level positive or photo/person rejection outcome. */
+function gasf_crm_face_prediction_outcome( $attachment_id, $name, $outcome, $box = null ) {
+	$id = (int) $attachment_id;
+	$canonical = gasf_crm_face_canonical_key( $name );
+	$outcome = sanitize_key( (string) $outcome );
+	if ( ! $id || '' === $canonical || ! in_array( $outcome, array( 'positive', 'negative' ), true ) ) { return 0; }
+	$target = is_array( $box ) ? array_map( 'intval', array_values( $box ) ) : array();
+	if ( $target && 4 !== count( $target ) ) { return 0; }
+	$all = gasf_crm_face_predictions_for( $id );
+	$changed = 0;
+	foreach ( $all as &$record ) {
+		if ( ! gasf_crm_face_name_same( $name, (string) ( $record['name'] ?? '' ) ) ) { continue; }
+		if ( $target && gasf_crm_face_box_iou( $target, (array) $record['box'] ) < 0.15 ) { continue; }
+		if ( $outcome === (string) $record['outcome'] ) { continue; }
+		$record['outcome'] = $outcome;
+		$record['outcome_at'] = current_time( 'mysql', true );
+		$changed++;
+	}
+	unset( $record );
+	if ( $changed > 0 && ! gasf_crm_face_predictions_write( $id, $all ) ) {
+		gasf_crm_log( 'CRM faces: could not verify calibration outcome for photo #' . $id );
+		return 0;
+	}
+	return $changed;
+}
+
 /** Persistent per-photo names that volunteers have confirmed are not present. */
 function gasf_crm_face_rejections_for( $attachment_id ) {
 	$id  = (int) $attachment_id;
@@ -221,6 +372,7 @@ function gasf_crm_face_reject( $attachment_id, $name ) {
 			return new WP_Error( 'gasf_crm_store', 'The rejected face match could not be saved.', array( 'status' => 500 ) );
 		}
 	}
+	gasf_crm_face_prediction_outcome( $id, $name, 'negative' );
 
 	$raw  = get_post_meta( $id, '_gasf_face_suggestions', true );
 	$keep = array();
@@ -362,6 +514,7 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_name
 
 	if ( $keep ) { update_post_meta( $id, '_gasf_face_suggestions', $keep ); }
 	else { delete_post_meta( $id, '_gasf_face_suggestions' ); }
+	gasf_crm_face_predictions_record( $id, $keep );
 	$auto = gasf_crm_faces_auto_accept( $id, $keep );
 	$auto_names  = (int) ( $auto['names'] ?? 0 );
 	$auto_labels = (int) ( $auto['labels'] ?? 0 );
@@ -440,9 +593,10 @@ function gasf_crm_face_boxes_for( $attachment_id ) {
  *
  * @param array $map [ ['i'=>0,'name'=>'...'], ... ] where i indexes faces_for().
  * @param bool  $replace Replace the complete saved label set, including with empty.
+ * @param bool  $human_verified Count matching predictions as explicit calibration outcomes.
  * @return int number of labels added, corrected, or removed by this save
  */
-function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = false ) {
+function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = false, $human_verified = false ) {
 	$id = (int) $attachment_id;
 	if ( ! $id || ( ! $labels && ! $replace ) ) { return 0; }
 
@@ -459,6 +613,11 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		);
 	}
 	if ( ! $next && ! $replace ) { return 0; }
+	if ( $human_verified ) {
+		foreach ( $next as $label ) {
+			gasf_crm_face_prediction_outcome( $id, $label['name'], 'positive', $label['box'] );
+		}
+	}
 
 	$have = get_post_meta( $id, '_gasf_face_labels', true );
 	$all  = array();
@@ -478,6 +637,14 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 	$changed = 0;
 	if ( $replace ) {
 		foreach ( array_unique( array_merge( array_keys( $all ), array_keys( $next ) ) ) as $k ) {
+			if (
+				$human_verified
+				&& isset( $all[ $k ], $next[ $k ] )
+				&& ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] )
+			) {
+				// A different identity on the same reviewed box explicitly supersedes the old prediction.
+				gasf_crm_face_prediction_outcome( $id, $all[ $k ]['name'], 'negative', $all[ $k ]['box'] );
+			}
 			if ( ! isset( $all[ $k ], $next[ $k ] ) || ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] ) ) {
 				$changed++;
 			}
@@ -487,6 +654,9 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		foreach ( $next as $k => $v ) {
 			$old = isset( $all[ $k ] ) ? (string) ( $all[ $k ]['name'] ?? '' ) : '';
 			if ( ! isset( $all[ $k ] ) || ! $same_name( $old, $v['name'] ) ) {
+				if ( $human_verified && '' !== $old ) {
+					gasf_crm_face_prediction_outcome( $id, $old, 'negative', $v['box'] );
+				}
 				$all[ $k ] = $v;
 				$changed++;
 			}
@@ -594,7 +764,7 @@ function gasf_crm_face_labels_record( $attachment_id, array $map ) {
 				'box'  => array_values( $box ),
 			);
 		}
-		return gasf_crm_face_labels_store( $id, $next );
+		return gasf_crm_face_labels_store( $id, $next, false, true );
 	} finally {
 		gasf_crm_faces_unlock( $id, 'label', $lock );
 	}
@@ -669,7 +839,7 @@ function gasf_crm_face_discovery_labels_record( $raw_name, array $occurrences ) 
 			foreach ( $items as $item ) {
 				$labels[] = array( 'name' => $name, 'box' => $item['box'] );
 			}
-			$stored += (int) gasf_crm_face_labels_store( $id, $labels, false );
+			$stored += (int) gasf_crm_face_labels_store( $id, $labels, false, true );
 			$have = gasf_crm_face_labels_for( $id );
 			foreach ( $items as $item ) {
 				foreach ( $have as $label ) {
@@ -939,6 +1109,114 @@ function gasf_crm_faces_metrics( $sample_limit = 150 ) {
 	$out['stale'] = $oldest;
 	ksort( $out['states'] );
 	return $out;
+}
+
+/** Bounded explicit outcomes for local empirical confidence calibration. */
+function gasf_crm_faces_calibration_samples( $limit = 5000 ) {
+	$limit = min( 5000, max( 20, (int) $limit ) );
+	$ids = get_posts( array(
+		'post_type'      => 'attachment',
+		'post_status'    => array( 'inherit', 'private' ),
+		'posts_per_page' => $limit,
+		'fields'         => 'ids',
+		'no_found_rows'  => true,
+		'orderby'        => 'modified',
+		'order'          => 'DESC',
+		'post_mime_type' => 'image',
+		'meta_query'     => array(
+			array( 'key' => '_gasf_face_predictions', 'compare' => 'EXISTS' ),
+		),
+	) );
+	$out = array();
+	foreach ( $ids as $id ) {
+		foreach ( gasf_crm_face_predictions_for( $id ) as $record ) {
+			if ( ! in_array( $record['outcome'], array( 'positive', 'negative' ), true ) ) { continue; }
+			$out[] = array(
+				'photo'      => (int) $id,
+				'name'       => (string) $record['name'],
+				'canonical'  => (string) $record['canonical'],
+				'confidence' => (int) $record['confidence'],
+				'outcome'    => (string) $record['outcome'],
+			);
+			if ( count( $out ) >= $limit ) { break 2; }
+		}
+	}
+	return $out;
+}
+
+function gasf_crm_faces_calibration_report_clean( array $raw ) {
+	$positive  = min( 5000, max( 0, (int) ( $raw['positive'] ?? 0 ) ) );
+	$negative  = min( 5000 - $positive, max( 0, (int) ( $raw['negative'] ?? 0 ) ) );
+	$evaluated = $positive + $negative;
+	$recommended = $raw['recommended_threshold'] ?? null;
+	$recommended = null === $recommended || '' === $recommended
+		? null
+		: min( 100, max( 0, (int) $recommended ) );
+	$target = min( 0.9999, max( 0.99, (float) ( $raw['target_precision'] ?? 0.99 ) ) );
+	$minimum = min( 10000, max( 20, (int) ( $raw['minimum_samples'] ?? 30 ) ) );
+	$recommendation_samples = min( $evaluated, max( 0, (int) ( $raw['recommendation_samples'] ?? 0 ) ) );
+	$lower_bound = min( 1, max( 0, (float) ( $raw['lower_bound'] ?? 0 ) ) );
+	if ( null !== $recommended && ( $recommendation_samples < $minimum || $lower_bound < $target ) ) {
+		$recommended = null;
+		$recommendation_samples = 0;
+		$lower_bound = 0;
+	}
+	$bands = array();
+	foreach ( array_slice( (array) ( $raw['bands'] ?? array() ), 0, 21 ) as $band ) {
+		if ( ! is_array( $band ) ) { continue; }
+		$label = trim( sanitize_text_field( (string) ( $band['band'] ?? '' ) ) );
+		$total = min( 5000, max( 0, (int) ( $band['total'] ?? 0 ) ) );
+		$wins  = min( $total, max( 0, (int) ( $band['positive'] ?? 0 ) ) );
+		if ( ! preg_match( '/^\d{1,3}(?:-\d{1,3})?%$/', $label ) ) { continue; }
+		$bands[] = array(
+			'band'     => $label,
+			'total'    => $total,
+			'positive' => $wins,
+			'negative' => $total - $wins,
+		);
+	}
+	return array(
+		'version'               => 1,
+		'evaluated'             => $evaluated,
+		'positive'              => $positive,
+		'negative'              => $negative,
+		'target_precision'      => $target,
+		'minimum_samples'       => $minimum,
+		'recommended_threshold' => $recommended,
+		'recommendation_samples' => $recommendation_samples,
+		'lower_bound'           => $lower_bound,
+		'bands'                 => $bands,
+		'generated_at'          => current_time( 'mysql', true ),
+	);
+}
+
+/** Store the local scanner's aggregate report under a short atomic option lock. */
+function gasf_crm_faces_calibration_report_store( array $raw ) {
+	$lock_key = 'gasf_crm_faces_calibration_lock';
+	$token = wp_generate_uuid4();
+	$now = time();
+	if ( ! add_option( $lock_key, array( 'token' => $token, 'at' => $now ), '', false ) ) {
+		$old = get_option( $lock_key, array() );
+		if ( ! is_array( $old ) || $now - (int) ( $old['at'] ?? 0 ) < 60 ) {
+			return new WP_Error( 'gasf_crm_busy', 'Calibration reporting is already being updated.', array( 'status' => 409 ) );
+		}
+		delete_option( $lock_key );
+		if ( ! add_option( $lock_key, array( 'token' => $token, 'at' => $now ), '', false ) ) {
+			return new WP_Error( 'gasf_crm_busy', 'Calibration reporting is already being updated.', array( 'status' => 409 ) );
+		}
+	}
+	try {
+		$clean = gasf_crm_faces_calibration_report_clean( $raw );
+		update_option( 'gasf_crm_faces_calibration_report', $clean, false );
+		$stored = get_option( 'gasf_crm_faces_calibration_report', array() );
+		if ( ! is_array( $stored ) || (int) ( $stored['evaluated'] ?? -1 ) !== $clean['evaluated'] ) {
+			return new WP_Error( 'gasf_crm_store', 'The calibration report could not be verified.', array( 'status' => 500 ) );
+		}
+		return $clean;
+	} finally {
+		$held = get_option( $lock_key, array() );
+		if ( is_array( $held ) && $token === (string) ( $held['token'] ?? '' ) ) { delete_option( $lock_key ); }
+	}
 }
 
 /* =====================================================================
@@ -1279,7 +1557,7 @@ add_action( 'rest_api_init', function () {
 				return new WP_Error( 'gasf_crm_busy', 'That photo is being updated by another scanner pass. Try again in a moment.', array( 'status' => 409 ) );
 			}
 			try {
-				$stored = gasf_crm_face_labels_store( $id, $labels, true );
+				$stored = gasf_crm_face_labels_store( $id, $labels, true, true );
 			} finally {
 				gasf_crm_faces_unlock( $id, 'label', $lock );
 			}
@@ -1478,6 +1756,29 @@ add_action( 'rest_api_init', function () {
 			$limit = min( 500, max( 10, (int) $req->get_param( 'sample' ) ?: 150 ) );
 			return gasf_crm_faces_metrics( $limit );
 		},
+	) );
+
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/calibration', array(
+		array(
+			'methods'             => 'GET',
+			'permission_callback' => $guard,
+			'callback'            => function ( WP_REST_Request $req ) {
+				$limit = min( 5000, max( 20, (int) $req->get_param( 'limit' ) ?: 5000 ) );
+				return array(
+					'samples' => gasf_crm_faces_calibration_samples( $limit ),
+					'current_threshold' => gasf_crm_faces_auto_accept_threshold(),
+				);
+			},
+		),
+		array(
+			'methods'             => 'POST',
+			'permission_callback' => $guard,
+			'callback'            => function ( WP_REST_Request $req ) {
+				$report = gasf_crm_faces_calibration_report_store( (array) $req->get_json_params() );
+				if ( is_wp_error( $report ) ) { return $report; }
+				return array( 'ok' => true, 'report' => $report );
+			},
+		),
 	) );
 
 	/**
@@ -1705,6 +2006,7 @@ function gasf_crm_faces_admin_section() {
 	$metrics = gasf_crm_faces_metrics( 25 );
 	$auto_threshold = gasf_crm_faces_auto_accept_threshold();
 	$auto_label = $auto_threshold > 0 ? ( $auto_threshold . '% and above' ) : 'disabled';
+	$calibration = get_option( 'gasf_crm_faces_calibration_report', array() );
 
 	global $wpdb;
 	$scanned = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
@@ -1743,6 +2045,28 @@ function gasf_crm_faces_admin_section() {
 		. '<p class="description" style="margin:6px 0 0">Enable this to accept suggestions at or above this confidence automatically. Matching label hints are also stored for learning.</p>';
 	wp_nonce_field( 'gasf_crm' );
 	echo '<input type="hidden" name="gasf_crm_action" value="faces_auto_accept_save"></form>';
+	if ( is_array( $calibration ) && (int) ( $calibration['evaluated'] ?? 0 ) > 0 ) {
+		$recommended = $calibration['recommended_threshold'] ?? null;
+		$calibration_text = null === $recommended
+			? sprintf(
+				'Insufficient conservative evidence: %d explicit outcome(s); the %d-sample minimum and target precision safeguards were not both met.',
+				(int) $calibration['evaluated'],
+				(int) ( $calibration['minimum_samples'] ?? 30 )
+			)
+			: sprintf(
+				'Recommended threshold: %d%% (%d outcome(s), %.2f%% lower confidence bound, and %.2f%% target precision).',
+				(int) $recommended,
+				(int) ( $calibration['recommendation_samples'] ?? 0 ),
+				100 * (float) ( $calibration['lower_bound'] ?? 0 ),
+				100 * (float) ( $calibration['target_precision'] ?? 0.99 )
+			);
+		echo '<p style="max-width:820px;padding:10px;border-left:4px solid #72aee6;background:#f0f6fc"><strong>Confidence calibration:</strong> '
+			. esc_html( $calibration_text )
+			. ' This is advice only; the saved auto-accept setting is never changed automatically.</p>';
+	} else {
+		echo '<p class="description" style="max-width:820px">Confidence calibration has insufficient evidence. '
+			. 'Only explicit accepted labels and explicit rejections count; no-action is ignored.</p>';
+	}
 
 	$state_rows = '';
 	foreach ( (array) ( $metrics['states'] ?? array() ) as $state => $n ) {

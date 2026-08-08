@@ -13,9 +13,9 @@ under:
 
   %LOCALAPPDATA%\GASF Face Scanner
 
-It preserves the scanner key, engine/tolerance/discovery tuning, and faces.db when rerun,
-so the same ZIP also repairs or updates an existing installation without
-deleting learned faces.
+It preserves the scanner key, engine/tolerance/discovery/calibration tuning,
+and faces.db when rerun, so the same ZIP also repairs or updates an existing
+installation without deleting learned faces.
 
 The transfer ZIP intentionally does NOT contain faces.db. After installation,
 open README.md in the installed folder and follow "Move an existing face corpus

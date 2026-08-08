@@ -102,7 +102,7 @@ class ScanGui(tk.Tk):
             opts,
             self.v_status,
             "--status",
-            "Show known people and queue status (no scanning).",
+            "Show corpus quality, queue status, and confidence calibration.",
             self._on_flag_change,
         )
         self.cb_check = self._option_row(

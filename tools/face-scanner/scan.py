@@ -78,6 +78,7 @@ import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
+import math
 import os
 import re
 import secrets
@@ -137,6 +138,13 @@ DEFAULT_DISCOVERY_TOLERANCE = {
 # somebody is an accident waiting to happen — a bad angle becomes "the system
 # thinks everyone is Hans".
 MIN_REFERENCES = 3
+MAX_ACTIVE_REFERENCES = 12
+MIN_ACTIVE_QUALITY = 0.28
+ACTIVE_LEARNING_THRESHOLD = 0.45
+ACTIVE_LEARNING_MAX = 100
+CALIBRATION_TARGET_PRECISION = 0.99
+CALIBRATION_MIN_SAMPLES = 30
+CALIBRATION_WILSON_Z = 2.576
 MAX_SCAN_RETRIES = 3
 QUARANTINE_FAILS = 3
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
@@ -250,6 +258,32 @@ def cfg_discovery_limit(cfg):
     except (TypeError, ValueError):
         sys.exit(f"discovery_limit must be an integer, got {raw!r}")
     return max(1, min(1000, value))
+
+
+def cfg_calibration_target(cfg):
+    raw = os.environ.get(
+        "GASF_FACE_CALIBRATION_TARGET",
+        cfg.get("calibration_target_precision", CALIBRATION_TARGET_PRECISION),
+    )
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"calibration_target_precision must be a number, got {raw!r}")
+    if value < 0.99 or value >= 1:
+        sys.exit("calibration_target_precision must be at least 0.99 and less than 1")
+    return value
+
+
+def cfg_calibration_min_samples(cfg):
+    raw = os.environ.get(
+        "GASF_FACE_CALIBRATION_MIN_SAMPLES",
+        cfg.get("calibration_min_samples", CALIBRATION_MIN_SAMPLES),
+    )
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"calibration_min_samples must be an integer, got {raw!r}")
+    return max(20, min(10000, value))
 
 
 def cfg_caption_model(cfg):
@@ -739,6 +773,14 @@ def _migrate(conn):
                photo_id INTEGER NOT NULL,
                engine TEXT NOT NULL DEFAULT '',
                face_key TEXT NOT NULL DEFAULT '0',
+               face_width INTEGER NOT NULL DEFAULT 0,
+               face_height INTEGER NOT NULL DEFAULT 0,
+               sharpness REAL NOT NULL DEFAULT 0,
+               clipping REAL NOT NULL DEFAULT 0,
+               quality REAL NOT NULL DEFAULT 0.5,
+               redundancy REAL NOT NULL DEFAULT 0,
+               active INTEGER NOT NULL DEFAULT 1,
+               captured_at TEXT NOT NULL DEFAULT '',
                vector BLOB NOT NULL,
                UNIQUE(photo_id, engine, face_key)
            )"""
@@ -822,6 +864,20 @@ def _migrate(conn):
     if "face_key" not in cols:
         conn.execute("ALTER TABLE refs ADD COLUMN face_key TEXT NOT NULL DEFAULT '0'")
         conn.execute("UPDATE refs SET face_key = '0' WHERE face_key IS NULL OR face_key = ''")
+    ref_additions = {
+        "face_width": "INTEGER NOT NULL DEFAULT 0",
+        "face_height": "INTEGER NOT NULL DEFAULT 0",
+        "sharpness": "REAL NOT NULL DEFAULT 0",
+        "clipping": "REAL NOT NULL DEFAULT 0",
+        "quality": "REAL NOT NULL DEFAULT 0.5",
+        "redundancy": "REAL NOT NULL DEFAULT 0",
+        "active": "INTEGER NOT NULL DEFAULT 1",
+        "captured_at": "TEXT NOT NULL DEFAULT ''",
+    }
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(refs)")}
+    for column, declaration in ref_additions.items():
+        if column not in cols:
+            conn.execute(f"ALTER TABLE refs ADD COLUMN {column} {declaration}")
 
     if not _has_unique_photo_engine_face(conn):
         conn.execute("DROP TABLE IF EXISTS refs_new")
@@ -832,13 +888,28 @@ def _migrate(conn):
                   photo_id INTEGER NOT NULL,
                   engine TEXT NOT NULL DEFAULT '',
                   face_key TEXT NOT NULL DEFAULT '0',
+                  face_width INTEGER NOT NULL DEFAULT 0,
+                  face_height INTEGER NOT NULL DEFAULT 0,
+                  sharpness REAL NOT NULL DEFAULT 0,
+                  clipping REAL NOT NULL DEFAULT 0,
+                  quality REAL NOT NULL DEFAULT 0.5,
+                  redundancy REAL NOT NULL DEFAULT 0,
+                  active INTEGER NOT NULL DEFAULT 1,
+                  captured_at TEXT NOT NULL DEFAULT '',
                   vector BLOB NOT NULL,
                   UNIQUE(photo_id, engine, face_key)
                )"""
         )
         conn.execute(
-            """INSERT INTO refs_new (id, person, photo_id, engine, face_key, vector)
-               SELECT r.id, r.person, r.photo_id, r.engine, COALESCE(NULLIF(r.face_key, ''), '0'), r.vector
+            """INSERT INTO refs_new (
+                   id, person, photo_id, engine, face_key,
+                   face_width, face_height, sharpness, clipping,
+                   quality, redundancy, active, captured_at, vector
+               )
+               SELECT r.id, r.person, r.photo_id, r.engine,
+                      COALESCE(NULLIF(r.face_key, ''), '0'),
+                      r.face_width, r.face_height, r.sharpness, r.clipping,
+                      r.quality, r.redundancy, r.active, r.captured_at, r.vector
                FROM refs r
                INNER JOIN (
                    SELECT photo_id, engine, COALESCE(NULLIF(face_key, ''), '0') AS face_key, MAX(id) AS keep_id
@@ -851,6 +922,10 @@ def _migrate(conn):
 
     conn.execute("CREATE INDEX IF NOT EXISTS refs_person ON refs(engine, person)")
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS refs_active_person "
+        "ON refs(engine, person, active, quality DESC, id)"
+    )
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS unknown_faces_engine_cluster "
         "ON unknown_faces(engine, cluster_id, id)"
     )
@@ -862,6 +937,17 @@ def _migrate(conn):
         "CREATE INDEX IF NOT EXISTS unknown_dismissals_photo "
         "ON unknown_dismissals(engine, photo_id)"
     )
+    selection_version = "2"
+    current_selection_version = conn.execute(
+        "SELECT v FROM state WHERE k = 'reference_selection_version'"
+    ).fetchone()
+    if not current_selection_version or current_selection_version[0] != selection_version:
+        refresh_reference_selection(conn)
+        conn.execute(
+            """INSERT INTO state (k, v) VALUES ('reference_selection_version', ?)
+               ON CONFLICT(k) DO UPDATE SET v = excluded.v""",
+            (selection_version,),
+        )
     conn.commit()
 
 
@@ -891,6 +977,218 @@ def state_set(conn, k, v):
     conn.commit()
 
 
+def reference_quality(display_pixels, box_css):
+    """Objective local crop quality from size, sharpness, and edge clipping."""
+    height, width = display_pixels.shape[:2]
+    raw = css_box_to_xywh(box_css)
+    box = clamp_box_xywh(raw, width, height)
+    if box is None:
+        return {
+            "face_width": 0,
+            "face_height": 0,
+            "sharpness": 0.0,
+            "clipping": 1.0,
+            "quality": 0.0,
+        }
+    x, y, face_width, face_height = box
+    crop = np.asarray(
+        display_pixels[y:y + face_height, x:x + face_width],
+        dtype=np.float32,
+    )
+    if crop.ndim == 3:
+        gray = np.dot(crop[..., :3], np.array([0.299, 0.587, 0.114], dtype=np.float32))
+    else:
+        gray = crop
+    if gray.shape[0] >= 3 and gray.shape[1] >= 3:
+        laplacian = (
+            -4.0 * gray[1:-1, 1:-1]
+            + gray[:-2, 1:-1]
+            + gray[2:, 1:-1]
+            + gray[1:-1, :-2]
+            + gray[1:-1, 2:]
+        )
+        lap_variance = float(np.var(laplacian))
+    else:
+        lap_variance = 0.0
+    sharpness = 1.0 - math.exp(-max(0.0, lap_variance) / 400.0)
+    size_score = max(0.0, min(1.0, (min(face_width, face_height) - 24.0) / 136.0))
+    edge_margin = max(2, int(round(min(width, height) * 0.003)))
+    contacts = sum(
+        (
+            raw[0] <= edge_margin,
+            raw[1] <= edge_margin,
+            raw[0] + raw[2] >= width - edge_margin,
+            raw[1] + raw[3] >= height - edge_margin,
+        )
+    )
+    clipping = contacts / 4.0
+    quality = 0.45 * size_score + 0.35 * sharpness + 0.20 * (1.0 - clipping)
+    return {
+        "face_width": int(face_width),
+        "face_height": int(face_height),
+        "sharpness": round(sharpness, 6),
+        "clipping": round(clipping, 6),
+        "quality": round(max(0.0, min(1.0, quality)), 6),
+    }
+
+
+def _reference_distances(engine, matrix, vector):
+    matrix = np.asarray(matrix, dtype=np.float32)
+    vector = np.asarray(vector, dtype=np.float32)
+    if str(engine).startswith("insightface"):
+        matrix_norms = np.linalg.norm(matrix, axis=1)
+        vector_norm = float(np.linalg.norm(vector))
+        denom = matrix_norms * vector_norm
+        similarities = np.divide(
+            matrix @ vector,
+            denom,
+            out=np.zeros(matrix.shape[0], dtype=np.float32),
+            where=denom > 0,
+        )
+        return 1.0 - similarities
+    return np.linalg.norm(matrix - vector, axis=1)
+
+
+def _reference_distance_scale(engine):
+    return 0.50 if str(engine).startswith("insightface") else 0.60
+
+
+def _reference_duplicate_threshold(engine):
+    return 0.035 if str(engine).startswith("insightface") else 0.08
+
+
+def _captured_year(raw):
+    match = re.match(r"^\s*(\d{4})", str(raw or ""))
+    return int(match.group(1)) if match else 0
+
+
+def refresh_reference_selection(conn, engine=None, people=None):
+    """Select a deterministic, bounded, quality-first diverse subset per person."""
+    conditions = []
+    params = []
+    if engine:
+        conditions.append("engine = ?")
+        params.append(engine)
+    if people is not None:
+        clean_people = sorted({str(person) for person in people if str(person)})
+        if not clean_people:
+            return
+        conditions.append("person IN (" + ",".join("?" for _ in clean_people) + ")")
+        params.extend(clean_people)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    groups = conn.execute(
+        f"SELECT DISTINCT engine, person FROM refs{where} ORDER BY engine, person",
+        params,
+    ).fetchall()
+    for group_engine, person in groups:
+        rows = conn.execute(
+            """SELECT id, photo_id, quality, captured_at, vector
+               FROM refs WHERE engine = ? AND person = ? ORDER BY id""",
+            (group_engine, person),
+        ).fetchall()
+        usable = []
+        for row_id, photo_id, quality, captured_at, blob in rows:
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if vector.size < 1 or not np.all(np.isfinite(vector)):
+                continue
+            usable.append(
+                {
+                    "id": int(row_id),
+                    "photo_id": int(photo_id),
+                    "quality": max(0.0, min(1.0, float(quality))),
+                    "captured_at": str(captured_at or ""),
+                    "vector": vector,
+                }
+            )
+        dimension_counts = {}
+        for candidate in usable:
+            dimension = int(candidate["vector"].size)
+            dimension_counts[dimension] = dimension_counts.get(dimension, 0) + 1
+        if dimension_counts:
+            selected_dimension = max(
+                dimension_counts,
+                key=lambda dimension: (dimension_counts[dimension], dimension),
+            )
+            usable = [
+                candidate
+                for candidate in usable
+                if int(candidate["vector"].size) == selected_dimension
+            ]
+        redundancy = {}
+        for candidate in usable:
+            others = [row["vector"] for row in usable if row["id"] != candidate["id"]]
+            redundancy[candidate["id"]] = (
+                float(np.min(_reference_distances(group_engine, np.vstack(others), candidate["vector"])))
+                if others
+                else 1.0
+            )
+        selected = []
+        remaining = list(usable)
+        duplicate_threshold = _reference_duplicate_threshold(group_engine)
+        distance_scale = _reference_distance_scale(group_engine)
+        while remaining and len(selected) < MAX_ACTIVE_REFERENCES:
+            candidates = []
+            selected_matrix = (
+                np.vstack([row["vector"] for row in selected]) if selected else None
+            )
+            selected_years = {_captured_year(row["captured_at"]) for row in selected}
+            for candidate in remaining:
+                nearest = (
+                    float(np.min(_reference_distances(
+                        group_engine,
+                        selected_matrix,
+                        candidate["vector"],
+                    )))
+                    if selected_matrix is not None
+                    else distance_scale
+                )
+                year = _captured_year(candidate["captured_at"])
+                era_bonus = 1.0 if year and year not in selected_years else 0.0
+                diversity = min(1.0, nearest / distance_scale)
+                score = 0.65 * candidate["quality"] + 0.30 * diversity + 0.05 * era_bonus
+                candidates.append(
+                    (
+                        score,
+                        candidate["quality"],
+                        diversity,
+                        -candidate["photo_id"],
+                        -candidate["id"],
+                        nearest,
+                        candidate,
+                    )
+                )
+            best = max(candidates)
+            remaining.remove(best[-1])
+            nearest = best[-2]
+            candidate = best[-1]
+            enough = len(selected) >= min(MIN_REFERENCES, len(usable))
+            duplicate = nearest <= duplicate_threshold
+            represented_era = (
+                _captured_year(candidate["captured_at"]) in
+                {_captured_year(row["captured_at"]) for row in selected}
+            )
+            if enough and (
+                candidate["quality"] < MIN_ACTIVE_QUALITY
+                or (duplicate and represented_era)
+            ):
+                continue
+            selected.append(candidate)
+        active_ids = {row["id"] for row in selected}
+        conn.execute(
+            "UPDATE refs SET active = 0 WHERE engine = ? AND person = ?",
+            (group_engine, person),
+        )
+        for candidate in usable:
+            conn.execute(
+                "UPDATE refs SET active = ?, redundancy = ? WHERE id = ?",
+                (
+                    1 if candidate["id"] in active_ids else 0,
+                    round(redundancy[candidate["id"]], 6),
+                    candidate["id"],
+                ),
+            )
+
+
 def replace_photo_references(conn, photo_id, engine, references):
     """Make one photo's vectors exactly match its current confirmed truth."""
     rows = list(references)
@@ -900,18 +1198,49 @@ def replace_photo_references(conn, photo_id, engine, references):
             (photo_id, engine),
         ).fetchone()[0]
     )
+    old_people = {
+        row[0]
+        for row in conn.execute(
+            "SELECT DISTINCT person FROM refs WHERE photo_id = ? AND engine = ?",
+            (photo_id, engine),
+        )
+    }
+    prepared = []
+    for row in rows:
+        person, face_key, vector = row[:3]
+        metrics = row[3] if len(row) > 3 and isinstance(row[3], dict) else {}
+        prepared.append(
+            (
+                person,
+                photo_id,
+                engine,
+                face_key,
+                max(0, int(metrics.get("face_width", 0))),
+                max(0, int(metrics.get("face_height", 0))),
+                max(0.0, min(1.0, float(metrics.get("sharpness", 0)))),
+                max(0.0, min(1.0, float(metrics.get("clipping", 0)))),
+                max(0.0, min(1.0, float(metrics.get("quality", 0.5)))),
+                str(metrics.get("captured_at") or "")[:40],
+                np.asarray(vector, dtype=np.float32).tobytes(),
+            )
+        )
     with conn:
         conn.execute(
             "DELETE FROM refs WHERE photo_id = ? AND engine = ?",
             (photo_id, engine),
         )
         conn.executemany(
-            """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-               VALUES (?, ?, ?, ?, ?)""",
-            [
-                (person, photo_id, engine, face_key, vector.astype(np.float32).tobytes())
-                for person, face_key, vector in rows
-            ],
+            """INSERT INTO refs (
+                   person, photo_id, engine, face_key,
+                   face_width, face_height, sharpness, clipping,
+                   quality, captured_at, vector
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            prepared,
+        )
+        refresh_reference_selection(
+            conn,
+            engine,
+            old_people.union({row[0] for row in prepared}),
         )
     return old_count, len(rows)
 
@@ -920,7 +1249,12 @@ def load_references(conn, engine):
     """person -> stacked vectors for this engine, for people with enough
     examples to trust. Vectors from other engines are invisible here."""
     vectors = {}
-    for person, blob in conn.execute("SELECT person, vector FROM refs WHERE engine = ?", (engine,)):
+    for person, blob in conn.execute(
+        """SELECT person, vector FROM refs
+           WHERE engine = ? AND active = 1
+           ORDER BY person, quality DESC, id""",
+        (engine,),
+    ):
         vectors.setdefault(person, []).append(np.frombuffer(blob, dtype=np.float32))
     return {p: np.vstack(vs) for p, vs in vectors.items() if len(vs) >= MIN_REFERENCES}
 
@@ -1233,14 +1567,137 @@ def confidence(distance, tolerance):
 
 def identify(vector, references, backend, tolerance):
     """Closest person within tolerance, as (name, confidence) or (None, 0)."""
+    best_name, best_dist = nearest_reference(vector, references, backend)
+    if best_name is None or best_dist > tolerance:
+        return None, 0.0
+    return best_name, confidence(best_dist, tolerance)
+
+
+def nearest_reference(vector, references, backend):
+    """Closest active reference identity and raw distance, even outside tolerance."""
     best_name, best_dist = None, float("inf")
     for name, vs in references.items():
         d = float(np.min(backend.distances(vs, vector)))
         if d < best_dist:
             best_name, best_dist = name, d
-    if best_name is None or best_dist > tolerance:
-        return None, 0.0
-    return best_name, confidence(best_dist, tolerance)
+    return best_name, best_dist
+
+
+def wilson_lower_bound(positive, total, z=CALIBRATION_WILSON_Z):
+    """One-sided conservative floor for a binomial precision estimate."""
+    positive = max(0, int(positive))
+    total = max(0, int(total))
+    if total < 1 or positive > total:
+        return 0.0
+    rate = positive / total
+    z2 = z * z
+    center = rate + z2 / (2.0 * total)
+    margin = z * math.sqrt(
+        (rate * (1.0 - rate) + z2 / (4.0 * total)) / total
+    )
+    return max(0.0, (center - margin) / (1.0 + z2 / total))
+
+
+def calibration_report(samples, target=CALIBRATION_TARGET_PRECISION, minimum=CALIBRATION_MIN_SAMPLES):
+    """Empirical bands and a threshold whose 99% Wilson floor meets the target."""
+    clean = []
+    for sample in samples or []:
+        if not isinstance(sample, dict):
+            continue
+        outcome = str(sample.get("outcome") or "").lower()
+        if outcome not in ("positive", "negative"):
+            continue
+        try:
+            confidence_pct = max(0, min(100, int(sample.get("confidence"))))
+        except (TypeError, ValueError):
+            continue
+        clean.append((confidence_pct, outcome == "positive"))
+
+    bands = []
+    for lower in range(0, 100, 5):
+        upper = lower + 4
+        members = [positive for pct, positive in clean if lower <= pct <= upper]
+        if not members:
+            continue
+        wins = sum(1 for positive in members if positive)
+        bands.append(
+            {
+                "band": f"{lower}-{upper}%",
+                "total": len(members),
+                "positive": wins,
+                "negative": len(members) - wins,
+            }
+        )
+    hundred = [positive for pct, positive in clean if pct == 100]
+    if hundred:
+        wins = sum(1 for positive in hundred if positive)
+        bands.append(
+            {
+                "band": "100%",
+                "total": len(hundred),
+                "positive": wins,
+                "negative": len(hundred) - wins,
+            }
+        )
+
+    recommendation = None
+    recommendation_samples = 0
+    recommendation_floor = 0.0
+    for threshold in sorted({pct for pct, _ in clean if pct >= 50}):
+        members = [positive for pct, positive in clean if pct >= threshold]
+        if len(members) < minimum:
+            continue
+        wins = sum(1 for positive in members if positive)
+        floor = wilson_lower_bound(wins, len(members))
+        if floor >= target:
+            recommendation = threshold
+            recommendation_samples = len(members)
+            recommendation_floor = floor
+            break
+
+    positives = sum(1 for _, positive in clean if positive)
+    return {
+        "version": 1,
+        "evaluated": len(clean),
+        "positive": positives,
+        "negative": len(clean) - positives,
+        "target_precision": float(target),
+        "minimum_samples": int(minimum),
+        "recommended_threshold": recommendation,
+        "recommendation_samples": recommendation_samples,
+        "lower_bound": round(recommendation_floor, 8),
+        "bands": bands,
+    }
+
+
+def sync_calibration(api, cfg, publish=True):
+    data = api.get("/calibration", limit=5000)
+    report = calibration_report(
+        data.get("samples", []) if isinstance(data, dict) else [],
+        cfg_calibration_target(cfg),
+        cfg_calibration_min_samples(cfg),
+    )
+    if publish:
+        api.post("/calibration", report)
+    report["current_threshold"] = int(
+        data.get("current_threshold", 0) if isinstance(data, dict) else 0
+    )
+    return report
+
+
+def calibration_summary(report):
+    recommendation = report.get("recommended_threshold")
+    if recommendation is None:
+        return (
+            f"{int(report.get('evaluated', 0))} explicit outcome(s); "
+            f"insufficient evidence for a {100 * float(report.get('target_precision', 0.99)):.2f}% precision recommendation"
+        )
+    return (
+        f"recommend {int(recommendation)}%+ from "
+        f"{int(report.get('recommendation_samples', 0))} outcome(s), "
+        f"{100 * float(report.get('lower_bound', 0)):.2f}% conservative lower bound; "
+        f"saved setting remains {int(report.get('current_threshold', 0))}%"
+    )
 
 
 def css_box_to_xywh(box_css):
@@ -1959,12 +2416,26 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
             if not found:
                 continue
             hints = []
+            active_faces = []
             rejected = p.get("rejected") or []
-            for i, (_, vec) in enumerate(found):
-                name, conf = identify(vec, refs, backend, tolerance)
+            for i, (box_css, vec) in enumerate(found):
+                nearest_name, distance = nearest_reference(vec, refs, backend)
+                name = nearest_name if nearest_name and distance <= tolerance else None
+                conf = confidence(distance, tolerance) if name else 0
                 if _face_name_rejected(name, rejected):
                     name, conf = None, 0
                 hints.append({"index": i, "name": name or "", "confidence": int(round(conf * 100)) if name else 0})
+                metrics = reference_quality(display_pixels, box_css)
+                active_faces.append(
+                    {
+                        "index": i,
+                        "vector": np.asarray(vec, dtype=np.float32),
+                        "nearest_name": nearest_name or "",
+                        "distance": float(distance),
+                        "quality": float(metrics["quality"]),
+                        "recognized": bool(name),
+                    }
+                )
 
             # Pre-fill from previously saved labels on matching rectangles.
             prefill = {}
@@ -2007,6 +2478,11 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                     "prefill": prefill,
                     "status": status,
                     "known_threshold": known_threshold,
+                    "_active_faces": active_faces,
+                    "_captured_at": (
+                        str((p.get("caption_context") or {}).get("taken_at") or "")
+                        or str(p.get("uploaded_at") or "")
+                    ),
                     # Lightweight preview only. Full image is loaded on demand per photo.
                     "thumb": _thumb_data_uri(image_bytes),
                 }
@@ -2016,6 +2492,7 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                 print(f"label prep: {n}/{total} photos checked, {len(items)} ready")
     finally:
         beat.stop()
+    prioritize_active_learning(items, conn, backend, tolerance)
     dedup = []
     seen = set()
     for n in people_names:
@@ -2025,6 +2502,126 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
         seen.add(k)
         dedup.append(n)
     return items, dedup
+
+
+def prioritize_active_learning(items, conn, backend, tolerance):
+    """Rank unresolved local work by known, auditable information-value signals."""
+    ref_counts = {
+        person: int(count)
+        for person, count in conn.execute(
+            """SELECT person, COUNT(*) FROM refs
+               WHERE engine = ? AND active = 1 GROUP BY person""",
+            (backend.name,),
+        )
+    }
+    ref_years = {}
+    for person, captured_at in conn.execute(
+        """SELECT person, captured_at FROM refs
+           WHERE engine = ? AND active = 1 AND captured_at <> ''""",
+        (backend.name,),
+    ):
+        year = _captured_year(captured_at)
+        if year:
+            ref_years.setdefault(person, set()).add(year)
+
+    unknown = []
+    for item_index, item in enumerate(items):
+        resolved = {int(index) for index in (item.get("prefill") or {}).keys()}
+        threshold = int(item.get("known_threshold") or 0)
+        if threshold > 0:
+            resolved.update(
+                int(hint["index"])
+                for hint in item.get("hints") or []
+                if hint.get("name") and int(hint.get("confidence") or 0) >= threshold
+            )
+        for face in item.get("_active_faces") or []:
+            face["resolved"] = int(face["index"]) in resolved
+            if not face["resolved"] and not face["recognized"]:
+                unknown.append((item_index, face))
+
+    clusters = []
+    cluster_limit = max(0.05, tolerance * 0.65)
+    for entry in unknown:
+        candidates = []
+        for cluster in clusters:
+            matrix = np.vstack([member[1]["vector"] for member in cluster])
+            farthest = float(np.max(backend.distances(matrix, entry[1]["vector"])))
+            if farthest <= cluster_limit:
+                candidates.append(
+                    (
+                        farthest,
+                        cluster[0][0],
+                        int(cluster[0][1]["index"]),
+                        cluster,
+                    )
+                )
+        if candidates:
+            min(candidates, key=lambda value: value[:3])[3].append(entry)
+        else:
+            clusters.append([entry])
+    cluster_sizes = {
+        (item_index, int(face["index"])): len(cluster)
+        for cluster in clusters
+        for item_index, face in cluster
+    }
+
+    ranked = []
+    for item_index, item in enumerate(items):
+        face_scores = []
+        year = _captured_year(item.get("_captured_at"))
+        for face in item.pop("_active_faces", []):
+            if face["resolved"]:
+                continue
+            nearest_name = face["nearest_name"]
+            distance = float(face["distance"])
+            cluster_size = cluster_sizes.get((item_index, int(face["index"])), 1)
+            cluster_signal = min(1.0, cluster_size / 5.0)
+            count = ref_counts.get(nearest_name, 0)
+            weak_corpus = 1.0 - min(1.0, count / float(MAX_ACTIVE_REFERENCES))
+            if math.isfinite(distance) and tolerance > 0:
+                uncertainty = max(
+                    0.0,
+                    1.0 - abs(distance - tolerance) / max(0.001, tolerance * 0.55),
+                )
+                novelty = min(1.0, distance / max(0.001, tolerance * 1.5))
+            else:
+                uncertainty = 0.0
+                novelty = 1.0
+            era_signal = (
+                1.0
+                if year and nearest_name and year not in ref_years.get(nearest_name, set())
+                else 0.0
+            )
+            face_scores.append(
+                0.25 * cluster_signal
+                + 0.20 * weak_corpus
+                + 0.20 * uncertainty
+                + 0.15 * novelty
+                + 0.10 * max(0.0, min(1.0, float(face["quality"])))
+                + 0.10 * era_signal
+            )
+        item.pop("_captured_at", None)
+        score = max(face_scores) if face_scores else 0.0
+        if face_scores:
+            score = min(1.0, score + 0.05 * (sum(face_scores) / len(face_scores)))
+        item["active_score"] = round(score, 6)
+        item["active_learning"] = False
+        if item.get("status") != "full" and face_scores:
+            ranked.append((score, -int(item["id"]), item))
+
+    ranked.sort(reverse=True)
+    offer_count = min(
+        ACTIVE_LEARNING_MAX,
+        max(1, int(math.ceil(len(ranked) * 0.30))) if ranked else 0,
+    )
+    offered = 0
+    for score, _, item in ranked:
+        if offered >= offer_count or score < ACTIVE_LEARNING_THRESHOLD:
+            break
+        item["active_learning"] = True
+        offered += 1
+    if ranked and offered == 0:
+        ranked[0][2]["active_learning"] = True
 
 
 def _label_item_status(face_count, prefill, hints, known_threshold):
@@ -2170,6 +2767,7 @@ border:1px solid #26324a;border-radius:6px;background:#0b1220}
       <select id="gfilter">
         <option value="all">All photos</option>
         <option value="needs">Needs labeling</option>
+        <option value="active">Active learning</option>
         <option value="partial">Partially tagged</option>
         <option value="untagged">Untagged</option>
       </select>
@@ -2304,7 +2902,7 @@ function showDetail(){ showOnly('detailView'); }
 function showFinish(){ showOnly('finishView'); }
 function gallerySub(){
   const f = (document.getElementById('gfilter')||{}).value || 'all';
-  const nouns = {all:'photo', needs:'photo needing labels', partial:'partially tagged photo', untagged:'untagged photo'};
+  const nouns = {all:'photo', needs:'photo needing labels', active:'high-value photo', partial:'partially tagged photo', untagged:'untagged photo'};
   const noun = nouns[f] || 'photo';
   if(!count){ return `No ${noun}s in this batch.`; }
   return `Click a photo to open it (${count} ${noun}${count===1?'':'s'} in this view).`;
@@ -2461,7 +3059,8 @@ function paintGallery(){
 function applyFilter(){
   const f = (document.getElementById('gfilter')||{}).value || 'all';
   activeGallery = allGallery.filter(g =>
-    f === 'all' ? true : (f === 'needs' ? g.status !== 'full' : g.status === f));
+    f === 'all' ? true : (f === 'needs' ? g.status !== 'full' : (f === 'active' ? g.active_learning : g.status === f)));
+  if(f === 'active'){ activeGallery.sort((a,b)=>Number(b.active_score||0)-Number(a.active_score||0)||Number(b.id)-Number(a.id)); }
   count = activeGallery.length;
   pos = 0;
   paintGallery();
@@ -2735,7 +3334,14 @@ def local_label(
                 return self._write(403, json.dumps({"error": "Forbidden"}))
             if u.path == "/api/meta":
                 gallery = [
-                    {"id": it["id"], "thumb": it.get("thumb", ""), "status": it.get("status", "untagged"), "global_i": i}
+                    {
+                        "id": it["id"],
+                        "thumb": it.get("thumb", ""),
+                        "status": it.get("status", "untagged"),
+                        "active_learning": bool(it.get("active_learning")),
+                        "active_score": float(it.get("active_score", 0)),
+                        "global_i": i,
+                    }
                     for i, it in enumerate(state["items"])
                 ]
                 return self._write(200, json.dumps({
@@ -2942,6 +3548,8 @@ def learn(api, conn, backend, verbose=True):
 
             for p in photos:
                 photo_id = int(p["id"])
+                context = _photo_context(p)
+                captured_at = context["taken_at"] or context["uploaded_at"]
                 modified = str(p.get("modified") or "")
                 if modified:
                     if modified > since_mod or (modified == since_mod and photo_id > since_id):
@@ -2954,7 +3562,8 @@ def learn(api, conn, backend, verbose=True):
                     labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
                     if labels:
                         try:
-                            found = backend.embed(api.image(p["url"]))
+                            display_pixels = display_rgb_array(api.image(p["url"]))
+                            found = backend.embed_rgb(display_pixels)
                         except Exception as e:  # a missing file must not stop the run
                             if verbose:
                                 print(f"  #{p['id']}: {e}")
@@ -2987,9 +3596,11 @@ def learn(api, conn, backend, verbose=True):
                             if best_i < 0 or best_iou < 0.15:
                                 continue
                             used.add(best_i)
-                            _, vector = found[best_i]
+                            box_css, vector = found[best_i]
                             face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
-                            replacements.append((name, face_key, vector))
+                            metrics = reference_quality(display_pixels, box_css)
+                            metrics["captured_at"] = captured_at
+                            replacements.append((name, face_key, vector, metrics))
                         old_count, new_count = replace_photo_references(
                             conn, photo_id, backend.name, replacements
                         )
@@ -3009,7 +3620,8 @@ def learn(api, conn, backend, verbose=True):
                         skipped += 1
                         continue
                     try:
-                        found = backend.embed(api.image(p["url"]))
+                        display_pixels = display_rgb_array(api.image(p["url"]))
+                        found = backend.embed_rgb(display_pixels)
                     except Exception as e:  # a missing file must not stop the run
                         if verbose:
                             print(f"  #{p['id']}: {e}")
@@ -3023,12 +3635,14 @@ def learn(api, conn, backend, verbose=True):
                         skipped += 1
                         continue
 
-                    _, vector = found[0]
+                    box_css, vector = found[0]
+                    metrics = reference_quality(display_pixels, box_css)
+                    metrics["captured_at"] = captured_at
                     old_count, new_count = replace_photo_references(
                         conn,
                         photo_id,
                         backend.name,
-                        [(people[0].strip(), "0", vector)],
+                        [(people[0].strip(), "0", vector, metrics)],
                     )
                     removed += old_count
                     added += new_count
@@ -3125,6 +3739,13 @@ def scan(
                     f"{total_captions} caption suggestion(s) stored"
                 )
                 print(f"{data.get('remaining', 0)} still waiting")
+            try:
+                report = sync_calibration(api, cfg)
+                if verbose:
+                    print("calibration: " + calibration_summary(report))
+            except Exception as e:
+                if verbose:
+                    print(f"calibration: could not refresh report ({e})")
             return total_seen
 
         face_results = []
@@ -3415,21 +4036,28 @@ def status(api, conn, cfg):
         print("local caption model: off")
 
     rows = conn.execute(
-        "SELECT engine, person, COUNT(*) FROM refs GROUP BY engine, person ORDER BY engine, COUNT(*) DESC"
+        """SELECT engine, person, COUNT(*), SUM(active), AVG(quality)
+           FROM refs GROUP BY engine, person ORDER BY engine, COUNT(*) DESC"""
     ).fetchall()
     by_engine = {}
-    for eng, person, n in rows:
-        by_engine.setdefault(eng or "(unstamped)", []).append((person, n))
+    for eng, person, total, active, average_quality in rows:
+        by_engine.setdefault(eng or "(unstamped)", []).append(
+            (person, int(total), int(active or 0), float(average_quality or 0))
+        )
 
     if not by_engine:
         print("reference set: empty — run with --learn once photos are tagged")
     for eng, people in by_engine.items():
-        total = sum(n for _, n in people)
+        total = sum(n for _, n, _, _ in people)
+        active_total = sum(active for _, _, active, _ in people)
         mark = " (active)" if resolved and eng == _resolved_name(resolved) else ""
-        print(f"\nreference set [{eng}]{mark}: {len(people)} person(s), {total} face(s) total")
-        for person, n in people[:20]:
-            need = "" if n >= MIN_REFERENCES else f"  (needs {MIN_REFERENCES - n} more to be offered)"
-            print(f"  {n:3d}  {person}{need}")
+        print(
+            f"\nreference set [{eng}]{mark}: {len(people)} person(s), "
+            f"{active_total}/{total} active/retained face(s)"
+        )
+        for person, n, active, average_quality in people[:20]:
+            need = "" if active >= MIN_REFERENCES else f"  (needs {MIN_REFERENCES - active} more usable)"
+            print(f"  {active:2d}/{n:<3d}  q={average_quality:.2f}  {person}{need}")
         if len(people) > 20:
             print(f"  ... and {len(people) - 20} more")
         print(f"  learned up to photo #{state_get(conn, state_key(eng, 'learned_to'), '0')}")
@@ -3445,6 +4073,13 @@ def status(api, conn, cfg):
         )
 
     if api is not None:
+        try:
+            report = sync_calibration(api, cfg)
+            print("\nconfidence calibration:")
+            print("  " + calibration_summary(report))
+            print("  recommendations never change the saved WordPress threshold")
+        except Exception as e:
+            print(f"\nconfidence calibration: (could not ask the server: {e})")
         try:
             queue_args = {"limit": 1}
             key = caption_scan_key(cfg)
@@ -3604,6 +4239,9 @@ def selftest():
                 )
             ]
 
+        def embed_rgb(self, _rgb):
+            return self.embed(b"")
+
         def distances(self, matrix, vector):
             return np.linalg.norm(matrix - vector, axis=1)
 
@@ -3692,6 +4330,56 @@ def selftest():
     except ImportError:
         check_that(False, "image orientation: Pillow is available")
 
+    # Reference quality uses only local pixels and geometry.
+    checker = np.indices((220, 220)).sum(axis=0) % 2
+    checker = np.repeat((checker * 255).astype(np.uint8)[..., None], 3, axis=2)
+    flat = np.full((220, 220, 3), 128, dtype=np.uint8)
+    sharp_quality = reference_quality(checker, (30, 190, 190, 30))
+    blur_quality = reference_quality(flat, (30, 190, 190, 30))
+    small_quality = reference_quality(checker, (20, 50, 50, 20))
+    clipped_quality = reference_quality(checker, (0, 160, 160, 0))
+    check_that(
+        sharp_quality["quality"] > blur_quality["quality"],
+        "reference quality: sharp crops outrank blurred crops",
+    )
+    check_that(
+        sharp_quality["quality"] > small_quality["quality"],
+        "reference quality: sufficiently large faces outrank small faces",
+    )
+    check_that(
+        sharp_quality["quality"] > clipped_quality["quality"]
+        and clipped_quality["clipping"] > sharp_quality["clipping"],
+        "reference quality: edge-clipped crops are penalized",
+    )
+
+    insufficient = calibration_report(
+        [{"confidence": 99, "outcome": "positive"} for _ in range(29)],
+        target=0.99,
+        minimum=30,
+    )
+    sufficient = calibration_report(
+        [{"confidence": 99, "outcome": "positive"} for _ in range(700)]
+        + [{"confidence": 94, "outcome": "negative"} for _ in range(4)],
+        target=0.99,
+        minimum=30,
+    )
+    check_that(
+        insufficient["recommended_threshold"] is None,
+        "calibration: insufficient evidence cannot recommend a threshold",
+    )
+    check_that(
+        sufficient["recommended_threshold"] == 99
+        and sufficient["lower_bound"] >= 0.99
+        and sufficient["recommendation_samples"] == 700,
+        "calibration: recommendation uses a conservative Wilson lower bound",
+    )
+    bands = {band["band"]: band for band in sufficient["bands"]}
+    check_that(
+        bands["90-94%"]["total"] == 4
+        and bands["95-99%"]["positive"] == 700,
+        "calibration: confidence-band outcome counts are deterministic",
+    )
+
     # database: schema, per-engine isolation, the MIN_REFERENCES floor, watermarks.
     prev = globals()["DB_PATH"]
     tmp = Path(tempfile.mkdtemp()) / "faces.db"
@@ -3709,12 +4397,110 @@ def selftest():
         conn.execute("INSERT INTO refs (person, photo_id, engine, vector) VALUES (?,?,?,?)",
                      ("Hans", 103, "engineA", vec))
         conn.commit()
+        refresh_reference_selection(conn, "engineA", {"Hans"})
+        conn.commit()
         a = load_references(conn, "engineA")
         check_that(list(a) == ["Hans"] and a["Hans"].shape == (3, 3), "db: three examples clears the floor")
         check_that(load_references(conn, "engineB") == {}, "db: engines cannot see each other's vectors")
         state_set(conn, state_key("engineA", "learned_to"), 103)
         check_that(state_get(conn, state_key("engineB", "learned_to"), "0") == "0",
                    "db: learn watermarks are per engine")
+        for offset in range(18):
+            person = "Diverse"
+            vector = np.array(
+                [float(offset // 3), float(offset % 3) / 10.0, 0.0],
+                dtype=np.float32,
+            )
+            conn.execute(
+                """INSERT INTO refs (
+                       person, photo_id, engine, face_key, quality, captured_at, vector
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    person,
+                    700 + offset,
+                    "engineA",
+                    "0",
+                    0.95 if offset < 15 else 0.20,
+                    f"{2000 + offset:04d}-01-01",
+                    vector.tobytes(),
+                ),
+            )
+        conn.commit()
+        refresh_reference_selection(conn, "engineA", {"Diverse"})
+        conn.commit()
+        diverse_rows = conn.execute(
+            """SELECT COUNT(*), SUM(active), COUNT(DISTINCT CASE WHEN active = 1 THEN captured_at END)
+               FROM refs WHERE engine = 'engineA' AND person = 'Diverse'"""
+        ).fetchone()
+        check_that(
+            diverse_rows[0] == 18
+            and MIN_REFERENCES <= diverse_rows[1] <= MAX_ACTIVE_REFERENCES,
+            "reference selection: retained vectors survive while the matching subset stays bounded",
+        )
+        check_that(
+            diverse_rows[2] >= MIN_REFERENCES,
+            "reference selection: deterministic diversity preserves multiple eras and appearances",
+        )
+        floor_person = "Floor"
+        for offset in range(MIN_REFERENCES + 3):
+            conn.execute(
+                """INSERT INTO refs (person, photo_id, engine, face_key, quality, vector)
+                   VALUES (?, ?, ?, '0', 0.01, ?)""",
+                (
+                    floor_person,
+                    800 + offset,
+                    "engineA",
+                    np.array([1.0, 1.0, 1.0], dtype=np.float32).tobytes(),
+                ),
+            )
+        conn.commit()
+        refresh_reference_selection(conn, "engineA", {floor_person})
+        conn.commit()
+        check_that(
+            conn.execute(
+                """SELECT SUM(active) FROM refs
+                   WHERE engine = 'engineA' AND person = ?""",
+                (floor_person,),
+            ).fetchone()[0] == MIN_REFERENCES,
+            "reference selection: low-quality duplicates never push a usable person below the minimum floor",
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM refs
+                   WHERE engine = 'engineB' AND active = 1"""
+            ).fetchone()[0] == 1,
+            "reference selection: reselection remains engine-isolated",
+        )
+        priority_items = []
+        for photo_id, value in ((901, 9.0), (902, 9.04), (903, 20.0)):
+            priority_items.append(
+                {
+                    "id": photo_id,
+                    "status": "untagged",
+                    "prefill": {},
+                    "hints": [],
+                    "known_threshold": 95,
+                    "_captured_at": "2026-01-01",
+                    "_active_faces": [
+                        {
+                            "index": 0,
+                            "vector": np.array([value, 0.0, 0.0], dtype=np.float32),
+                            "nearest_name": "",
+                            "distance": float("inf"),
+                            "quality": 0.8,
+                            "recognized": False,
+                        }
+                    ],
+                }
+            )
+        prioritize_active_learning(priority_items, conn, backend, 0.5)
+        offered = [item for item in priority_items if item["active_learning"]]
+        check_that(
+            len(offered) == 1
+            and offered[0]["id"] in (901, 902)
+            and "_active_faces" not in offered[0],
+            "active learning: a bounded filter prioritizes repeated unknown work without exposing vectors",
+        )
         check_that(
             _bump_caption_failure(conn, "pipeline-a", 301) == 1
             and _bump_caption_failure(conn, "pipeline-a", 301) == 2
@@ -3961,7 +4747,7 @@ def selftest():
                 return {"photos": [self.photo]}
 
             def image(self, _url):
-                return b"face"
+                return encoded.getvalue()
 
             def post(self, path, _payload):
                 if path != "/learned":
@@ -4041,6 +4827,15 @@ def selftest():
         check_that(
             {"unknown_faces", "unknown_clusters", "unknown_dismissals"}.issubset(migrated_tables),
             "db: legacy databases gain discovery tables without losing references",
+        )
+        migrated_ref_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(refs)")
+        }
+        check_that(
+            {"quality", "redundancy", "active", "captured_at"}.issubset(migrated_ref_cols)
+            and conn.execute("SELECT COUNT(*) FROM refs").fetchone()[0] == 1,
+            "db: legacy references gain quality metadata without data loss",
         )
         dismissal_cols = {
             row[1]
@@ -4183,6 +4978,8 @@ def selftest():
                 "hints": [],
                 "prefill": {},
                 "status": "untagged",
+                "active_learning": True,
+                "active_score": 0.75,
                 "thumb": "",
             }],
             ["Anna"],
@@ -4226,8 +5023,9 @@ def selftest():
                 and 'id="boxOpacity"' in page.text
                 and 'id="zoomIn"' in page.text
                 and 'id="panCenter"' in page.text
+                and '<option value="active">Active learning</option>' in page.text
                 and "setupViewControls()" in page.text,
-                "label UI: side controls include box visibility, zoom, and pan",
+                "label UI: side controls and the optional active-learning filter are present",
             )
             cleared = requests.post(
                 base + "/api/save",
