@@ -3828,105 +3828,144 @@ function gasf_crm_photo_apply_metadata( $attachment_id, array $in, array $opts =
 		if ( '' !== $p ) { $people[] = $p; }
 	}
 	$people = gasf_crm_photo_unique_people( $people, GASF_CRM_PHOTO_MAX_PEOPLE );
-	if ( $people || $opts['clear_people_when_empty'] ) {
-		wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
-	}
-
-	$groups = array();
-	foreach ( (array) ( $in['groups'] ?? array() ) as $g ) {
-		$g = trim( sanitize_text_field( (string) $g ) );
-		if ( '' !== $g ) { $groups[] = $g; }
-	}
-	$groups = array_slice( array_values( array_unique( $groups ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
-	if ( $groups || $opts['clear_groups_when_empty'] ) {
-		wp_set_object_terms( $id, $groups, 'gasf_photo_group', false );
-	}
-
-	$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
-	if ( '' === $place ) {
-		if ( $opts['clear_place_when_empty'] ) {
-			wp_set_object_terms( $id, array(), 'gasf_photo_place', false );
+	$mutate_people = ( $people || $opts['clear_people_when_empty'] );
+	$identity_lock = '';
+	$photo_lock = '';
+	if ( $mutate_people && function_exists( 'gasf_crm_faces_identity_lock_acquire' ) ) {
+		$identity_lock = gasf_crm_faces_identity_lock_acquire( 300, 20, 50000 );
+		if ( '' === $identity_lock ) {
+			return new WP_Error(
+				'gasf_crm_busy',
+				'A person identity update is in progress. Try saving this photo again in a moment.',
+				array( 'status' => 409 )
+			);
 		}
-	} elseif ( $opts['place_require_existing'] ) {
-		$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
-		if ( $pt && ! is_wp_error( $pt ) ) {
-			wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
-			$place = (string) $pt->name;
-		} else {
-			$place = '';
+	}
+	if ( $mutate_people && function_exists( 'gasf_crm_faces_try_lock' ) ) {
+		for ( $attempt = 0; $attempt < 10 && '' === $photo_lock; $attempt++ ) {
+			if ( $attempt > 0 ) { usleep( 50000 ); }
+			$photo_lock = gasf_crm_faces_try_lock( $id, 'label', 30 );
 		}
-	} else {
-		wp_set_object_terms( $id, array( $place ), 'gasf_photo_place', false );
+		if ( '' === $photo_lock ) {
+			if ( '' !== $identity_lock && function_exists( 'gasf_crm_faces_identity_unlock' ) ) {
+				gasf_crm_faces_identity_unlock( $identity_lock );
+			}
+			return new WP_Error(
+				'gasf_crm_busy',
+				'That photo is being updated by another scanner pass. Try saving again in a moment.',
+				array( 'status' => 409 )
+			);
+		}
 	}
 
-	$event = trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) );
-	if ( $opts['set_event_term'] ) {
-		if ( '' === $event ) {
-			if ( $opts['clear_event_when_empty'] ) {
-				wp_set_object_terms( $id, array(), 'gasf_photo_event', false );
+	try {
+		if ( $mutate_people ) {
+			wp_set_object_terms( $id, $people, 'gasf_photo_person', false );
+		}
+
+		$groups = array();
+		foreach ( (array) ( $in['groups'] ?? array() ) as $g ) {
+			$g = trim( sanitize_text_field( (string) $g ) );
+			if ( '' !== $g ) { $groups[] = $g; }
+		}
+		$groups = array_slice( array_values( array_unique( $groups ) ), 0, GASF_CRM_PHOTO_MAX_PEOPLE );
+		if ( $groups || $opts['clear_groups_when_empty'] ) {
+			wp_set_object_terms( $id, $groups, 'gasf_photo_group', false );
+		}
+
+		$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
+		if ( '' === $place ) {
+			if ( $opts['clear_place_when_empty'] ) {
+				wp_set_object_terms( $id, array(), 'gasf_photo_place', false );
+			}
+		} elseif ( $opts['place_require_existing'] ) {
+			$pt = get_term_by( 'name', $place, 'gasf_photo_place' );
+			if ( $pt && ! is_wp_error( $pt ) ) {
+				wp_set_object_terms( $id, array( (int) $pt->term_id ), 'gasf_photo_place', false );
+				$place = (string) $pt->name;
+			} else {
+				$place = '';
 			}
 		} else {
-			wp_set_object_terms( $id, array( $event ), 'gasf_photo_event', false );
+			wp_set_object_terms( $id, array( $place ), 'gasf_photo_place', false );
 		}
-	}
 
-	$event_id = (int) ( $in['event_id'] ?? 0 );
-	$event_ok = $event_id
-		&& function_exists( 'gasf_photo_has_calendar' ) && gasf_photo_has_calendar()
-		&& defined( 'GASF_EVENTS_CPT' ) && GASF_EVENTS_CPT === get_post_type( $event_id );
-	if ( $opts['set_event_id'] && $event_ok ) {
-		update_post_meta( $id, '_gasf_photo_event_id', $event_id );
-	} elseif ( $opts['set_event_id'] && $opts['clear_event_id_when_bad'] ) {
-		delete_post_meta( $id, '_gasf_photo_event_id' );
-		$event_id = 0;
-	}
-
-	$taken = gasf_crm_photo_clean_taken( $in['taken'] ?? '' );
-	if ( $taken ) {
-		update_post_meta( $id, '_gasf_photo_taken', $taken );
-	} elseif ( $opts['clear_taken_when_empty'] ) {
-		delete_post_meta( $id, '_gasf_photo_taken' );
-	}
-
-	$caption = $opts['caption_textarea']
-		? trim( sanitize_textarea_field( (string) ( $in['caption'] ?? '' ) ) )
-		: trim( sanitize_text_field( (string) ( $in['caption'] ?? '' ) ) );
-	if ( $opts['caption_limit'] > 0 && mb_strlen( $caption ) > (int) $opts['caption_limit'] ) {
-		$caption = mb_substr( $caption, 0, (int) $opts['caption_limit'] );
-	}
-	if ( '' !== $caption || $opts['clear_caption_when_empty'] ) {
-		wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
-	}
-
-	$flyer = gasf_crm_photo_flag( $in['flyer'] ?? '' );
-	if ( $opts['write_flyer'] ) {
-		$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
-		if ( $flyer ) {
-			update_post_meta( $id, '_gasf_photo_flyer', 1 );
-			delete_post_meta( $id, '_gasf_face_suggestions' );
-		} else {
-			delete_post_meta( $id, '_gasf_photo_flyer' );
-			if ( $was_flyer ) {
-				delete_post_meta( $id, '_gasf_face_scanned' );
-				delete_post_meta( $id, '_gasf_face_count' );
+		$event = trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) );
+		if ( $opts['set_event_term'] ) {
+			if ( '' === $event ) {
+				if ( $opts['clear_event_when_empty'] ) {
+					wp_set_object_terms( $id, array(), 'gasf_photo_event', false );
+				}
+			} else {
+				wp_set_object_terms( $id, array( $event ), 'gasf_photo_event', false );
 			}
 		}
-	}
 
-	if ( $opts['apply_names'] && function_exists( 'gasf_photo_apply_names' ) ) {
-		gasf_photo_apply_names( $id );
-	}
+		$event_id = (int) ( $in['event_id'] ?? 0 );
+		$event_ok = $event_id
+			&& function_exists( 'gasf_photo_has_calendar' ) && gasf_photo_has_calendar()
+			&& defined( 'GASF_EVENTS_CPT' ) && GASF_EVENTS_CPT === get_post_type( $event_id );
+		if ( $opts['set_event_id'] && $event_ok ) {
+			update_post_meta( $id, '_gasf_photo_event_id', $event_id );
+		} elseif ( $opts['set_event_id'] && $opts['clear_event_id_when_bad'] ) {
+			delete_post_meta( $id, '_gasf_photo_event_id' );
+			$event_id = 0;
+		}
 
-	return array(
-		'people'   => $people,
-		'groups'   => $groups,
-		'place'    => $place,
-		'event'    => $event,
-		'event_id' => $event_ok ? $event_id : 0,
-		'taken'    => $taken,
-		'caption'  => $caption,
-		'flyer'    => $flyer,
-	);
+		$taken = gasf_crm_photo_clean_taken( $in['taken'] ?? '' );
+		if ( $taken ) {
+			update_post_meta( $id, '_gasf_photo_taken', $taken );
+		} elseif ( $opts['clear_taken_when_empty'] ) {
+			delete_post_meta( $id, '_gasf_photo_taken' );
+		}
+
+		$caption = $opts['caption_textarea']
+			? trim( sanitize_textarea_field( (string) ( $in['caption'] ?? '' ) ) )
+			: trim( sanitize_text_field( (string) ( $in['caption'] ?? '' ) ) );
+		if ( $opts['caption_limit'] > 0 && mb_strlen( $caption ) > (int) $opts['caption_limit'] ) {
+			$caption = mb_substr( $caption, 0, (int) $opts['caption_limit'] );
+		}
+		if ( '' !== $caption || $opts['clear_caption_when_empty'] ) {
+			wp_update_post( array( 'ID' => $id, 'post_excerpt' => $caption ) );
+		}
+
+		$flyer = gasf_crm_photo_flag( $in['flyer'] ?? '' );
+		if ( $opts['write_flyer'] ) {
+			$was_flyer = (bool) get_post_meta( $id, '_gasf_photo_flyer', true );
+			if ( $flyer ) {
+				update_post_meta( $id, '_gasf_photo_flyer', 1 );
+				delete_post_meta( $id, '_gasf_face_suggestions' );
+			} else {
+				delete_post_meta( $id, '_gasf_photo_flyer' );
+				if ( $was_flyer ) {
+					delete_post_meta( $id, '_gasf_face_scanned' );
+					delete_post_meta( $id, '_gasf_face_count' );
+				}
+			}
+		}
+
+		if ( $opts['apply_names'] && function_exists( 'gasf_photo_apply_names' ) ) {
+			gasf_photo_apply_names( $id );
+		}
+
+		return array(
+			'people'   => $people,
+			'groups'   => $groups,
+			'place'    => $place,
+			'event'    => $event,
+			'event_id' => $event_ok ? $event_id : 0,
+			'taken'    => $taken,
+			'caption'  => $caption,
+			'flyer'    => $flyer,
+		);
+	} finally {
+		if ( '' !== $photo_lock && function_exists( 'gasf_crm_faces_unlock' ) ) {
+			gasf_crm_faces_unlock( $id, 'label', $photo_lock );
+		}
+		if ( '' !== $identity_lock && function_exists( 'gasf_crm_faces_identity_unlock' ) ) {
+			gasf_crm_faces_identity_unlock( $identity_lock );
+		}
+	}
 }
 
 /** Build a calendar event from flyer details. */
@@ -4125,7 +4164,7 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 	// actually ask, and a term per occurrence would mean 200 Biergarten terms
 	// for 200 Wednesdays. The exact event is kept alongside it as meta, so
 	// "photos from THIS one" stays answerable without polluting the vocabulary.
-	gasf_crm_photo_apply_metadata( $id, $keep, array(
+	$meta = gasf_crm_photo_apply_metadata( $id, $keep, array(
 		'clear_people_when_empty'  => true,
 		'place_require_existing'   => false,
 		'clear_place_when_empty'   => true,
@@ -4139,6 +4178,10 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 		'write_flyer'              => true,
 		'apply_names'              => true,
 	) );
+	if ( is_wp_error( $meta ) ) {
+		update_post_meta( $id, '_gasf_photo_rev', $have );
+		return $meta;
+	}
 	if ( ! empty( $keep['face_map'] ) && function_exists( 'gasf_crm_face_labels_record' ) ) {
 		gasf_crm_face_labels_record( $id, (array) $keep['face_map'] );
 	}

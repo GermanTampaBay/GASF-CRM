@@ -1182,6 +1182,27 @@ final class GASF_CRM_Selftest {
 			&& $rollback_one_before === (string) get_post_field( 'post_modified_gmt', $rollback_one ),
 			'faces: second-photo remap failure rolls back earlier label writes and revisions'
 		);
+		$forced_restore_fail = static function ( $forced, $photo_id ) use ( $rollback_one ) {
+			if ( (int) $photo_id !== (int) $rollback_one ) { return $forced; }
+			return false;
+		};
+		add_filter( 'gasf_crm_faces_learning_restore_force', $forced_restore_fail, 10, 2 );
+		add_filter( 'gasf_crm_face_labels_remap_force_error', $force_second_error, 10, 4 );
+		$rollback_failure = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'rename',
+			'term'   => $identity_id,
+			'name'   => $identity_term_name,
+			'into'   => 'Jürgen Forced Rollback Failure ' . $identity_suffix,
+			'op_id'  => 'selftest-face-identity-remap-rollback-failure-' . $identity_suffix,
+		) );
+		remove_filter( 'gasf_crm_face_labels_remap_force_error', $force_second_error, 10 );
+		remove_filter( 'gasf_crm_faces_learning_restore_force', $forced_restore_fail, 10 );
+		$this->ok(
+			is_wp_error( $rollback_failure )
+			&& 'gasf_crm_rollback' === (string) $rollback_failure->get_error_code()
+			&& in_array( $rollback_one, (array) ( $rollback_failure->get_error_data()['rollback'] ?? array() ), true ),
+			'faces: rollback failures are surfaced with the affected photo IDs'
+		);
 
 		$identity_touch_before = (string) get_post_field( 'post_modified_gmt', $identity_photo );
 		$touch_fail_filter = static function ( $forced, $photo_id ) use ( $identity_photo ) {
@@ -1236,6 +1257,8 @@ final class GASF_CRM_Selftest {
 		);
 
 		$serialized_photo = $this->library_photo( 'st-face-identity-serialized-' . $identity_suffix );
+		$prelock_photo = $this->library_photo( 'st-face-identity-prelock-' . $identity_suffix );
+		$postlock_photo = $this->library_photo( 'st-face-identity-postlock-' . $identity_suffix );
 		update_post_meta( $serialized_photo, '_gasf_face_boxes', array(
 			array( 'box' => array( 18, 18, 22, 22 ) ),
 		) );
@@ -1243,9 +1266,15 @@ final class GASF_CRM_Selftest {
 		$blocked_elapsed = 0.0;
 		$remap_hook = null;
 		$remap_hook = static function ( $from_id ) use (
-			$identity_id, $identity_photo, $serialized_photo, &$remap_hook, &$blocked_during_remap, &$blocked_elapsed, $identity_suffix
+			$identity_id, $identity_photo, $serialized_photo, $prelock_photo, $identity_term_name, &$remap_hook, &$blocked_during_remap, &$blocked_elapsed, $identity_suffix
 		) {
 			if ( (int) $from_id !== $identity_id ) { return; }
+			$meta = gasf_crm_photo_apply_metadata(
+				$prelock_photo,
+				array( 'people' => array( $identity_term_name ) ),
+				array( 'allow_empty' => true )
+			);
+			if ( is_wp_error( $meta ) ) { return; }
 			$raw = get_post_meta( $identity_photo, '_gasf_face_labels', true );
 			$raw = is_array( $raw ) ? $raw : array();
 			$raw[] = array(
@@ -1260,7 +1289,21 @@ final class GASF_CRM_Selftest {
 			$blocked_elapsed = microtime( true ) - $t0;
 			remove_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook );
 		};
+		$postlock_error = null;
+		$postlock_hook = null;
+		$postlock_hook = static function ( $from_id ) use (
+			$identity_id, $postlock_photo, $identity_term_name, &$postlock_error, &$postlock_hook
+		) {
+			if ( (int) $from_id !== $identity_id ) { return; }
+			$postlock_error = gasf_crm_photo_apply_metadata(
+				$postlock_photo,
+				array( 'people' => array( $identity_term_name ) ),
+				array( 'allow_empty' => true )
+			);
+			remove_action( 'gasf_crm_face_labels_remap_after_lock', $postlock_hook );
+		};
 		add_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook, 10, 1 );
+		add_action( 'gasf_crm_face_labels_remap_after_lock', $postlock_hook, 10, 1 );
 		$renamed_result = $this->rest_post( '/gasf/v1/crm/photos/person', array(
 			'action' => 'rename',
 			'term'   => $identity_id,
@@ -1269,8 +1312,10 @@ final class GASF_CRM_Selftest {
 			'op_id'  => 'selftest-face-identity-rename-' . $identity_suffix,
 		) );
 		remove_action( 'gasf_crm_face_labels_remap_before_lock', $remap_hook );
+		remove_action( 'gasf_crm_face_labels_remap_after_lock', $postlock_hook );
 		$renamed_labels = gasf_crm_face_labels_for( $identity_photo );
-		$serialized_during = gasf_crm_face_labels_for( $serialized_photo );
+		$prelock_terms = wp_get_object_terms( $prelock_photo, 'gasf_photo_person', array( 'fields' => 'ids' ) );
+		$postlock_terms = wp_get_object_terms( $postlock_photo, 'gasf_photo_person', array( 'fields' => 'ids' ) );
 		$stored_after_rename = gasf_crm_face_labels_record( $serialized_photo, array(
 			array( 'i' => 0, 'name' => $renamed_identity ),
 		) );
@@ -1282,12 +1327,14 @@ final class GASF_CRM_Selftest {
 			&& 3 === count( $renamed_labels )
 			&& 'Concurrent Keep' === (string) ( $renamed_labels[2]['name'] ?? '' )
 			&& (string) get_post_field( 'post_modified_gmt', $identity_photo ) > $identity_modified
-			&& 0 === (int) $blocked_during_remap
+			&& in_array( $identity_id, array_map( 'intval', (array) $prelock_terms ), true )
+			&& is_wp_error( $postlock_error )
+			&& 409 === (int) ( $postlock_error->get_error_data()['status'] ?? 0 )
+			&& ! in_array( $identity_id, array_map( 'intval', (array) $postlock_terms ), true )
 			&& $blocked_elapsed < 2
-			&& empty( $serialized_during )
 			&& $stored_after_rename > 0
 			&& $identity_id === (int) ( $serialized_after[0]['person_id'] ?? 0 ),
-			'faces: identity lock serializes concurrent label creation without deadlock'
+			'faces: writers before lock are remapped, and writers after lock wait and fail cleanly'
 		);
 
 		$destination_name = 'Identity Destination ' . $identity_suffix;
@@ -1341,7 +1388,33 @@ final class GASF_CRM_Selftest {
 			&& (string) get_post_field( 'post_modified_gmt', $identity_photo ) > $identity_before_merge,
 			'faces: a merge remaps label facts, advances learning, and leaves no competing identity'
 		);
-		if ( $destination_id > 0 ) { wp_delete_term( $destination_id, 'gasf_photo_person' ); }
+		$delete_photo = $this->library_photo( 'st-face-identity-delete-' . $identity_suffix );
+		$delete_before = (string) get_post_field( 'post_modified_gmt', $delete_photo );
+		update_post_meta( $delete_photo, '_gasf_face_labels', array(
+			array(
+				'name' => $destination_name,
+				'person_id' => $destination_id,
+				'canonical_name' => $destination_name,
+				'box' => array( 24, 24, 22, 22 ),
+			),
+		) );
+		wp_set_object_terms( $delete_photo, array( $destination_id ), 'gasf_photo_person', false );
+		$deleted_result = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'delete',
+			'term'   => $destination_id,
+			'name'   => $destination_name,
+			'op_id'  => 'selftest-face-identity-delete-' . $identity_suffix,
+		) );
+		$delete_labels = gasf_crm_face_labels_for( $delete_photo );
+		$delete_terms = wp_get_object_terms( $delete_photo, 'gasf_photo_person', array( 'fields' => 'ids' ) );
+		$this->ok(
+			! is_wp_error( $deleted_result )
+			&& ! term_exists( $destination_id, 'gasf_photo_person' )
+			&& empty( $delete_labels )
+			&& empty( $delete_terms )
+			&& (string) get_post_field( 'post_modified_gmt', $delete_photo ) > $delete_before,
+			'faces: delete clears exact label and tagged identity truth and advances learning'
+		);
 		foreach ( array( $bauer_name, $baur_name ) as $distinct_name ) {
 			$distinct_term = get_term_by( 'name', $distinct_name, 'gasf_photo_person' );
 			if ( $distinct_term ) { wp_delete_term( (int) $distinct_term->term_id, 'gasf_photo_person' ); }

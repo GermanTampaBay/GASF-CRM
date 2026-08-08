@@ -687,6 +687,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			'write_flyer'              => true,
 			'apply_names'              => false,
 		) );
+		if ( is_wp_error( $meta ) ) { return $meta; }
 		update_post_meta( $id, '_gasf_photo_guest', array(
 			'event'    => (string) $meta['event'],
 			// Which calendar entry they picked, if they picked one. The volunteer
@@ -730,7 +731,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		 * a guest must not grow that taxonomy). The event may create, because a
 		 * party's event tag is club-authored configuration, not guest input.
 		 */
-		gasf_crm_photo_apply_metadata( $id, $meta_in, array(
+		$meta = gasf_crm_photo_apply_metadata( $id, $meta_in, array(
 			'clear_people_when_empty'  => false,
 			'clear_groups_when_empty'  => false,
 			'place_require_existing'   => true,
@@ -745,6 +746,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			'write_flyer'              => true,
 			'apply_names'              => false,
 		) );
+		if ( is_wp_error( $meta ) ) { return $meta; }
 	} else {
 		$saved = gasf_crm_photo_library_save( $id, array(
 			'people'   => $meta_in['people'],

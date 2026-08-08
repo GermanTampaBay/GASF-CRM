@@ -93,6 +93,8 @@ function gasf_crm_faces_learning_restore( $attachment_id, array $snapshot ) {
 	global $wpdb;
 
 	$id = (int) $attachment_id;
+	$forced = apply_filters( 'gasf_crm_faces_learning_restore_force', null, $id, $snapshot );
+	if ( null !== $forced ) { return (bool) $forced; }
 	$local = (string) ( $snapshot['post_modified'] ?? '' );
 	$gmt = (string) ( $snapshot['post_modified_gmt'] ?? '' );
 	if ( ! $id || '' === $local || '' === $gmt ) { return false; }
@@ -1073,17 +1075,28 @@ function gasf_crm_face_person_facts( $attachment_id ) {
  * All relevant photo locks are acquired before the first write, so a busy
  * scanner cannot leave a half-remapped identity.
  */
-function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_name, $commit = null ) {
+function gasf_crm_face_labels_identity_remap(
+	$from_id, $from_name, $to_id, $to_name, $commit = null, $identity_lock_token = '', $mode = 'replace'
+) {
 	$from_id = max( 0, (int) $from_id );
 	$to_id   = max( 0, (int) $to_id );
 	$from_name = trim( sanitize_text_field( (string) $from_name ) );
 	$to_name = html_entity_decode( trim( sanitize_text_field( (string) $to_name ) ), ENT_QUOTES, 'UTF-8' );
-	if ( $from_id <= 0 || $to_id <= 0 || '' === $to_name ) {
+	$mode = ( 'delete' === (string) $mode ) ? 'delete' : 'replace';
+	if ( $from_id <= 0 || ( 'replace' === $mode && ( $to_id <= 0 || '' === $to_name ) ) ) {
 		return new WP_Error( 'gasf_crm_bad', 'Valid source and destination person identities are required.', array( 'status' => 400 ) );
 	}
-	$identity_lock = gasf_crm_faces_identity_lock_acquire( 300, 10, 50000 );
-	if ( '' === $identity_lock ) {
-		return new WP_Error( 'gasf_crm_busy', 'A person identity update is already in progress. Try again in a moment.', array( 'status' => 409 ) );
+	$identity_lock = (string) $identity_lock_token;
+	$owned_lock = '' !== $identity_lock;
+	if ( $owned_lock ) {
+		if ( ! gasf_crm_faces_identity_lock_is_owner( $identity_lock ) ) {
+			return new WP_Error( 'gasf_crm_busy', 'A person identity update is already in progress. Try again in a moment.', array( 'status' => 409 ) );
+		}
+	} else {
+		$identity_lock = gasf_crm_faces_identity_lock_acquire( 300, 10, 50000 );
+		if ( '' === $identity_lock ) {
+			return new WP_Error( 'gasf_crm_busy', 'A person identity update is already in progress. Try again in a moment.', array( 'status' => 409 ) );
+		}
 	}
 
 	$label_ids = static function () {
@@ -1175,9 +1188,13 @@ function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_
 				if ( $person_id !== $from_id && ( $person_id > 0 || ! gasf_crm_face_name_same( $from_name, $name ) ) ) {
 					continue;
 				}
-				$label['name'] = $to_name;
-				$label['person_id'] = $to_id;
-				$label['canonical_name'] = $to_name;
+				if ( 'delete' === $mode ) {
+					unset( $labels[ $index ] );
+				} else {
+					$label['name'] = $to_name;
+					$label['person_id'] = $to_id;
+					$label['canonical_name'] = $to_name;
+				}
 				$changed = true;
 				$changed_indexes[] = $index;
 			}
@@ -1191,18 +1208,32 @@ function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_
 			if ( is_wp_error( $forced_error ) ) {
 				return $rollback( $forced_error );
 			}
-			update_post_meta( $id, '_gasf_face_labels', array_values( $labels ) );
+			$updated_labels = array_values( $labels );
+			update_post_meta( $id, '_gasf_face_labels', $updated_labels );
 			$stored = get_post_meta( $id, '_gasf_face_labels', true );
-			if ( ! is_array( $stored ) || count( $stored ) !== count( $labels ) ) {
+			if ( ! is_array( $stored ) || count( $stored ) !== count( $updated_labels ) ) {
 				return $rollback( new WP_Error( 'gasf_crm_store', 'Canonical face-label identities could not be verified.', array( 'status' => 500 ) ) );
 			}
-			foreach ( $changed_indexes as $index ) {
-				if (
-					! isset( $stored[ $index ] )
-					|| $to_id !== (int) ( $stored[ $index ]['person_id'] ?? 0 )
-					|| $to_name !== (string) ( $stored[ $index ]['canonical_name'] ?? '' )
-				) {
+			foreach ( $stored as $after_label ) {
+				if ( ! is_array( $after_label ) ) { continue; }
+				$after_person_id = (int) ( $after_label['person_id'] ?? 0 );
+				$after_name = (string) ( $after_label['canonical_name'] ?? $after_label['name'] ?? '' );
+				if ( $after_person_id !== $from_id && ( $after_person_id > 0 || ! gasf_crm_face_name_same( $from_name, $after_name ) ) ) {
+					continue;
+				}
+				if ( 'delete' === $mode ) {
 					return $rollback( new WP_Error( 'gasf_crm_store', 'Canonical face-label identities could not be verified.', array( 'status' => 500 ) ) );
+				}
+			}
+			if ( 'replace' === $mode ) {
+				foreach ( $changed_indexes as $index ) {
+					if (
+						! isset( $stored[ $index ] )
+						|| $to_id !== (int) ( $stored[ $index ]['person_id'] ?? 0 )
+						|| $to_name !== (string) ( $stored[ $index ]['canonical_name'] ?? '' )
+					) {
+						return $rollback( new WP_Error( 'gasf_crm_store', 'Canonical face-label identities could not be verified.', array( 'status' => 500 ) ) );
+					}
 				}
 			}
 			if ( ! gasf_crm_faces_learning_touch( $id ) ) {
@@ -1225,7 +1256,9 @@ function gasf_crm_face_labels_identity_remap( $from_id, $from_name, $to_id, $to_
 		foreach ( $locks as $id => $token ) {
 			gasf_crm_faces_unlock( $id, 'label', $token );
 		}
-		gasf_crm_faces_identity_unlock( $identity_lock );
+		if ( ! $owned_lock ) {
+			gasf_crm_faces_identity_unlock( $identity_lock );
+		}
 	}
 }
 
@@ -1341,6 +1374,13 @@ function gasf_crm_faces_identity_unlock( $token ) {
 	$have = json_decode( (string) get_option( $key, '' ), true );
 	if ( ! is_array( $have ) || $token !== (string) ( $have['token'] ?? '' ) ) { return; }
 	delete_option( $key );
+}
+
+function gasf_crm_faces_identity_lock_is_owner( $token ) {
+	$token = (string) $token;
+	if ( '' === $token ) { return false; }
+	$have = json_decode( (string) get_option( '_gasf_face_identity_lock', '' ), true );
+	return is_array( $have ) && $token === (string) ( $have['token'] ?? '' );
 }
 
 /** Compare-and-swap style lock around one photo's scanner write path. */
@@ -2013,25 +2053,33 @@ add_action( 'rest_api_init', function () {
 				return new WP_Error( 'gasf_crm_bad', 'A suggested name is required.', array( 'status' => 400 ) );
 			}
 
-			$lock = gasf_crm_faces_try_lock( $id, 'reject' );
-			if ( '' === $lock ) {
-				return new WP_Error( 'gasf_crm_busy', 'That photo is being updated by the scanner. Try again in a moment.', array( 'status' => 409 ) );
+			$identity_lock = gasf_crm_faces_identity_lock_acquire( 300, 10, 50000 );
+			if ( '' === $identity_lock ) {
+				return new WP_Error( 'gasf_crm_busy', 'A person identity update is in progress. Try again in a moment.', array( 'status' => 409 ) );
 			}
+			$lock = gasf_crm_faces_try_lock( $id, 'reject' );
 			try {
-				$already = gasf_crm_face_is_rejected( $id, $name );
-				$pending = false;
-				foreach ( gasf_crm_faces_for( $id ) as $s ) {
-					if ( gasf_crm_face_name_same( $name, (string) ( $s['name'] ?? '' ) ) ) {
-						$pending = true;
-						break;
+				if ( '' === $lock ) {
+					return new WP_Error( 'gasf_crm_busy', 'That photo is being updated by the scanner. Try again in a moment.', array( 'status' => 409 ) );
+				}
+				try {
+					$already = gasf_crm_face_is_rejected( $id, $name );
+					$pending = false;
+					foreach ( gasf_crm_faces_for( $id ) as $s ) {
+						if ( gasf_crm_face_name_same( $name, (string) ( $s['name'] ?? '' ) ) ) {
+							$pending = true;
+							break;
+						}
 					}
+					if ( ! $already && ! $pending ) {
+						return new WP_Error( 'gasf_crm_conflict', 'That face suggestion is no longer pending.', array( 'status' => 409 ) );
+					}
+					$changed = gasf_crm_face_reject( $id, $name );
+				} finally {
+					gasf_crm_faces_unlock( $id, 'reject', $lock );
 				}
-				if ( ! $already && ! $pending ) {
-					return new WP_Error( 'gasf_crm_conflict', 'That face suggestion is no longer pending.', array( 'status' => 409 ) );
-				}
-				$changed = gasf_crm_face_reject( $id, $name );
 			} finally {
-				gasf_crm_faces_unlock( $id, 'reject', $lock );
+				gasf_crm_faces_identity_unlock( $identity_lock );
 			}
 			if ( is_wp_error( $changed ) ) { return $changed; }
 			if ( ! gasf_crm_face_is_rejected( $id, $name ) ) {
