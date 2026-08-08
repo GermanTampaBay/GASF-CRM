@@ -142,6 +142,8 @@ new one (the old one stops working immediately).
 
 The first real run downloads the `buffalo_l` model pack (~280 MB) into
 `~/.insightface/` and takes a few seconds to warm up; every run after is fast.
+Older JPEGs that still carry EXIF rotation are normalized before detection, so
+face rectangles use the same orientation Edge displays.
 
 ---
 
@@ -174,6 +176,7 @@ python scan-gui.py
 - It blocks unsupported combinations (for example `--learn` + `--label`).
 - In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
+- The labeler has live outline/opacity settings plus zoom, fit, center, and pan controls. You can also drag the image to pan, double-click to fit, and use Ctrl+wheel to zoom.
 - The launcher finds `scan.py` beside itself, so the folder can move without editing code.
 
 Optional single-file EXE (Windows):

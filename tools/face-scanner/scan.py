@@ -375,11 +375,23 @@ class Backend:
 
     def embed(self, image_bytes):
         """[(box_css, vector_float32), ...] for every face found."""
+        return self.embed_rgb(display_rgb_array(image_bytes))
+
+    def embed_rgb(self, rgb):
+        """Embed an already browser-oriented RGB uint8 array."""
         raise NotImplementedError
 
     def distances(self, matrix, vector):
         """Distance from `vector` to each row of `matrix`; lower is more alike."""
         raise NotImplementedError
+
+
+def display_rgb_array(image_bytes):
+    """Decode pixels in the same EXIF orientation modern browsers display."""
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(image_bytes)) as source:
+        return np.array(ImageOps.exif_transpose(source).convert("RGB"), copy=True)
 
 
 class InsightFaceBackend(Backend):
@@ -401,19 +413,16 @@ class InsightFaceBackend(Backend):
 
     def __init__(self):
         from insightface.app import FaceAnalysis  # heavy; imported on demand
-        from PIL import Image
         import onnxruntime as ort
 
-        self._Image = Image
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
         use_cuda = "CUDAExecutionProvider" in providers
         self._app = FaceAnalysis(name="buffalo_l", providers=providers or ["CPUExecutionProvider"])
         self._app.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
-    def embed(self, image_bytes):
-        # insightface expects an OpenCV-style BGR uint8 array. PIL gives us RGB;
-        # reverse the channels and make it contiguous for the C++ detector.
-        img = self._Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        bgr = np.ascontiguousarray(np.asarray(img)[:, :, ::-1])
+    def embed_rgb(self, rgb):
+        # InsightFace expects BGR. Apply EXIF orientation first: browsers do so
+        # automatically, and boxes from unrotated source pixels land elsewhere.
+        bgr = np.ascontiguousarray(rgb[:, :, ::-1])
         out = []
         for f in self._app.get(bgr):
             x1, y1, x2, y2 = (int(v) for v in f.bbox)
@@ -437,12 +446,11 @@ class FaceRecognitionBackend(Backend):
         import face_recognition  # heavy; imported on demand
         self._fr = face_recognition
 
-    def embed(self, image_bytes):
-        img = self._fr.load_image_file(io.BytesIO(image_bytes))
-        boxes = self._fr.face_locations(img, model="hog")  # already css order
+    def embed_rgb(self, rgb):
+        boxes = self._fr.face_locations(rgb, model="hog")  # already css order
         if not boxes:
             return []
-        vectors = self._fr.face_encodings(img, boxes)
+        vectors = self._fr.face_encodings(rgb, boxes)
         return [(b, np.asarray(v, dtype=np.float32)) for b, v in zip(boxes, vectors)]
 
     def distances(self, matrix, vector):
@@ -886,8 +894,9 @@ def _mime_for_image(image_bytes):
 def _thumb_data_uri(image_bytes, max_px=240, quality=70):
     """Small JPEG thumbnail data URI for gallery cards; empty on any failure."""
     try:
-        from PIL import Image
-        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(image_bytes)) as source:
+            img = ImageOps.exif_transpose(source).convert("RGB")
         img.thumbnail((max_px, max_px))
         out = io.BytesIO()
         img.save(out, format="JPEG", quality=quality, optimize=True)
@@ -977,14 +986,26 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
             people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
             try:
                 image_bytes = api.image(p["url"])
-                found = backend.embed(image_bytes)
+                display_pixels = display_rgb_array(image_bytes)
+                found = backend.embed_rgb(display_pixels)
             except Exception as e:
                 print(f"#{photo_id}: skipped ({e})")
                 continue
             if not found:
                 continue
 
-            boxes = [css_box_to_xywh(box_css) for (box_css, _) in found]
+            image_height, image_width = display_pixels.shape[:2]
+            boxes = []
+            kept_found = []
+            for box_css, vector in found:
+                box = clamp_box_xywh(css_box_to_xywh(box_css), image_width, image_height)
+                if box is None:
+                    continue
+                boxes.append(box)
+                kept_found.append((box_css, vector))
+            found = kept_found
+            if not found:
+                continue
             hints = []
             for i, (_, vec) in enumerate(found):
                 name, conf = identify(vec, refs, backend, tolerance)
@@ -1023,6 +1044,8 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                     "url": p["url"],
                     "people": people,
                     "boxes": boxes,
+                    "image_width": image_width,
+                    "image_height": image_height,
                     "hints": hints,
                     "prefill": prefill,
                     "status": status,
@@ -1069,6 +1092,20 @@ def _label_item_status(face_count, prefill, hints, known_threshold):
     return "full"
 
 
+def clamp_box_xywh(box, image_width, image_height):
+    """Clip a detector box to the exact oriented pixels sent to the browser."""
+    if len(box) != 4 or image_width < 1 or image_height < 1:
+        return None
+    x, y, width, height = (int(v) for v in box)
+    x1 = max(0, min(image_width, x))
+    y1 = max(0, min(image_height, y))
+    x2 = max(0, min(image_width, x + max(0, width)))
+    y2 = max(0, min(image_height, y + max(0, height)))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2 - x1, y2 - y1]
+
+
 def _label_ui_html(label_flow=False, session_token=""):
     followup = "true" if label_flow else "false"
     html = """<!doctype html>
@@ -1096,7 +1133,8 @@ display:flex;gap:12px;align-items:center;justify-content:space-between}
 .detail{display:grid;grid-template-columns:minmax(0,1fr) clamp(300px,34vw,430px);gap:14px;align-items:start}
 .detail.on{display:grid}
 .stage{position:relative;min-width:0;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
-.frame{position:relative;display:inline-block;max-width:100%;line-height:0}
+.frame{position:relative;display:inline-block;max-width:100%;line-height:0;transform-origin:center center;cursor:grab;touch-action:none}
+.frame.panning{cursor:grabbing}
 #photo{display:block;max-width:100%;max-height:calc(100vh - 130px);width:auto;height:auto;position:relative;z-index:1}
 #ov{position:absolute;inset:0;pointer-events:none;z-index:2}
 .fb{position:absolute;box-sizing:border-box;border:var(--face-border-width) solid var(--face-border-color);
@@ -1119,6 +1157,12 @@ margin:0 0 10px;padding:8px;border:1px solid #26324a;border-radius:6px;backgroun
 .boxprefs label{font-size:12px;color:#cbd5e1}
 .boxprefs input{width:100%}
 .boxprefs output{font-size:12px;color:#94a3b8;text-align:right}
+.viewprefs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:0 0 10px;padding:8px;
+border:1px solid #26324a;border-radius:6px;background:#0b1220}
+.viewprefs strong{grid-column:1/-1;font-size:12px}
+.viewprefs button{padding:5px 7px;border:1px solid #334155;border-radius:5px;background:#111827;color:#e5e7eb;cursor:pointer}
+.viewprefs button:hover{border-color:#60a5fa}
+.viewprefs .zoomread{grid-column:1/-1;text-align:center;font-size:12px;color:#94a3b8}
 .rows{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto}
 .row{display:grid;grid-template-columns:64px 1fr auto;gap:6px;align-items:center}
 .row label{font-size:12px;color:#cbd5e1}
@@ -1162,6 +1206,18 @@ margin:0 0 10px;padding:8px;border:1px solid #26324a;border-radius:6px;backgroun
         <label for="boxWidth">Outline</label><input id="boxWidth" type="range" min="0" max="5" step="1" value="1"><output id="boxWidthValue">1 px</output>
         <label for="boxOpacity">Opacity</label><input id="boxOpacity" type="range" min="20" max="100" step="5" value="65"><output id="boxOpacityValue">65%</output>
       </div>
+      <div class="viewprefs">
+        <strong>View</strong>
+        <button id="zoomOut" type="button" title="Zoom out">-</button>
+        <button id="viewFit" type="button" title="Fit image">Fit</button>
+        <button id="zoomIn" type="button" title="Zoom in">+</button>
+        <button id="panUp" type="button" title="Pan up">Up</button>
+        <button id="panLeft" type="button" title="Pan left">Left</button>
+        <button id="panDown" type="button" title="Pan down">Down</button>
+        <button id="panRight" type="button" title="Pan right">Right</button>
+        <button id="panCenter" type="button" title="Center without changing zoom">Center</button>
+        <div class="zoomread"><span id="zoomValue">100%</span> - drag image to pan; Ctrl+wheel to zoom</div>
+      </div>
       <div class="rows" id="rows"></div>
       <div class="muted">Names save automatically when you move to another photo.</div>
       <div class="acts">
@@ -1182,8 +1238,9 @@ margin:0 0 10px;padding:8px;border:1px solid #26324a;border-radius:6px;backgroun
 <script>
 const labelFlow=__LABEL_FLOW__;
 const sessionToken=__LABEL_TOKEN__;
-let count=0, pos=0, current=null, activeGallery=[], allGallery=[], loadSeq=0, photoAbort=null;
+let count=0, pos=0, current=null, activeGallery=[], allGallery=[], loadSeq=0, imageRenderSeq=0, photoAbort=null;
 let saving=false, finishing=false, dirty=false, finishPollFailures=0, finishReturnView='galleryView';
+let viewZoom=1, viewPanX=0, viewPanY=0, panPointer=null, panStartX=0, panStartY=0, panOriginX=0, panOriginY=0;
 const nameSet = new Map();
 async function j(url,opt){
   const next=Object.assign({},opt||{});
@@ -1206,6 +1263,57 @@ function applyBoxVisibility(){
   root.setProperty('--face-fill-color',`rgba(37,99,235,${(alpha*.06).toFixed(3)})`);
   setText('boxWidthValue',`${width} px`);
   setText('boxOpacityValue',`${opacity}%`);
+}
+function applyView(){
+  const frame=document.getElementById('frame');
+  frame.style.transform=`translate(${viewPanX}px,${viewPanY}px) scale(${viewZoom})`;
+  setText('zoomValue',`${Math.round(viewZoom*100)}%`);
+}
+function setZoom(next){
+  viewZoom=Math.max(.5,Math.min(4,Number(next)||1));
+  applyView();
+}
+function resetView(){
+  viewZoom=1; viewPanX=0; viewPanY=0; applyView();
+}
+function panView(dx,dy){
+  viewPanX+=dx; viewPanY+=dy; applyView();
+}
+function setupViewControls(){
+  const frame=document.getElementById('frame');
+  document.getElementById('zoomOut').onclick=()=>setZoom(viewZoom-.25);
+  document.getElementById('zoomIn').onclick=()=>setZoom(viewZoom+.25);
+  document.getElementById('viewFit').onclick=resetView;
+  document.getElementById('panCenter').onclick=()=>{viewPanX=0;viewPanY=0;applyView();};
+  document.getElementById('panUp').onclick=()=>panView(0,60);
+  document.getElementById('panDown').onclick=()=>panView(0,-60);
+  document.getElementById('panLeft').onclick=()=>panView(60,0);
+  document.getElementById('panRight').onclick=()=>panView(-60,0);
+  frame.addEventListener('pointerdown',e=>{
+    if(e.button!==0){return;}
+    panPointer=e.pointerId; panStartX=e.clientX; panStartY=e.clientY;
+    panOriginX=viewPanX; panOriginY=viewPanY;
+    frame.setPointerCapture(e.pointerId); frame.classList.add('panning');
+    e.preventDefault();
+  });
+  frame.addEventListener('pointermove',e=>{
+    if(panPointer!==e.pointerId){return;}
+    viewPanX=panOriginX+(e.clientX-panStartX);
+    viewPanY=panOriginY+(e.clientY-panStartY);
+    applyView();
+  });
+  const stopPan=e=>{
+    if(panPointer!==e.pointerId){return;}
+    panPointer=null; frame.classList.remove('panning');
+  };
+  frame.addEventListener('pointerup',stopPan);
+  frame.addEventListener('pointercancel',stopPan);
+  frame.addEventListener('dblclick',resetView);
+  frame.addEventListener('wheel',e=>{
+    if(!e.ctrlKey){return;}
+    e.preventDefault();
+    setZoom(viewZoom+(e.deltaY<0?.25:-.25));
+  },{passive:false});
 }
 function showOnly(id){
   document.querySelectorAll('.main > .view').forEach(v=>v.classList.toggle('on',v.id===id));
@@ -1246,7 +1354,9 @@ function setupLocalNames(p){
 function drawBoxes(p){
   const ov=document.getElementById('ov'); ov.innerHTML='';
   if(!p||!p.boxes||!p.boxes.length){return;}
-  const img=document.getElementById('photo'), w=img.naturalWidth||1, h=img.naturalHeight||1;
+  const img=document.getElementById('photo');
+  const w=Number(p.image_width)||img.naturalWidth||1;
+  const h=Number(p.image_height)||img.naturalHeight||1;
   const ow=ov.clientWidth||img.clientWidth||1, oh=ov.clientHeight||img.clientHeight||1;
   const minW=Math.max(0.35, (10*100)/ow), minH=Math.max(0.35, (10*100)/oh);
   p.boxes.forEach((b,i)=>{
@@ -1270,16 +1380,24 @@ function drawCurrent(){
   drawBoxes(current);
 }
 function render(p){
+  const renderSeq=++imageRenderSeq;
   current=p;
   dirty=false;
+  resetView();
   showDetail();
   setText('title', `Photo #${p.id}`);
   setText('sub', `${p.boxes.length} face box(es)`);
   setText('stat', `${pos+1} / ${count}`);
   const img=document.getElementById('photo');
-  img.onload=()=>drawCurrent(); img.src=p.image;
-  if(img.complete && (img.naturalWidth||0)>0){ requestAnimationFrame(drawCurrent); }
-  else { setTimeout(drawCurrent, 80); }
+  document.getElementById('ov').innerHTML='';
+  img.onload=()=>{
+    if(renderSeq!==imageRenderSeq){return;}
+    drawCurrent();
+  };
+  img.onerror=()=>{
+    if(renderSeq===imageRenderSeq){setText('sub','Could not decode this image.');}
+  };
+  img.src=p.image;
   const ppl=document.getElementById('people');
   ppl.innerHTML=(p.people||[]).map(n=>`<span class="pchip">${esc(n)}</span>`).join('');
   (p.people||[]).forEach(addName);
@@ -1375,6 +1493,7 @@ async function init(){
   document.getElementById('boxWidth').addEventListener('input',applyBoxVisibility);
   document.getElementById('boxOpacity').addEventListener('input',applyBoxVisibility);
   applyBoxVisibility();
+  setupViewControls();
   const m=await j('/api/meta');
   allGallery = (m.gallery||[]);
   (m.people||[]).forEach(addName);
@@ -2494,11 +2613,37 @@ def selftest():
         and _label_item_status(2, {}, known_hints, 0) == "untagged",
         "label queue: unresolved faces remain visible and disabled auto-accept resolves nothing",
     )
+    check_that(
+        clamp_box_xywh([95, 75, 20, 20], 100, 80) == [95, 75, 5, 5]
+        and clamp_box_xywh([110, 90, 20, 20], 100, 80) is None,
+        "label queue: boxes are clipped to their detector image geometry",
+    )
 
     # box packing: css (top,right,bottom,left) -> [x, y, w, h] for the server.
     top, right, bottom, left = 20, 90, 60, 30
     box = [int(left), int(top), int(right - left), int(bottom - top)]
     check_that(box == [30, 20, 60, 40], "box: css corners pack to [x, y, w, h]")
+
+    # Browsers honor EXIF orientation. Detection must use those same displayed
+    # pixels or rectangles from older phone photos are mirrored away from faces.
+    try:
+        from PIL import Image
+        oriented = Image.new("RGB", (6, 4), (255, 0, 0))
+        for x in range(3, 6):
+            for y in range(2, 4):
+                oriented.putpixel((x, y), (0, 0, 255))
+        exif = Image.Exif()
+        exif[274] = 3  # rotate 180 degrees for display
+        encoded = io.BytesIO()
+        oriented.save(encoded, format="JPEG", quality=100, subsampling=0, exif=exif)
+        displayed = display_rgb_array(encoded.getvalue())
+        check_that(
+            displayed.shape[:2] == (4, 6)
+            and int(displayed[0, 0, 2]) > int(displayed[0, 0, 0]),
+            "image orientation: detector pixels match browser EXIF rotation",
+        )
+    except ImportError:
+        check_that(False, "image orientation: Pillow is available")
 
     # database: schema, per-engine isolation, the MIN_REFERENCES floor, watermarks.
     prev = globals()["DB_PATH"]
@@ -2735,6 +2880,8 @@ def selftest():
                 "url": "https://example.invalid/photo.jpg",
                 "people": [],
                 "boxes": [[10, 10, 20, 20]],
+                "image_width": 100,
+                "image_height": 80,
                 "hints": [],
                 "prefill": {},
                 "status": "untagged",
@@ -2778,8 +2925,11 @@ def selftest():
                 and "Finish labeling" in page.text
                 and ".detail.on{display:grid}" in page.text
                 and 'id="boxWidth"' in page.text
-                and 'id="boxOpacity"' in page.text,
-                "label UI: detail keeps side controls and exposes box visibility settings",
+                and 'id="boxOpacity"' in page.text
+                and 'id="zoomIn"' in page.text
+                and 'id="panCenter"' in page.text
+                and "setupViewControls()" in page.text,
+                "label UI: side controls include box visibility, zoom, and pan",
             )
             cleared = requests.post(
                 base + "/api/save",
