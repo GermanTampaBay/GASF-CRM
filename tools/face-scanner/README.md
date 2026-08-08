@@ -4,10 +4,11 @@ The home half of the club's face-suggestion feature. It runs on **one private
 machine** — not the web host — polls the CRM over HTTPS for library photos,
 works out who is in them, and posts back a name, a box, and a confidence.
 
-**A suggestion is never a tag.** The server stores what this sends apart from
-the real people tags; it only ever surfaces as a chip a volunteer may click,
-and only that click writes a name. This script cannot tag anyone, read mail, or
-approve a photo. See the header of [`scan.py`](scan.py) and the server side in
+Face matches are sent with a confidence score. Below the administrator-set
+auto-accept threshold they remain suggestions stored apart from real people
+tags; at or above it, the server may apply the name automatically. The local
+script never writes WordPress taxonomy terms directly, reads mail, or approves
+a photo. See the header of [`scan.py`](scan.py) and the server side in
 [`../../includes/email-crm/photos-faces.php`](../../includes/email-crm/photos-faces.php)
 for the full design and why it is shaped this way.
 
@@ -47,7 +48,7 @@ If you want a full bootstrap on Windows, use:
 powershell -ExecutionPolicy Bypass -File install-ollama.ps1 `
   -ScannerKey "gasf_face_xxxxx" `
   -SiteUrl "https://germantampabay.com" `
-  -CaptionModel "llava:7b"
+  -CaptionModel "qwen3-vl:8b"
 ```
 
 That script installs Ollama (if missing), starts/verifies the local API, pulls
@@ -88,11 +89,11 @@ If you prefer not to remember CLI flags:
 python scan-gui.py
 ```
 
-- Tick options, click **Go**, and it runs `scan.py`.
+- Tick options, click **Start**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
 - In label mode, leave **After --label, run --learn + one scan pass** on for the streamlined one-shot workflow.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
-- `scan.py` path is hardcoded in the launcher so you can run the GUI from any folder.
+- The launcher finds `scan.py` beside itself, so the folder can move without editing code.
 
 Optional single-file EXE (Windows):
 
@@ -108,10 +109,38 @@ Then run `dist\scan-gui.exe`.
 If you run a local vision model in Ollama, the scanner can submit a short
 caption suggestion with each scanned photo.
 
-1. In `config.json`, set `"caption_model"` (for example `llava:7b`).  
+1. In `config.json`, set `"caption_model"` (`qwen3-vl:8b` is recommended for
+   the scanner machine's 16 GB GPU).
 2. Leave `caption_url` at `http://127.0.0.1:11434/api/generate` unless your
-   Ollama endpoint is elsewhere.
+   local Ollama installation uses another loopback address. Remote endpoints
+   are refused so club photos cannot be sent to an external model by mistake.
 3. Run `python scan.py --check` to confirm the model is configured.
+
+The captioner uses trusted catalogue metadata already attached to the photo:
+event, date taken, place, confirmed people, and groups. It keeps that context
+separate from visual evidence so the model may say *Nikolaustag at the
+German-American Society* when those tags are known, but may not invent a name,
+location, date, or activity.
+
+Caption generation is deliberately slower and more conservative than face
+matching:
+
+1. A structured first pass drafts a caption and lists visible evidence,
+   readable text, and uncertainties.
+2. A second pass checks the draft against the same image and trusted metadata,
+   removing unsupported claims.
+3. Low-temperature, bounded generation keeps the result factual and concise.
+
+Set `"caption_passes": 1` to disable verification, or leave the recommended
+default of `2`. `"caption_num_ctx": 8192` prevents image tokens from crowding
+out the prompt.
+
+Caption work has its own endpoint, completion key, and failure counter; a
+caption-only result cannot alter face boxes or suggestions. If Ollama is
+unavailable, face matching can still finish while the caption remains queued
+for a later run. Repeatedly invalid output is quarantined after three runs.
+Changing the caption model does not silently reprocess the whole archive;
+**Rescan everything** explicitly refreshes existing captions.
 
 When enabled, the CRM shows a **Use suggestion** button in photo editing.
 Applying it writes the caption with ` (AI Summary)` appended, so provenance is

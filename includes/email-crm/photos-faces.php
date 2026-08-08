@@ -504,6 +504,33 @@ function gasf_crm_caption_suggestion_for( $attachment_id ) {
 	);
 }
 
+/** Trusted catalogue context supplied to the local caption model. */
+function gasf_crm_caption_context( $attachment_id ) {
+	$id = (int) $attachment_id;
+	if ( ! $id ) { return array(); }
+	$taken_at = trim( (string) get_post_meta( $id, '_gasf_photo_taken_at', true ) );
+	if ( '' === $taken_at ) {
+		$taken_date = trim( (string) get_post_meta( $id, '_gasf_photo_taken', true ) );
+		$taken_time = function_exists( 'gasf_photo_taken_time' ) ? (string) gasf_photo_taken_time( $id ) : '';
+		$taken_at = trim( $taken_date . ' ' . $taken_time );
+	}
+	$names = function ( $taxonomy ) use ( $id ) {
+		$out = array();
+		foreach ( gasf_crm_photo_term_names( $id, $taxonomy ) as $name ) {
+			$name = trim( html_entity_decode( (string) $name, ENT_QUOTES ) );
+			if ( '' !== $name ) { $out[] = $name; }
+		}
+		return array_values( array_unique( $out ) );
+	};
+	return array(
+		'taken_at' => $taken_at,
+		'events'   => $names( 'gasf_photo_event' ),
+		'places'   => $names( 'gasf_photo_place' ),
+		'groups'   => $names( 'gasf_photo_group' ),
+		'people'   => $names( 'gasf_photo_person' ),
+	);
+}
+
 /** Compare-and-swap style lock around one photo's scanner write path. */
 function gasf_crm_faces_try_lock( $attachment_id, $kind, $ttl = 300 ) {
 	$id   = (int) $attachment_id;
@@ -558,6 +585,8 @@ function gasf_crm_faces_scan_digest( array $item ) {
 		'faces'   => $faces,
 		'boxes'   => $boxes,
 		'caption' => trim( sanitize_text_field( (string) ( $item['caption'] ?? '' ) ) ),
+		'faces_scanned' => ! array_key_exists( 'faces_scanned', $item ) || ! empty( $item['faces_scanned'] ),
+		'caption_key' => gasf_crm_faces_caption_key( (string) ( $item['caption_key'] ?? '' ) ),
 	) ) );
 }
 
@@ -672,6 +701,11 @@ add_action( 'rest_api_init', function () {
 			$limit = min( GASF_CRM_FACES_BATCH, max( 1, (int) $req->get_param( 'limit' ) ?: GASF_CRM_FACES_BATCH ) );
 			$after = gasf_crm_faces_queue_bound( (string) $req->get_param( 'after' ) );
 			$before = gasf_crm_faces_queue_bound( (string) $req->get_param( 'before' ) );
+			$caption_key = gasf_crm_faces_caption_key( (string) $req->get_param( 'caption_key' ) );
+			$exclude = array_slice( array_values( array_filter( array_map(
+				'intval',
+				explode( ',', (string) $req->get_param( 'exclude' ) )
+			) ) ), 0, 100 );
 			$date_query = array();
 			if ( '' !== $after ) {
 				$date_query[] = array(
@@ -696,12 +730,9 @@ add_action( 'rest_api_init', function () {
 				'no_found_rows'  => true,
 				'orderby'        => 'ID',
 				'order'          => 'DESC',
+				'post__not_in'   => $exclude,
 				'post_mime_type' => 'image',
-				'meta_query'     => array(
-					'relation' => 'AND',
-					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
-					array( 'key' => '_gasf_face_scanned', 'compare' => 'NOT EXISTS' ),
-				),
+				'meta_query'     => gasf_crm_faces_queue_meta_query( $caption_key ),
 				'date_query'     => $date_query,
 			) );
 
@@ -709,17 +740,30 @@ add_action( 'rest_api_init', function () {
 			foreach ( $ids as $id ) {
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+				$needs_faces = ! metadata_exists( 'post', $id, '_gasf_face_scanned' );
+				$needs_caption = '' !== $caption_key && (
+					$needs_faces
+					|| metadata_exists( 'post', $id, '_gasf_caption_refresh_pending' )
+					|| (
+						! metadata_exists( 'post', $id, '_gasf_caption_scan_key' )
+						&& ! metadata_exists( 'post', $id, '_gasf_caption_suggestion' )
+					)
+				);
 				$out[] = array(
-					'id'     => (int) $id,
-					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
-					'people' => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
-					'pipeline' => gasf_crm_faces_photo_state( $id ),
+					'id'            => (int) $id,
+					'url'           => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+					'people'        => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
+					'caption_context' => gasf_crm_caption_context( $id ),
+					'needs_faces'   => $needs_faces,
+					'needs_caption' => $needs_caption,
+					'pipeline'      => gasf_crm_faces_photo_state( $id ),
 				);
 			}
 
 			return array(
-				'photos'    => $out,
-				'remaining' => max( 0, gasf_crm_faces_unscanned_count( $after, $before ) - count( $out ) ),
+				'photos'           => $out,
+				'remaining'        => max( 0, gasf_crm_faces_unscanned_count( $after, $before, $caption_key ) - count( $out ) ),
+				'caption_endpoint' => true,
 			);
 		},
 	) );
@@ -768,6 +812,8 @@ add_action( 'rest_api_init', function () {
 			$auto_names  = 0;
 			$auto_labels = 0;
 			$uniq   = array();
+			$processed_ids = array();
+			$busy_ids = array();
 			foreach ( array_slice( $items, 0, GASF_CRM_FACES_BATCH ) as $item ) {
 				$pid = (int) ( $item['id'] ?? 0 );
 				if ( $pid > 0 ) { $uniq[ $pid ] = (array) $item; }
@@ -777,35 +823,41 @@ add_action( 'rest_api_init', function () {
 				if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				$lock = gasf_crm_faces_try_lock( $id, 'scan' );
-				if ( '' === $lock ) { $busy++; continue; }
+				if ( '' === $lock ) { $busy++; $busy_ids[] = $id; continue; }
 				try {
 					$digest = gasf_crm_faces_scan_digest( $item );
 					$prev   = (string) get_post_meta( $id, '_gasf_face_scan_digest', true );
 					if ( '' !== $digest && hash_equals( $prev, $digest ) ) {
 						$same++;
 						$seen++;
+						$processed_ids[] = $id;
 						continue;
 					}
-					$faces = (array) ( $item['faces'] ?? array() );
-					$found = (int) ( $item['found'] ?? 0 );
-					$accepted_names = 0;
-					$accepted_labels = 0;
-					$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels );
-					$stored += $kept;
-					$auto_names += (int) $accepted_names;
-					$auto_labels += (int) $accepted_labels;
-					update_post_meta( $id, '_gasf_face_detected_at', $found > 0 ? current_time( 'mysql', true ) : '' );
-					$boxes = array();
-					if ( array_key_exists( 'boxes', $item ) && is_array( $item['boxes'] ) ) {
-						$boxes = (array) $item['boxes'];
-					} else {
-						foreach ( $faces as $f ) {
-							if ( isset( $f['box'] ) ) { $boxes[] = array( 'box' => (array) $f['box'] ); }
+					$faces_scanned = ! array_key_exists( 'faces_scanned', $item ) || ! empty( $item['faces_scanned'] );
+					if ( $faces_scanned ) {
+						$faces = (array) ( $item['faces'] ?? array() );
+						$found = (int) ( $item['found'] ?? 0 );
+						$accepted_names = 0;
+						$accepted_labels = 0;
+						$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels );
+						$stored += $kept;
+						$auto_names += (int) $accepted_names;
+						$auto_labels += (int) $accepted_labels;
+						update_post_meta( $id, '_gasf_face_detected_at', $found > 0 ? current_time( 'mysql', true ) : '' );
+						$boxes = array();
+						if ( array_key_exists( 'boxes', $item ) && is_array( $item['boxes'] ) ) {
+							$boxes = (array) $item['boxes'];
+						} else {
+							foreach ( $faces as $f ) {
+								if ( isset( $f['box'] ) ) { $boxes[] = array( 'box' => (array) $f['box'] ); }
+							}
 						}
+						gasf_crm_face_boxes_store( $id, $boxes, $found );
+						if ( $kept > 0 ) { update_post_meta( $id, '_gasf_face_suggested_at', current_time( 'mysql', true ) ); }
+						else { delete_post_meta( $id, '_gasf_face_suggested_at' ); }
+						$engine = trim( sanitize_text_field( (string) ( $item['engine'] ?? '' ) ) );
+						if ( '' !== $engine ) { update_post_meta( $id, '_gasf_face_engine', $engine ); }
 					}
-					gasf_crm_face_boxes_store( $id, $boxes, $found );
-					if ( $kept > 0 ) { update_post_meta( $id, '_gasf_face_suggested_at', current_time( 'mysql', true ) ); }
-					else { delete_post_meta( $id, '_gasf_face_suggested_at' ); }
 					if ( array_key_exists( 'caption', $item ) && gasf_crm_caption_suggestion_store(
 						$id,
 						(string) ( $item['caption'] ?? '' ),
@@ -813,10 +865,14 @@ add_action( 'rest_api_init', function () {
 					) ) {
 						$caps++;
 					}
+					$caption_key = gasf_crm_faces_caption_key( (string) ( $item['caption_key'] ?? '' ) );
+					if ( '' !== $caption_key ) {
+						update_post_meta( $id, '_gasf_caption_scan_key', $caption_key );
+						update_post_meta( $id, '_gasf_caption_scanned_at', current_time( 'mysql', true ) );
+					}
 					update_post_meta( $id, '_gasf_face_scan_digest', $digest );
-					$engine = trim( sanitize_text_field( (string) ( $item['engine'] ?? '' ) ) );
-					if ( '' !== $engine ) { update_post_meta( $id, '_gasf_face_engine', $engine ); }
 					$seen++;
+					$processed_ids[] = $id;
 				} finally {
 					gasf_crm_faces_unlock( $id, 'scan', $lock );
 				}
@@ -840,6 +896,89 @@ add_action( 'rest_api_init', function () {
 				'auto_labels' => $auto_labels,
 				'unchanged'   => $same,
 				'busy'        => $busy,
+				'processed_ids' => array_values( array_unique( $processed_ids ) ),
+				'busy_ids'    => array_values( array_unique( $busy_ids ) ),
+			);
+		},
+	) );
+
+	/** Caption-only results use a separate route so they cannot alter face state. */
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/caption', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$in    = (array) $req->get_json_params();
+			$items = (array) ( $in['photos'] ?? array() );
+			if ( ! $items ) {
+				return new WP_Error( 'gasf_crm_bad', 'No caption results in that batch.', array( 'status' => 400 ) );
+			}
+			$seen = 0;
+			$stored = 0;
+			$busy = 0;
+			$same = 0;
+			$uniq = array();
+			$processed_ids = array();
+			$busy_ids = array();
+			foreach ( array_slice( $items, 0, GASF_CRM_FACES_BATCH ) as $item ) {
+				$id = (int) ( $item['id'] ?? 0 );
+				if ( $id > 0 ) { $uniq[ $id ] = (array) $item; }
+			}
+			foreach ( $uniq as $item ) {
+				$id = (int) ( $item['id'] ?? 0 );
+				$key = gasf_crm_faces_caption_key( (string) ( $item['caption_key'] ?? '' ) );
+				if ( ! $id || '' === $key || ! gasf_crm_photo_in_library( $id ) ) { continue; }
+				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
+				$lock = gasf_crm_faces_try_lock( $id, 'caption' );
+				if ( '' === $lock ) { $busy++; $busy_ids[] = $id; continue; }
+				try {
+					$digest = md5( wp_json_encode( array(
+						'id'      => $id,
+						'caption' => trim( sanitize_text_field( (string) ( $item['caption'] ?? '' ) ) ),
+						'model'   => trim( sanitize_text_field( (string) ( $item['caption_model'] ?? '' ) ) ),
+						'key'     => $key,
+					) ) );
+					$previous = (string) get_post_meta( $id, '_gasf_caption_scan_digest', true );
+					if ( '' !== $digest && hash_equals( $previous, $digest ) ) {
+						update_post_meta( $id, '_gasf_caption_scan_key', $key );
+						update_post_meta( $id, '_gasf_caption_scanned_at', current_time( 'mysql', true ) );
+						delete_post_meta( $id, '_gasf_caption_refresh_pending' );
+						$same++;
+						$seen++;
+						$processed_ids[] = $id;
+						continue;
+					}
+					if ( array_key_exists( 'caption', $item ) && gasf_crm_caption_suggestion_store(
+						$id,
+						(string) $item['caption'],
+						(string) ( $item['caption_model'] ?? '' )
+					) ) {
+						$stored++;
+					}
+					update_post_meta( $id, '_gasf_caption_scan_key', $key );
+					update_post_meta( $id, '_gasf_caption_scan_digest', $digest );
+					update_post_meta( $id, '_gasf_caption_scanned_at', current_time( 'mysql', true ) );
+					delete_post_meta( $id, '_gasf_caption_refresh_pending' );
+					$seen++;
+					$processed_ids[] = $id;
+				} finally {
+					gasf_crm_faces_unlock( $id, 'caption', $lock );
+				}
+			}
+			gasf_crm_log( sprintf(
+				'CRM captions: scanner returned %d photo(s), %d suggestion(s) stored, %d unchanged, and %d busy',
+				$seen,
+				$stored,
+				$same,
+				$busy
+			) );
+			return array(
+				'ok'        => true,
+				'photos'    => $seen,
+				'captions'  => $stored,
+				'unchanged' => $same,
+				'busy'      => $busy,
+				'processed_ids' => array_values( array_unique( $processed_ids ) ),
+				'busy_ids'  => array_values( array_unique( $busy_ids ) ),
 			);
 		},
 	) );
@@ -1077,7 +1216,36 @@ function gasf_crm_faces_queue_bound( $raw ) {
 	return gmdate( 'Y-m-d H:i:s', $ts );
 }
 
-function gasf_crm_faces_unscanned_count( $after = '', $before = '' ) {
+function gasf_crm_faces_caption_key( $raw ) {
+	$key = strtolower( trim( (string) $raw ) );
+	return preg_match( '/^[a-f0-9]{16,64}$/', $key ) ? $key : '';
+}
+
+function gasf_crm_faces_queue_meta_query( $caption_key = '' ) {
+	$work = array(
+		'relation' => 'OR',
+		array( 'key' => '_gasf_face_scanned', 'compare' => 'NOT EXISTS' ),
+	);
+	$caption_key = gasf_crm_faces_caption_key( $caption_key );
+	if ( '' !== $caption_key ) {
+		$work[] = array(
+			'relation' => 'AND',
+			array( 'key' => '_gasf_caption_scan_key', 'compare' => 'NOT EXISTS' ),
+			array(
+				'relation' => 'OR',
+				array( 'key' => '_gasf_caption_suggestion', 'compare' => 'NOT EXISTS' ),
+				array( 'key' => '_gasf_caption_refresh_pending', 'compare' => 'EXISTS' ),
+			),
+		);
+	}
+	return array(
+		'relation' => 'AND',
+		array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
+		$work,
+	);
+}
+
+function gasf_crm_faces_unscanned_count( $after = '', $before = '', $caption_key = '' ) {
 	$after  = gasf_crm_faces_queue_bound( $after );
 	$before = gasf_crm_faces_queue_bound( $before );
 	$date_query = array();
@@ -1103,11 +1271,7 @@ function gasf_crm_faces_unscanned_count( $after = '', $before = '' ) {
 		'fields'         => 'ids',
 		'no_found_rows'  => true,
 		'post_mime_type' => 'image',
-		'meta_query'     => array(
-			'relation' => 'AND',
-			array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
-			array( 'key' => '_gasf_face_scanned', 'compare' => 'NOT EXISTS' ),
-		),
+		'meta_query'     => gasf_crm_faces_queue_meta_query( $caption_key ),
 		'date_query'     => $date_query,
 	) );
 	$left = 0;
@@ -1156,9 +1320,28 @@ function gasf_crm_faces_admin_handle( $act ) {
 	if ( 'faces_rescan' === $act ) {
 		global $wpdb;
 		$n = $wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
+		$caption_ids = get_posts( array(
+			'post_type'      => 'attachment',
+			'post_status'    => array( 'inherit', 'private' ),
+			'posts_per_page' => -1,
+			'fields'         => 'ids',
+			'no_found_rows'  => true,
+			'post_mime_type' => 'image',
+			'meta_query'     => array(
+				array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
+			),
+		) );
+		$caption_n = 0;
+		foreach ( $caption_ids as $id ) {
+			if ( get_post_meta( $id, '_gasf_photo_flyer', true ) || ! gasf_crm_photo_in_library( $id ) ) { continue; }
+			delete_post_meta( $id, '_gasf_caption_scan_key' );
+			update_post_meta( $id, '_gasf_caption_refresh_pending', 1 );
+			$caption_n++;
+		}
 		gasf_crm_log( sprintf( 'CRM faces: rescan requested by %s, %d scan stamp(s) cleared',
 			gasf_crm_display_name( get_current_user_id() ), (int) $n ) );
-		return '<div class="notice notice-success"><p>' . (int) $n . ' photo(s) queued for rescanning. Existing suggestions stay until the scanner replaces them.</p></div>';
+		return '<div class="notice notice-success"><p>' . (int) $n . ' photo(s) queued for face rescanning, and '
+			. (int) $caption_n . ' caption(s) queued for refresh. Existing suggestions stay until the scanner replaces them.</p></div>';
 	}
 
 	return '';

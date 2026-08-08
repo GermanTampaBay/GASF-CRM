@@ -4,7 +4,7 @@
     What it does:
       1) installs Ollama (via winget) if missing
       2) starts/verifies the local Ollama API
-      3) pulls a vision model (default: llava:7b)
+      3) pulls a vision model (default: qwen3-vl:8b)
       4) installs Python dependencies for scan.py
       5) writes/updates config.json for scanner + captions
       6) runs scan.py --check
@@ -13,7 +13,7 @@
       powershell -ExecutionPolicy Bypass -File install-ollama.ps1 `
         -ScannerKey "gasf_face_xxxxx" `
         -SiteUrl "https://germantampabay.com" `
-        -CaptionModel "llava:7b"
+        -CaptionModel "qwen3-vl:8b"
 
     NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1 as the
     legacy code page, and non-ASCII punctuation can break parsing.
@@ -21,9 +21,9 @@
 param(
     [string]$SiteUrl = "https://germantampabay.com",
     [string]$ScannerKey = "",
-    [string]$CaptionModel = "llava:7b",
+    [string]$CaptionModel = "qwen3-vl:8b",
     [string]$CaptionUrl = "http://127.0.0.1:11434/api/generate",
-    [int]$CaptionTimeout = 120
+    [int]$CaptionTimeout = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -122,9 +122,11 @@ function Update-Config(
     if (-not $cfg.ContainsKey("engine")) { $cfg["engine"] = "auto" }
     if (-not $cfg.ContainsKey("tolerance")) { $cfg["tolerance"] = $null }
     $cfg["caption_model"] = $Model
-    $cfg["caption_prompt"] = "Write one short, neutral description of this photo for a club archive. Describe visible people, activity, setting, and notable objects. Do not guess names or identities."
+    $cfg["caption_prompt"] = "Write a concise, factual archive description that prioritizes the event, activity, setting, and clearly visible details."
     $cfg["caption_url"] = $ApiUrl
     $cfg["caption_timeout"] = $TimeoutSec
+    $cfg["caption_passes"] = 2
+    $cfg["caption_num_ctx"] = 8192
 
     $json = $cfg | ConvertTo-Json -Depth 8
     Set-Content -Path $ConfigPath -Value $json -Encoding UTF8

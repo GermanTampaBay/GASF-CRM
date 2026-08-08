@@ -29,9 +29,11 @@ of it carries on exactly as before.
 
 WHAT A SUGGESTION IS
 --------------------
-A guess, shown to a volunteer as a chip they may click. The server stores it
-apart from the real tags and no code path turns one into a name by itself.
-This script cannot tag anybody. That is deliberate and it should stay true.
+A guess sent with its confidence and face rectangle. Below the server's
+administrator-set auto-accept threshold it stays separate from real tags and
+is shown as a chip a volunteer may click. At or above that threshold the server
+may accept it automatically. The local script never writes WordPress taxonomy
+terms directly, and the biometric vectors never leave this machine.
 
 TWO BACKENDS, NEVER MIXED
 -------------------------
@@ -69,6 +71,7 @@ It is shown once. If you lose it, issue a new one.
 import argparse
 import base64
 from collections import OrderedDict
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -233,7 +236,17 @@ def cfg_caption_prompt(cfg):
 
 
 def cfg_caption_url(cfg):
-    return os.environ.get("GASF_FACE_CAPTION_URL", cfg.get("caption_url", "http://127.0.0.1:11434/api/generate")).strip()
+    raw = os.environ.get(
+        "GASF_FACE_CAPTION_URL",
+        cfg.get("caption_url", "http://127.0.0.1:11434/api/generate"),
+    ).strip()
+    parts = urlsplit(raw)
+    if parts.scheme not in ("http", "https") or parts.hostname not in ("127.0.0.1", "localhost", "::1"):
+        sys.exit(
+            "caption_url must use a loopback Ollama endpoint "
+            "(127.0.0.1, localhost, or ::1); refusing to send photos elsewhere"
+        )
+    return raw
 
 
 def cfg_caption_timeout(cfg):
@@ -243,6 +256,26 @@ def cfg_caption_timeout(cfg):
     except (TypeError, ValueError):
         sys.exit(f"caption_timeout must be an integer number of seconds, got {raw!r}")
     return max(15, min(300, n))
+
+
+def cfg_caption_passes(cfg):
+    raw = os.environ.get("GASF_FACE_CAPTION_PASSES", cfg.get("caption_passes", "2"))
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"caption_passes must be 1 or 2, got {raw!r}")
+    if n not in (1, 2):
+        sys.exit(f"caption_passes must be 1 or 2, got {raw!r}")
+    return n
+
+
+def cfg_caption_num_ctx(cfg):
+    raw = os.environ.get("GASF_FACE_CAPTION_NUM_CTX", cfg.get("caption_num_ctx", "8192"))
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        sys.exit(f"caption_num_ctx must be an integer, got {raw!r}")
+    return max(4096, min(32768, n))
 
 
 def parse_ymd(raw, flag_name):
@@ -472,26 +505,172 @@ def build_backend(pref="auto"):
             raise first
 
 
-def local_caption(image_bytes, cfg):
-    """Ask a local vision model for a short caption, or return ("", "")."""
+CAPTION_PIPELINE_VERSION = 2
+CAPTION_SYSTEM = (
+    "You write factual archival descriptions for the German-American Society of Tampa Bay. "
+    "Treat the supplied catalogue context as trusted metadata, but treat every other claim as "
+    "valid only when it is clearly visible in the image. Never infer an unknown person's name, "
+    "relationship, age, ethnicity, nationality, intent, or private information. Do not invent "
+    "an event, location, date, activity, object, or readable text. Prefer omission to guessing."
+)
+CAPTION_DRAFT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "caption": {"type": "string"},
+        "visible_details": {"type": "array", "items": {"type": "string"}},
+        "visible_text": {"type": "array", "items": {"type": "string"}},
+        "uncertainties": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["caption", "visible_details", "visible_text", "uncertainties"],
+}
+CAPTION_FINAL_SCHEMA = {
+    "type": "object",
+    "properties": {"caption": {"type": "string"}},
+    "required": ["caption"],
+}
+
+
+def caption_context(raw):
+    """Keep only bounded, trusted catalogue fields in a stable prompt shape."""
+    raw = raw if isinstance(raw, dict) else {}
+    out = {}
+    taken = " ".join(str(raw.get("taken_at") or "").split())[:40]
+    if taken:
+        out["date_taken"] = taken
+    for source, target in (
+        ("events", "events"),
+        ("places", "places"),
+        ("groups", "groups"),
+        ("people", "confirmed_people"),
+    ):
+        values = []
+        for value in raw.get(source, []) if isinstance(raw.get(source), list) else []:
+            clean = " ".join(str(value or "").split())[:120]
+            if clean and clean not in values:
+                values.append(clean)
+        if values:
+            out[target] = values[:20]
+    return out
+
+
+def caption_scan_key(cfg):
+    model = cfg_caption_model(cfg)
+    if not model:
+        return ""
+    spec = {
+        "pipeline": CAPTION_PIPELINE_VERSION,
+        "model": model,
+        "prompt": cfg_caption_prompt(cfg),
+        "passes": cfg_caption_passes(cfg),
+        "num_ctx": cfg_caption_num_ctx(cfg),
+        "temperature": 0.2,
+        "top_p": 0.8,
+        "top_k": 20,
+        "num_predict": 220,
+    }
+    raw = json.dumps(spec, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _ollama_caption_call(image_b64, cfg, prompt, schema, temperature):
+    payload = {
+        "model": cfg_caption_model(cfg),
+        "system": CAPTION_SYSTEM,
+        "prompt": prompt,
+        "stream": False,
+        "think": False,
+        "format": schema,
+        "images": [image_b64],
+        "keep_alive": "10m",
+        "options": {
+            "temperature": float(temperature),
+            "top_p": 0.8,
+            "top_k": 20,
+            "seed": 42,
+            "num_ctx": cfg_caption_num_ctx(cfg),
+            "num_predict": 220,
+        },
+    }
+    r = requests.post(cfg_caption_url(cfg), json=payload, timeout=cfg_caption_timeout(cfg))
+    r.raise_for_status()
+    out = r.json()
+    raw = (out.get("response") or "").strip()
+    if not raw:
+        # Qwen3-VL's Ollama thinking parser may classify a schema-constrained
+        # JSON object as "thinking". Accept it only if the whole field is valid
+        # JSON; never turn free-form reasoning into archive text.
+        candidate = (out.get("thinking") or "").strip()
+        if candidate:
+            try:
+                structured = json.loads(candidate)
+                if isinstance(structured, dict):
+                    raw = candidate
+            except json.JSONDecodeError:
+                pass
+    if not raw:
+        raise ValueError(
+            "Ollama returned no caption text "
+            f"(done_reason={out.get('done_reason')!r}, "
+            f"thinking_chars={len(out.get('thinking') or '')})"
+        )
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise ValueError("Ollama caption response was not a JSON object")
+    return parsed
+
+
+def _clean_caption(raw):
+    text = " ".join(str(raw or "").split()).strip().strip('"')
+    if len(text) < 8:
+        raise ValueError("Ollama returned an empty or unusable caption")
+    if len(text) > 420:
+        text = text[:420].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    return text
+
+
+def local_caption(image_bytes, cfg, metadata=None):
+    """Draft and optionally verify a caption against the image and trusted metadata."""
     model = cfg_caption_model(cfg)
     if not model:
         return "", ""
 
-    prompt = cfg_caption_prompt(cfg)
-    timeout = cfg_caption_timeout(cfg)
-    url = cfg_caption_url(cfg)
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "images": [base64.b64encode(image_bytes).decode("ascii")],
-    }
-    r = requests.post(url, json=payload, timeout=timeout)
-    r.raise_for_status()
-    out = r.json()
-    text = " ".join((out.get("response") or "").split()).strip()
-    return text, f"ollama:{model}"
+    context = caption_context(metadata)
+    context_json = json.dumps(context, ensure_ascii=False, sort_keys=True)
+    focus = cfg_caption_prompt(cfg)
+    draft_prompt = (
+        f"{focus}\n\n"
+        "Trusted catalogue context (may be empty):\n"
+        f"{context_json}\n\n"
+        "Write a useful archive caption of one or two sentences, ideally 20-55 words. "
+        "Use the trusted event, place, and date when supplied. Confirmed people may be named "
+        "collectively, but do not assign a specific action or position to a named person unless "
+        "that association is explicitly supported by the context. Describe the main activity, "
+        "setting, clothing, decorations, and notable objects only when clearly visible. Copy "
+        "visible signage only when legible. Return the requested JSON evidence fields as well."
+    )
+    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    draft = _ollama_caption_call(image_b64, cfg, draft_prompt, CAPTION_DRAFT_SCHEMA, 0.2)
+    caption = _clean_caption(draft.get("caption"))
+
+    if cfg_caption_passes(cfg) >= 2:
+        verify_prompt = (
+            "Verify this draft against the same image and trusted catalogue context. Remove or "
+            "rewrite every detail that is not directly visible or explicitly supplied by the "
+            "trusted context. Keep useful event, place, and date context. Do not add new facts. "
+            "Return only a polished one- or two-sentence caption in the requested JSON shape.\n\n"
+            f"Trusted context:\n{context_json}\n\n"
+            f"Draft analysis:\n{json.dumps(draft, ensure_ascii=False, sort_keys=True)}"
+        )
+        verified = _ollama_caption_call(
+            image_b64,
+            cfg,
+            verify_prompt,
+            CAPTION_FINAL_SCHEMA,
+            0.1,
+        )
+        caption = _clean_caption(verified.get("caption"))
+
+    return caption, f"ollama:{model};pipeline={CAPTION_PIPELINE_VERSION};passes={cfg_caption_passes(cfg)}"
 
 
 # --------------------------------------------------------------------------- store
@@ -1690,8 +1869,14 @@ def learn(api, conn, backend, verbose=True):
 
 def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", uploaded_before=""):
     references = load_references(conn, backend.name)
+    caption_key = caption_scan_key(cfg)
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
+        if caption_key:
+            print(
+                f"caption pipeline: {cfg_caption_model(cfg)}, "
+                f"{cfg_caption_passes(cfg)} pass(es), key {caption_key[:8]}"
+            )
         if uploaded_after or uploaded_before:
             print(
                 "scan window: "
@@ -1700,6 +1885,8 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", up
 
     total_seen = 0
     total_kept = 0
+    total_captions = 0
+    deferred_ids = set()
 
     while True:
         qp = {}
@@ -1707,17 +1894,29 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", up
             qp["after"] = uploaded_after
         if uploaded_before:
             qp["before"] = uploaded_before
+        if caption_key:
+            qp["caption_key"] = caption_key
+        if deferred_ids:
+            qp["exclude"] = ",".join(str(n) for n in sorted(deferred_ids))
         data = api.get("/queue", **qp)
+        caption_endpoint = bool(data.get("caption_endpoint"))
         photos = data.get("photos", [])
         if not photos:
+            remaining = int(data.get("remaining", 0))
+            if verbose and deferred_ids and remaining:
+                print(f"{remaining} photo(s) remain pending after temporary failures")
             if verbose and total_seen == 0:
                 print("nothing waiting")
             if verbose and total_seen > 0:
-                print(f"sent {total_seen} photo(s), {total_kept} suggestion(s) kept")
+                print(
+                    f"sent {total_seen} photo(s), {total_kept} face suggestion(s) kept, "
+                    f"{total_captions} caption suggestion(s) stored"
+                )
                 print(f"{data.get('remaining', 0)} still waiting")
             return total_seen
 
-        results = []
+        face_results = []
+        caption_results = []
         batch_now = 0
         batch_total = len(photos)
         beat = _HeartbeatTicker(
@@ -1733,13 +1932,15 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", up
             for idx, p in enumerate(photos, start=1):
                 batch_now = idx
                 photo_id = int(p["id"])
+                needs_faces = bool(p.get("needs_faces", True)) if caption_endpoint else True
+                needs_caption = bool(caption_key) and bool(p.get("needs_caption", True))
                 found = None
                 image_bytes = None
                 err = None
                 for attempt in range(MAX_SCAN_RETRIES):
                     try:
                         image_bytes = api.image(p["url"])
-                        found = backend.embed(image_bytes)
+                        found = backend.embed(image_bytes) if needs_faces else []
                         err = None
                         break
                     except Exception as e:
@@ -1752,66 +1953,156 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", up
                         time.sleep(wait)
 
                 if err is not None or found is None:
-                    if _is_deterministic_error(err):
+                    if needs_faces and _is_deterministic_error(err):
                         n = _bump_failure(conn, backend.name, photo_id)
                         if verbose:
                             print(f"  #{photo_id}: deterministic failure ({n}/{QUARANTINE_FAILS}) — {err}")
                         if n >= QUARANTINE_FAILS:
-                            results.append({"id": photo_id, "found": 0, "faces": []})
+                            face_results.append({"id": photo_id, "found": 0, "faces": []})
                             _clear_failure(conn, backend.name, photo_id)
                             if verbose:
                                 print(f"  #{photo_id}: quarantined after repeated deterministic failures")
+                    elif needs_caption and _is_deterministic_error(err):
+                        n = _bump_caption_failure(conn, caption_key, photo_id)
+                        if n >= QUARANTINE_FAILS:
+                            caption_results.append({
+                                "id": photo_id,
+                                "caption_key": caption_key,
+                                "caption_model": f"ollama:{cfg_caption_model(cfg)}",
+                            })
+                            _clear_caption_failure(conn, caption_key, photo_id)
+                            if verbose:
+                                print(f"  #{photo_id}: caption quarantined after repeated deterministic failures")
+                        else:
+                            deferred_ids.add(photo_id)
+                            if verbose:
+                                print(f"  #{photo_id}: deterministic caption failure ({n}/{QUARANTINE_FAILS}) — {err}")
                     else:
+                        deferred_ids.add(photo_id)
                         if verbose:
                             print(f"  #{photo_id}: temporary failure left in queue — {err}")
                     continue
 
                 _clear_failure(conn, backend.name, photo_id)
 
-                already = {n.strip().lower() for n in p.get("people", [])}
+                face_item = {"id": photo_id, "faces_scanned": needs_faces}
                 faces = []
-                boxes = []
-                for (top, right, bottom, left), vector in found:
-                    box = [int(left), int(top), int(right - left), int(bottom - top)]
-                    boxes.append({"box": box})
-                    name, conf = identify(vector, references, backend, tolerance)
-                    if not name or name.lower() in already:
-                        continue
-                    faces.append(
-                        {
-                            "name": name,
-                            "confidence": conf,
-                            "box": box,
-                        }
-                    )
+                if needs_faces:
+                    already = {n.strip().lower() for n in p.get("people", [])}
+                    boxes = []
+                    for (top, right, bottom, left), vector in found:
+                        box = [int(left), int(top), int(right - left), int(bottom - top)]
+                        boxes.append({"box": box})
+                        name, conf = identify(vector, references, backend, tolerance)
+                        if not name or name.lower() in already:
+                            continue
+                        faces.append(
+                            {
+                                "name": name,
+                                "confidence": conf,
+                                "box": box,
+                            }
+                        )
+                    face_item.update({
+                        "found": len(found),
+                        "faces": faces,
+                        "boxes": boxes,
+                        "engine": backend.name,
+                    })
 
-                item = {"id": photo_id, "found": len(found), "faces": faces, "boxes": boxes}
-                item["engine"] = backend.name
-                try:
-                    if image_bytes is not None:
-                        cap, model = local_caption(image_bytes, cfg)
+                caption_done = False
+                caption_item = None
+                if needs_caption and image_bytes is not None:
+                    try:
+                        cap, model = local_caption(
+                            image_bytes,
+                            cfg,
+                            p.get("caption_context"),
+                        )
                         if cap:
-                            item["caption"] = cap
-                            item["caption_model"] = model
-                except Exception as e:
-                    if verbose:
-                        print(f"  #{photo_id}: caption skipped — {e}")
+                            caption_item = {
+                                "id": photo_id,
+                                "caption": cap,
+                                "caption_model": model,
+                                "caption_key": caption_key,
+                            }
+                            _clear_caption_failure(conn, caption_key, photo_id)
+                            caption_done = True
+                    except Exception as e:
+                        deterministic = _is_deterministic_error(e) or isinstance(e, (ValueError, json.JSONDecodeError))
+                        if deterministic:
+                            n = _bump_caption_failure(conn, caption_key, photo_id)
+                            if n >= QUARANTINE_FAILS:
+                                caption_item = {
+                                    "id": photo_id,
+                                    "caption_key": caption_key,
+                                    "caption_model": f"ollama:{cfg_caption_model(cfg)}",
+                                }
+                                _clear_caption_failure(conn, caption_key, photo_id)
+                                caption_done = True
+                                if verbose:
+                                    print(f"  #{photo_id}: caption quarantined after {n} deterministic failures")
+                            else:
+                                deferred_ids.add(photo_id)
+                                if verbose:
+                                    print(f"  #{photo_id}: deterministic caption failure ({n}/{QUARANTINE_FAILS}) — {e}")
+                        else:
+                            deferred_ids.add(photo_id)
+                            if verbose:
+                                print(f"  #{photo_id}: caption left pending — {e}")
 
-                results.append(item)
+                if not needs_faces and not caption_done:
+                    continue
+
+                if needs_faces:
+                    if caption_item is not None and not caption_endpoint:
+                        face_item.update(caption_item)
+                    face_results.append(face_item)
+                if caption_item is not None and caption_endpoint:
+                    caption_results.append(caption_item)
                 if verbose:
-                    names = ", ".join(f["name"] for f in faces) or "no one recognised"
-                    print(f"  #{photo_id}: {len(found)} face(s) — {names}")
+                    parts = []
+                    if needs_faces:
+                        names = ", ".join(f["name"] for f in faces) or "no one recognised"
+                        parts.append(f"{len(found)} face(s) — {names}")
+                    if caption_done:
+                        parts.append("caption drafted and verified")
+                    print(f"  #{photo_id}: " + "; ".join(parts))
         finally:
             beat.stop()
 
-        if not results:
+        if not face_results and not caption_results:
             if verbose:
                 print("no scan results were safe to commit; leaving this batch in queue for retry")
             return total_seen
 
-        out = api.post("/suggest", {"photos": results})
-        total_seen += int(out.get("photos", 0))
-        total_kept += int(out.get("suggestions", 0))
+        processed = set()
+        fallback_seen = 0
+        if face_results:
+            out = api.post("/suggest", {"photos": face_results})
+            acknowledged = out.get("processed_ids")
+            if isinstance(acknowledged, list):
+                processed.update(int(photo_id) for photo_id in acknowledged)
+            else:
+                fallback_seen += int(out.get("photos", 0))
+            deferred_ids.update(int(photo_id) for photo_id in (out.get("busy_ids") or []))
+            total_kept += int(out.get("suggestions", 0))
+            if not caption_endpoint:
+                total_captions += int(out.get("captions", 0))
+        if caption_results:
+            out = api.post("/caption", {"photos": caption_results})
+            acknowledged = out.get("processed_ids")
+            if isinstance(acknowledged, list):
+                processed.update(int(photo_id) for photo_id in acknowledged)
+            else:
+                fallback_seen += int(out.get("photos", 0))
+            deferred_ids.update(int(photo_id) for photo_id in (out.get("busy_ids") or []))
+            total_captions += int(out.get("captions", 0))
+        total_seen += len(processed) + fallback_seen
+        if len(deferred_ids) >= 100:
+            if verbose:
+                print("100 temporary failures deferred; stopping this pass")
+            return total_seen
 
 
 def _fail_key(engine, photo_id):
@@ -1827,6 +2118,25 @@ def _bump_failure(conn, engine, photo_id):
 
 def _clear_failure(conn, engine, photo_id):
     conn.execute("DELETE FROM state WHERE k = ?", (_fail_key(engine, photo_id),))
+    conn.commit()
+
+
+def _caption_fail_key(caption_key, photo_id):
+    return f"caption_fail:{caption_key}:{int(photo_id)}"
+
+
+def _bump_caption_failure(conn, caption_key, photo_id):
+    key = _caption_fail_key(caption_key, photo_id)
+    count = int(state_get(conn, key, "0") or 0) + 1
+    state_set(conn, key, count)
+    return count
+
+
+def _clear_caption_failure(conn, caption_key, photo_id):
+    conn.execute(
+        "DELETE FROM state WHERE k = ?",
+        (_caption_fail_key(caption_key, photo_id),),
+    )
     conn.commit()
 
 
@@ -1882,9 +2192,13 @@ def status(api, conn, cfg):
 
     if api is not None:
         try:
-            print(f"\nwaiting to be scanned: {api.get('/queue', limit=1).get('remaining', 0)}")
+            queue_args = {"limit": 1}
+            key = caption_scan_key(cfg)
+            if key:
+                queue_args["caption_key"] = key
+            print(f"\nwaiting for face/caption work: {api.get('/queue', **queue_args).get('remaining', 0)}")
         except Exception as e:
-            print(f"\nwaiting to be scanned: (could not ask the server: {e})")
+            print(f"\nwaiting for face/caption work: (could not ask the server: {e})")
         try:
             m = api.get("/metrics", sample=25)
             states = m.get("states", {}) if isinstance(m, dict) else {}
@@ -1931,7 +2245,31 @@ def check(cfg):
 
     cap_model = cfg_caption_model(cfg)
     if cap_model:
-        line(True, "caption model configured", cap_model)
+        try:
+            parts = urlsplit(cfg_caption_url(cfg))
+            tags_url = f"{parts.scheme}://{parts.netloc}/api/tags"
+            tags = requests.get(tags_url, timeout=10)
+            tags.raise_for_status()
+            installed = {
+                str(m.get("name") or "")
+                for m in (tags.json().get("models") or [])
+                if isinstance(m, dict)
+            }
+            present = cap_model in installed or (
+                ":" not in cap_model and f"{cap_model}:latest" in installed
+            )
+            line(
+                present,
+                "caption model available",
+                cap_model if present else f"{cap_model} is not installed in Ollama",
+            )
+            line(
+                True,
+                "caption pipeline",
+                f"{cfg_caption_passes(cfg)} pass(es), context {cfg_caption_num_ctx(cfg)}, key {caption_scan_key(cfg)[:8]}",
+            )
+        except (requests.RequestException, ValueError) as e:
+            line(False, "caption model available", f"Ollama is not reachable: {e}")
     else:
         line(True, "caption model configured", "off (set caption_model to enable local summaries)")
 
@@ -1949,7 +2287,7 @@ def check(cfg):
 
     url, key, _ = load_config(required=False)
     line(bool(url), "config: site URL", url or "missing (GASF_URL / config.json)")
-    line(bool(key), "config: scanner key", (key[:14] + "…") if key else "missing (GASF_FACE_KEY / config.json)")
+    line(bool(key), "config: scanner key", "configured" if key else "missing (GASF_FACE_KEY / config.json)")
 
     # Database is writable and this machine can round-trip through it.
     try:
@@ -1965,7 +2303,11 @@ def check(cfg):
     # Reach the server with the key — the one check only the real deployment can pass.
     if url and key:
         try:
-            waiting = Api(url, key).get("/queue", limit=1).get("remaining", 0)
+            queue_args = {"limit": 1}
+            cap_key = caption_scan_key(cfg)
+            if cap_key:
+                queue_args["caption_key"] = cap_key
+            waiting = Api(url, key).get("/queue", **queue_args).get("remaining", 0)
             line(True, "server accepts the key", f"{waiting} photo(s) waiting")
         except requests.HTTPError as e:
             code = e.response.status_code if e.response is not None else 0
@@ -2049,6 +2391,17 @@ def selftest():
         state_set(conn, state_key("engineA", "learned_to"), 103)
         check_that(state_get(conn, state_key("engineB", "learned_to"), "0") == "0",
                    "db: learn watermarks are per engine")
+        check_that(
+            _bump_caption_failure(conn, "pipeline-a", 301) == 1
+            and _bump_caption_failure(conn, "pipeline-a", 301) == 2
+            and _bump_caption_failure(conn, "pipeline-b", 301) == 1,
+            "db: caption failure counters are isolated by pipeline",
+        )
+        _clear_caption_failure(conn, "pipeline-a", 301)
+        check_that(
+            state_get(conn, _caption_fail_key("pipeline-a", 301), "0") == "0",
+            "db: successful captions clear their failure counter",
+        )
         conn.close()
 
         # migration: a pre-engine database is stamped as dlib, not reinterpreted.
@@ -2073,6 +2426,99 @@ def selftest():
     except SystemExit:
         resolved_bad = False
     check_that(not resolved_bad, "engine: an unknown engine name is refused")
+
+    # Caption pipeline: trusted context is bounded and configuration changes
+    # produce a new queue key without depending on face-scan watermarks.
+    cap_cfg = {
+        "caption_model": "vision:test",
+        "caption_prompt": "Describe the archive photo.",
+        "caption_passes": 2,
+        "caption_num_ctx": 8192,
+    }
+    clean_context = caption_context({
+        "taken_at": " 2026-12-06 14:30:00 ",
+        "events": ["Nikolaustag", "Nikolaustag"],
+        "places": ["German-American Society"],
+        "people": ["Anna"],
+        "ignored": ["not trusted"],
+    })
+    check_that(
+        clean_context == {
+            "date_taken": "2026-12-06 14:30:00",
+            "events": ["Nikolaustag"],
+            "places": ["German-American Society"],
+            "confirmed_people": ["Anna"],
+        },
+        "caption: trusted metadata is normalized and allow-listed",
+    )
+    cap_key = caption_scan_key(cap_cfg)
+    changed_key = caption_scan_key({**cap_cfg, "caption_passes": 1})
+    check_that(
+        len(cap_key) == 32 and cap_key != changed_key,
+        "caption: pipeline key changes with generation settings",
+    )
+    try:
+        cfg_caption_url({"caption_url": "https://example.com/api/generate"})
+        remote_caption_allowed = True
+    except SystemExit:
+        remote_caption_allowed = False
+    check_that(
+        not remote_caption_allowed,
+        "caption: remote model endpoints are refused",
+    )
+    original_post = requests.post
+    caption_calls = []
+    jsonlib = json
+
+    class StubCaptionResponse:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    def stub_caption_post(url, json=None, timeout=None):
+        caption_calls.append({"url": url, "json": json, "timeout": timeout})
+        if len(caption_calls) == 1:
+            response = {
+                "caption": "Guests gather beneath holiday decorations.",
+                "visible_details": ["holiday decorations", "group of guests"],
+                "visible_text": [],
+                "uncertainties": [],
+            }
+        else:
+            response = {
+                "caption": "Guests gather for Nikolaustag at the German-American Society."
+            }
+        return StubCaptionResponse({"response": jsonlib.dumps(response)})
+
+    try:
+        requests.post = stub_caption_post
+        cap, provenance = local_caption(
+            b"image",
+            cap_cfg,
+            {
+                "taken_at": "2026-12-06",
+                "events": ["Nikolaustag"],
+                "places": ["German-American Society"],
+            },
+        )
+        check_that(
+            cap == "Guests gather for Nikolaustag at the German-American Society."
+            and len(caption_calls) == 2,
+            "caption: two-pass draft and verification returns final text",
+        )
+        check_that(
+            "Nikolaustag" in caption_calls[0]["json"]["prompt"]
+            and caption_calls[0]["json"]["format"] == CAPTION_DRAFT_SCHEMA
+            and "pipeline=2" in provenance,
+            "caption: trusted metadata and structured schema reach Ollama",
+        )
+    finally:
+        requests.post = original_post
 
     # Local labeler lifecycle: token guard, asynchronous save, and clean finish.
     original_collect = globals()["_collect_label_items"]

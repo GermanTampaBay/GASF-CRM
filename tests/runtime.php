@@ -486,6 +486,95 @@ final class GASF_CRM_Selftest {
 		$this->ok( (bool) get_post_meta( $blank, '_gasf_face_scanned', true ), 'faces: a photo with no faces is still stamped' );
 		$this->ok( ! get_post_meta( $blank, '_gasf_face_suggestions', true ), 'faces: no suggestions stored for a blank photo' );
 
+		// Caption work has its own lifecycle and trusted catalogue context.
+		wp_set_object_terms( $blank, array( 'Selftest Caption Event' ), 'gasf_photo_event', false );
+		wp_set_object_terms( $blank, array( 'Selftest Caption Place' ), 'gasf_photo_place', false );
+		wp_set_object_terms( $blank, array( 'Selftest Caption Group' ), 'gasf_photo_group', false );
+		update_post_meta( $blank, '_gasf_photo_taken_at', '2026-12-06 14:30:00' );
+		$context = gasf_crm_caption_context( $blank );
+		$this->ok(
+			'2026-12-06 14:30:00' === ( $context['taken_at'] ?? '' )
+			&& in_array( 'Selftest Caption Event', (array) ( $context['events'] ?? array() ), true )
+			&& in_array( 'Selftest Caption Place', (array) ( $context['places'] ?? array() ), true )
+			&& in_array( 'Selftest Caption Group', (array) ( $context['groups'] ?? array() ), true ),
+			'captions: scanner context includes trusted date, event, place, and group metadata'
+		);
+		$caption_key = str_repeat( 'a', 32 );
+		$caption_queue = $this->rest_get( '/gasf/v1/crm/photos/faces/queue', array(
+			'limit'       => 25,
+			'caption_key' => $caption_key,
+		) );
+		$queued_caption = array();
+		foreach ( (array) ( $caption_queue['photos'] ?? array() ) as $photo ) {
+			if ( $blank === (int) ( $photo['id'] ?? 0 ) ) { $queued_caption = (array) $photo; break; }
+		}
+		$this->ok(
+			! empty( $queued_caption )
+			&& empty( $queued_caption['needs_faces'] )
+			&& ! empty( $queued_caption['needs_caption'] )
+			&& 'Selftest Caption Event' === (string) ( $queued_caption['caption_context']['events'][0] ?? '' ),
+			'captions: completed face work can queue independently with trusted context'
+		);
+		$face_sentinel = array(
+			array( 'name' => 'Preserve Me', 'box' => array( 1, 2, 30, 40 ), 'confidence' => 0.9 ),
+		);
+		update_post_meta( $blank, '_gasf_face_count', 7 );
+		update_post_meta( $blank, '_gasf_face_suggestions', $face_sentinel );
+		$caption_result = $this->rest_post( '/gasf/v1/crm/photos/faces/caption', array(
+			'photos' => array(
+				array(
+					'id'            => $blank,
+					'caption'       => 'Guests gather for the selftest event.',
+					'caption_model' => 'ollama:selftest',
+					'caption_key'   => $caption_key,
+				),
+			),
+		) );
+		$this->ok( 1 === (int) ( $caption_result['captions'] ?? 0 ),
+			'captions: caption-only work is accepted without a face pass' );
+		$this->ok(
+			7 === (int) get_post_meta( $blank, '_gasf_face_count', true )
+			&& $face_sentinel === get_post_meta( $blank, '_gasf_face_suggestions', true ),
+			'captions: caption-only work cannot overwrite face results'
+		);
+		$this->ok( $caption_key === get_post_meta( $blank, '_gasf_caption_scan_key', true ),
+			'captions: completion uses a caption-specific pipeline key' );
+		delete_post_meta( $blank, '_gasf_caption_scan_key' );
+		update_post_meta( $blank, '_gasf_caption_refresh_pending', 1 );
+		$refresh_queue = $this->rest_get( '/gasf/v1/crm/photos/faces/queue', array(
+			'limit'       => 25,
+			'caption_key' => $caption_key,
+		) );
+		$refresh_item = array();
+		foreach ( (array) ( $refresh_queue['photos'] ?? array() ) as $photo ) {
+			if ( $blank === (int) ( $photo['id'] ?? 0 ) ) { $refresh_item = (array) $photo; break; }
+		}
+		$this->ok( ! empty( $refresh_item['needs_caption'] ),
+			'captions: explicit refresh stays queued even while the old suggestion remains visible' );
+		$this->rest_post( '/gasf/v1/crm/photos/faces/caption', array(
+			'photos' => array(
+				array(
+					'id'            => $blank,
+					'caption'       => 'Guests gather for the selftest event.',
+					'caption_model' => 'ollama:selftest',
+					'caption_key'   => $caption_key,
+				),
+			),
+		) );
+		$this->ok(
+			$caption_key === get_post_meta( $blank, '_gasf_caption_scan_key', true )
+			&& ! get_post_meta( $blank, '_gasf_caption_refresh_pending', true ),
+			'captions: an unchanged refresh still verifies persistence and clears pending state'
+		);
+		foreach ( array(
+			'gasf_photo_event' => 'Selftest Caption Event',
+			'gasf_photo_place' => 'Selftest Caption Place',
+			'gasf_photo_group' => 'Selftest Caption Group',
+		) as $taxonomy => $name ) {
+			$term = get_term_by( 'name', $name, $taxonomy );
+			if ( $term ) { wp_delete_term( (int) $term->term_id, $taxonomy ); }
+		}
+
 		// Explicit labels are idempotent and create one canonical person term.
 		$lab = $this->library_photo( 'st-face-label' );
 		update_post_meta( $lab, '_gasf_face_boxes', array(

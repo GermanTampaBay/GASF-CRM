@@ -2,11 +2,13 @@
   "url": "https://germantampabay.com",
   "key": "gasf_face_paste_the_key_from_wp_admin_here",
 
-  "_comment": "engine, tolerance, and caption_* are optional. Delete optional lines to accept defaults.",
+  "_comment": "engine, tolerance, and caption_* are optional. qwen3-vl:8b is recommended for a 16 GB GPU.",
   "engine": "auto",
   "tolerance": null,
   "caption_model": "",
-  "caption_prompt": "Write one short, neutral description of this photo for a club archive. Describe visible people, activity, setting, and notable objects. Do not guess names or identities.",
+  "caption_prompt": "Write a concise, factual archive description that prioritizes the event, activity, setting, and clearly visible details.",
   "caption_url": "http://127.0.0.1:11434/api/generate",
-  "caption_timeout": 120
+  "caption_timeout": 300,
+  "caption_passes": 2,
+  "caption_num_ctx": 8192
 }
