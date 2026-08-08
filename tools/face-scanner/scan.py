@@ -777,13 +777,43 @@ def _migrate(conn):
     )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS unknown_dismissals (
+               id INTEGER PRIMARY KEY,
                engine TEXT NOT NULL,
                photo_id INTEGER NOT NULL,
-               face_key TEXT NOT NULL,
+               box_x INTEGER NOT NULL,
+               box_y INTEGER NOT NULL,
+               box_w INTEGER NOT NULL,
+               box_h INTEGER NOT NULL,
+               vector BLOB NOT NULL,
                dismissed_at INTEGER NOT NULL,
-               PRIMARY KEY(engine, photo_id, face_key)
+               UNIQUE(engine, photo_id, box_x, box_y, box_w, box_h)
            )"""
     )
+    dismissal_cols = {
+        row[1] for row in conn.execute("PRAGMA table_info(unknown_dismissals)")
+    }
+    dismissal_required = {
+        "id", "engine", "photo_id", "box_x", "box_y",
+        "box_w", "box_h", "vector", "dismissed_at",
+    }
+    if not dismissal_required.issubset(dismissal_cols):
+        # Ordinal-only dismissals cannot be mapped safely after detector order
+        # changes. Forget them rather than risk suppressing a different face.
+        conn.execute("DROP TABLE unknown_dismissals")
+        conn.execute(
+            """CREATE TABLE unknown_dismissals (
+                   id INTEGER PRIMARY KEY,
+                   engine TEXT NOT NULL,
+                   photo_id INTEGER NOT NULL,
+                   box_x INTEGER NOT NULL,
+                   box_y INTEGER NOT NULL,
+                   box_w INTEGER NOT NULL,
+                   box_h INTEGER NOT NULL,
+                   vector BLOB NOT NULL,
+                   dismissed_at INTEGER NOT NULL,
+                   UNIQUE(engine, photo_id, box_x, box_y, box_w, box_h)
+               )"""
+        )
 
     cols = {row[1] for row in conn.execute("PRAGMA table_info(refs)")}
     if "engine" not in cols:  # a database written before backends existed
@@ -827,6 +857,10 @@ def _migrate(conn):
     conn.execute(
         "CREATE INDEX IF NOT EXISTS unknown_faces_photo "
         "ON unknown_faces(engine, photo_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS unknown_dismissals_photo "
+        "ON unknown_dismissals(engine, photo_id)"
     )
     conn.commit()
 
@@ -907,21 +941,42 @@ def _photo_context(photo):
     }
 
 
-def reconcile_unknown_photo(conn, engine, photo, observations):
+def _observation_is_dismissed(conn, backend, photo_id, observation, threshold):
+    rows = conn.execute(
+        """SELECT box_x, box_y, box_w, box_h, vector
+           FROM unknown_dismissals
+           WHERE engine = ? AND photo_id = ?""",
+        (backend.name, photo_id),
+    ).fetchall()
+    if not rows:
+        return False
+    vector = np.asarray(observation["vector"], dtype=np.float32)
+    for x, y, width, height, blob in rows:
+        if box_iou_xywh(observation["box"], [x, y, width, height]) < 0.35:
+            continue
+        dismissed = np.frombuffer(blob, dtype=np.float32)
+        if dismissed.shape != vector.shape:
+            continue
+        distance = float(backend.distances(dismissed.reshape(1, -1), vector)[0])
+        if distance <= threshold:
+            return True
+    return False
+
+
+def reconcile_unknown_photo(conn, backend, photo, observations, dismissal_threshold):
     """Make one photo's unresolved local observations match the latest detection."""
     photo_id = int(photo["id"])
+    engine = backend.name
     metadata = _photo_context(photo)
-    dismissed = {
-        row[0]
-        for row in conn.execute(
-            """SELECT face_key FROM unknown_dismissals
-               WHERE engine = ? AND photo_id = ?""",
-            (engine, photo_id),
-        )
-    }
     rows = []
     for observation in observations:
-        if str(observation["face_key"]) in dismissed:
+        if _observation_is_dismissed(
+            conn,
+            backend,
+            photo_id,
+            observation,
+            dismissal_threshold,
+        ):
             continue
         box = observation["box"]
         vector = np.asarray(observation["vector"], dtype=np.float32)
@@ -1039,12 +1094,20 @@ def unresolved_observations(photo, found, references, backend, tolerance, image_
     return unknown
 
 
-def cluster_unknown_faces(conn, backend, threshold):
+def cluster_unknown_faces(conn, backend, threshold, observation_ids=None):
     """Deterministic complete-link clustering, isolated to one recognition engine."""
+    scope_ids = sorted({int(value) for value in (observation_ids or []) if int(value) > 0})
+    if observation_ids is not None and not scope_ids:
+        return []
+    scope_sql = ""
+    params = [backend.name]
+    if observation_ids is not None:
+        scope_sql = " AND id IN (" + ",".join("?" for _ in scope_ids) + ")"
+        params.extend(scope_ids)
     raw = conn.execute(
-        """SELECT id, vector FROM unknown_faces
-           WHERE engine = ? ORDER BY id ASC""",
-        (backend.name,),
+        f"""SELECT id, vector FROM unknown_faces
+            WHERE engine = ?{scope_sql} ORDER BY id ASC""",
+        params,
     ).fetchall()
     observations = [
         {"id": int(row[0]), "vector": np.frombuffer(row[1], dtype=np.float32)}
@@ -1067,32 +1130,94 @@ def cluster_unknown_faces(conn, backend, threshold):
     now = int(time.time())
     assigned = []
     with conn:
-        conn.execute(
-            "UPDATE unknown_faces SET cluster_id = '' WHERE engine = ?",
-            (backend.name,),
-        )
-        conn.execute(
-            "DELETE FROM unknown_clusters WHERE engine = ?",
-            (backend.name,),
-        )
+        if observation_ids is None:
+            conn.execute(
+                "UPDATE unknown_faces SET cluster_id = '' WHERE engine = ?",
+                (backend.name,),
+            )
+            conn.execute(
+                "DELETE FROM unknown_clusters WHERE engine = ?",
+                (backend.name,),
+            )
+        else:
+            marks = ",".join("?" for _ in scope_ids)
+            old_cluster_ids = [
+                row[0]
+                for row in conn.execute(
+                    f"""SELECT DISTINCT cluster_id FROM unknown_faces
+                        WHERE engine = ? AND id IN ({marks}) AND cluster_id <> ''""",
+                    (backend.name, *scope_ids),
+                )
+            ]
+            if old_cluster_ids:
+                old_marks = ",".join("?" for _ in old_cluster_ids)
+                conn.execute(
+                    f"""UPDATE unknown_faces SET cluster_id = ''
+                        WHERE engine = ? AND cluster_id IN ({old_marks})""",
+                    (backend.name, *old_cluster_ids),
+                )
+                conn.execute(
+                    f"DELETE FROM unknown_clusters WHERE cluster_id IN ({old_marks})",
+                    old_cluster_ids,
+                )
+            conn.execute(
+                f"UPDATE unknown_faces SET cluster_id = '' WHERE id IN ({marks})",
+                scope_ids,
+            )
         for cluster in clusters:
             anchor = int(cluster[0]["id"])
             digest = hashlib.sha256(f"{backend.name}:{anchor}".encode("utf-8")).hexdigest()[:16]
             cluster_id = f"unknown-{digest}"
-            ids = [int(member["id"]) for member in cluster]
+            member_ids = [int(member["id"]) for member in cluster]
             conn.execute(
                 """INSERT INTO unknown_clusters (
                        cluster_id, engine, anchor_unknown_id, member_count, updated_at
-                   ) VALUES (?, ?, ?, ?, ?)""",
-                (cluster_id, backend.name, anchor, len(ids), now),
+                   ) VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(cluster_id) DO UPDATE SET
+                       engine = excluded.engine,
+                       anchor_unknown_id = excluded.anchor_unknown_id,
+                       member_count = excluded.member_count,
+                       updated_at = excluded.updated_at""",
+                (cluster_id, backend.name, anchor, len(member_ids), now),
             )
-            marks = ",".join("?" for _ in ids)
+            marks = ",".join("?" for _ in member_ids)
             conn.execute(
                 f"UPDATE unknown_faces SET cluster_id = ? WHERE id IN ({marks})",
-                (cluster_id, *ids),
+                (cluster_id, *member_ids),
             )
-            assigned.append((cluster_id, ids))
+            assigned.append((cluster_id, member_ids))
     return assigned
+
+
+def delete_unknown_observations(conn, observation_ids):
+    ids = sorted({int(value) for value in observation_ids if int(value) > 0})
+    if not ids:
+        return 0
+    marks = ",".join("?" for _ in ids)
+    cluster_ids = [
+        row[0]
+        for row in conn.execute(
+            f"""SELECT DISTINCT cluster_id FROM unknown_faces
+                WHERE id IN ({marks}) AND cluster_id <> ''""",
+            ids,
+        )
+    ]
+    with conn:
+        conn.execute(
+            f"DELETE FROM unknown_faces WHERE id IN ({marks})",
+            ids,
+        )
+        if cluster_ids:
+            cluster_marks = ",".join("?" for _ in cluster_ids)
+            conn.execute(
+                f"UPDATE unknown_faces SET cluster_id = '' WHERE cluster_id IN ({cluster_marks})",
+                cluster_ids,
+            )
+            conn.execute(
+                f"DELETE FROM unknown_clusters WHERE cluster_id IN ({cluster_marks})",
+                cluster_ids,
+            )
+    return len(ids)
 
 
 # --------------------------------------------------------------------------- identify
@@ -1148,6 +1273,7 @@ def prepare_unknown_faces(
     conn,
     backend,
     tolerance,
+    dismissal_threshold,
     limit=1000,
     uploaded_after="",
     uploaded_before="",
@@ -1175,6 +1301,7 @@ def prepare_unknown_faces(
             print(f"people list unavailable: {e}")
 
     processed = unknown_count = failed = 0
+    scope_ids = set()
     for index, photo in enumerate(photos, start=1):
         photo_id = int(photo["id"])
         try:
@@ -1193,9 +1320,18 @@ def prepare_unknown_faces(
             )
             unknown_count += reconcile_unknown_photo(
                 conn,
-                backend.name,
+                backend,
                 photo,
                 unknown,
+                dismissal_threshold,
+            )
+            scope_ids.update(
+                int(row[0])
+                for row in conn.execute(
+                    """SELECT id FROM unknown_faces
+                       WHERE engine = ? AND photo_id = ?""",
+                    (backend.name, photo_id),
+                )
             )
             processed += 1
         except (requests.RequestException, RuntimeError, ValueError, OSError) as e:
@@ -1212,19 +1348,28 @@ def prepare_unknown_faces(
         "unknown": unknown_count,
         "failed": failed,
         "people": people,
+        "observation_ids": sorted(scope_ids),
     }
 
 
-def discovery_metadata(conn, engine):
+def discovery_metadata(conn, engine, observation_ids=None):
+    ids = sorted({int(value) for value in (observation_ids or []) if int(value) > 0})
+    if observation_ids is not None and not ids:
+        return []
+    scope_sql = ""
+    params = [engine]
+    if observation_ids is not None:
+        scope_sql = " AND u.id IN (" + ",".join("?" for _ in ids) + ")"
+        params.extend(ids)
     rows = conn.execute(
-        """SELECT u.id, u.cluster_id, u.photo_id, u.face_key,
-                  u.box_x, u.box_y, u.box_w, u.box_h,
-                  u.image_width, u.image_height,
-                  u.taken_at, u.uploaded_at, u.context_json
-           FROM unknown_faces u
-           WHERE u.engine = ? AND u.cluster_id <> ''
-           ORDER BY u.cluster_id, u.id""",
-        (engine,),
+        f"""SELECT u.id, u.cluster_id, u.photo_id, u.face_key,
+                   u.box_x, u.box_y, u.box_w, u.box_h,
+                   u.image_width, u.image_height,
+                   u.taken_at, u.uploaded_at, u.context_json
+            FROM unknown_faces u
+            WHERE u.engine = ? AND u.cluster_id <> ''{scope_sql}
+            ORDER BY u.cluster_id, u.id""",
+        params,
     ).fetchall()
     grouped = {}
     for row in rows:
@@ -1344,7 +1489,7 @@ call('/api/meta').then(render).catch(e=>{byId('clusters').innerHTML=`<div class=
     return page.replace("__DISCOVERY_TOKEN__", json.dumps(session_token))
 
 
-def local_discovery_board(api, conn, backend, threshold, people):
+def local_discovery_board(api, conn, backend, threshold, people, observation_ids):
     state = {
         "token": secrets.token_urlsafe(32),
         "done": threading.Event(),
@@ -1352,6 +1497,7 @@ def local_discovery_board(api, conn, backend, threshold, people):
         "db_lock": threading.RLock(),
         "image_cache": OrderedDict(),
         "people": list(people),
+        "observation_ids": {int(value) for value in observation_ids},
     }
 
     def current_meta():
@@ -1360,7 +1506,11 @@ def local_discovery_board(api, conn, backend, threshold, people):
                 "engine": backend.name,
                 "threshold": threshold,
                 "people": state["people"],
-                "clusters": discovery_metadata(conn, backend.name),
+                "clusters": discovery_metadata(
+                    conn,
+                    backend.name,
+                    state["observation_ids"],
+                ),
             }
 
     class DiscoveryHandler(BaseHTTPRequestHandler):
@@ -1404,11 +1554,13 @@ def local_discovery_board(api, conn, backend, threshold, people):
                 raise ValueError("Selected occurrence ids must be integers.") from e
             if not ids:
                 raise ValueError("Select at least one occurrence.")
+            if not set(ids).issubset(state["observation_ids"]):
+                raise ValueError("That discovery scope changed. Refresh the board and review it again.")
             marks = ",".join("?" for _ in ids)
             with state["db_lock"]:
                 rows = conn.execute(
                     f"""SELECT id, photo_id, face_key, box_x, box_y, box_w, box_h,
-                               image_width, image_height
+                               image_width, image_height, vector
                         FROM unknown_faces
                         WHERE engine = ? AND cluster_id = ? AND id IN ({marks})
                         ORDER BY id""",
@@ -1438,6 +1590,8 @@ def local_discovery_board(api, conn, backend, threshold, people):
                     occurrence_id = int((parse_qs(parsed.query).get("id") or ["0"])[0])
                 except (TypeError, ValueError):
                     return self._json(400, {"error": "Invalid occurrence id."})
+                if occurrence_id not in state["observation_ids"]:
+                    return self._json(404, {"error": "No such occurrence in this discovery run."})
                 with state["db_lock"]:
                     row = conn.execute(
                         """SELECT photo_id, image_url, box_x, box_y, box_w, box_h
@@ -1498,18 +1652,36 @@ def local_discovery_board(api, conn, backend, threshold, people):
                     with conn:
                         conn.executemany(
                             """INSERT INTO unknown_dismissals (
-                                   engine, photo_id, face_key, dismissed_at
-                               ) VALUES (?, ?, ?, ?)
-                               ON CONFLICT(engine, photo_id, face_key) DO UPDATE SET
+                                   engine, photo_id,
+                                   box_x, box_y, box_w, box_h,
+                                   vector, dismissed_at
+                               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                               ON CONFLICT(engine, photo_id, box_x, box_y, box_w, box_h)
+                               DO UPDATE SET
+                                   vector = excluded.vector,
                                    dismissed_at = excluded.dismissed_at""",
-                            [(backend.name, int(row[1]), str(row[2]), now) for row in rows],
+                            [
+                                (
+                                    backend.name,
+                                    int(row[1]),
+                                    int(row[3]),
+                                    int(row[4]),
+                                    int(row[5]),
+                                    int(row[6]),
+                                    row[9],
+                                    now,
+                                )
+                                for row in rows
+                            ],
                         )
-                        marks = ",".join("?" for _ in ids)
-                        conn.execute(
-                            f"DELETE FROM unknown_faces WHERE id IN ({marks})",
-                            ids,
-                        )
-                    cluster_unknown_faces(conn, backend, threshold)
+                    delete_unknown_observations(conn, ids)
+                    state["observation_ids"].difference_update(ids)
+                    cluster_unknown_faces(
+                        conn,
+                        backend,
+                        threshold,
+                        state["observation_ids"],
+                    )
                 return self._json(
                     200,
                     {"ok": True, "dismissed": len(ids), "meta": current_meta()},
@@ -1548,14 +1720,15 @@ def local_discovery_board(api, conn, backend, threshold, people):
                     int(row[0]) for row in rows if str(row[0]) in applied_keys
                 ]
                 if applied_ids:
-                    marks = ",".join("?" for _ in applied_ids)
                     with state["db_lock"]:
-                        with conn:
-                            conn.execute(
-                                f"DELETE FROM unknown_faces WHERE id IN ({marks})",
-                                applied_ids,
-                            )
-                        cluster_unknown_faces(conn, backend, threshold)
+                        delete_unknown_observations(conn, applied_ids)
+                        state["observation_ids"].difference_update(applied_ids)
+                        cluster_unknown_faces(
+                            conn,
+                            backend,
+                            threshold,
+                            state["observation_ids"],
+                        )
                 return self._json(
                     200,
                     {
@@ -1606,12 +1779,14 @@ def run_discovery(
         conn,
         backend,
         tolerance,
+        threshold,
         limit,
         uploaded_after,
         uploaded_before,
         verbose,
     )
-    clusters = cluster_unknown_faces(conn, backend, threshold)
+    scope_ids = prepared["observation_ids"]
+    clusters = cluster_unknown_faces(conn, backend, threshold, scope_ids)
     if verbose:
         print(
             f"discovery: {prepared['unknown']} unresolved occurrence(s) in "
@@ -1626,6 +1801,7 @@ def run_discovery(
         backend,
         threshold,
         prepared["people"],
+        scope_ids,
     )
     return len(clusters)
 
@@ -2902,6 +3078,7 @@ def scan(
     include_captions=True,
 ):
     references = load_references(conn, backend.name)
+    dismissal_threshold = cfg_discovery_tolerance(cfg, backend.name)
     caption_key = caption_scan_key(cfg) if include_captions else ""
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
@@ -3040,7 +3217,13 @@ def scan(
                         image_width,
                         image_height,
                     )
-                    reconcile_unknown_photo(conn, backend.name, p, unknown)
+                    reconcile_unknown_photo(
+                        conn,
+                        backend,
+                        p,
+                        unknown,
+                        dismissal_threshold,
+                    )
                     for box_css, vector in found:
                         box = clamp_box_xywh(
                             css_box_to_xywh(box_css),
@@ -3433,6 +3616,23 @@ def selftest():
 
     # identify: nearest within tolerance wins; nothing past it is offered.
     backend = StubBackend()
+    saved_discovery_env = os.environ.pop("GASF_FACE_DISCOVERY_TOLERANCE", None)
+    try:
+        check_that(
+            cfg_discovery_tolerance({}, InsightFaceBackend.name) == 0.32
+            and cfg_discovery_tolerance({}, FaceRecognitionBackend.name) == 0.42,
+            "discovery config: resolved backend names select engine-specific defaults",
+        )
+        check_that(
+            cfg_discovery_tolerance(
+                {"discovery_tolerance": 0.27},
+                InsightFaceBackend.name,
+            ) == 0.27,
+            "discovery config: an explicit configured threshold overrides the resolved default",
+        )
+    finally:
+        if saved_discovery_env is not None:
+            os.environ["GASF_FACE_DISCOVERY_TOLERANCE"] = saved_discovery_env
     refs = {
         "Hans": np.array([[0.0, 0.0, 0.0]], dtype=np.float32),
         "Greta": np.array([[10.0, 10.0, 10.0]], dtype=np.float32),
@@ -3538,10 +3738,10 @@ def selftest():
                 },
             }
 
-        def unknown_observation(value):
+        def unknown_observation(value, box=None, face_key="i:0"):
             return {
-                "face_key": "i:0",
-                "box": [10, 10, 20, 20],
+                "face_key": face_key,
+                "box": list(box or [10, 10, 20, 20]),
                 "image_width": 100,
                 "image_height": 80,
                 "vector": np.array([value, 0.0, 0.0], dtype=np.float32),
@@ -3549,15 +3749,17 @@ def selftest():
 
         reconcile_unknown_photo(
             conn,
-            backend.name,
+            backend,
             unknown_photo(601),
             [unknown_observation(0.0)],
+            0.15,
         )
         reconcile_unknown_photo(
             conn,
-            backend.name,
+            backend,
             unknown_photo(601),
             [unknown_observation(0.02)],
+            0.15,
         )
         check_that(
             conn.execute(
@@ -3569,15 +3771,17 @@ def selftest():
         )
         reconcile_unknown_photo(
             conn,
-            backend.name,
+            backend,
             unknown_photo(602),
             [unknown_observation(0.10)],
+            0.15,
         )
         reconcile_unknown_photo(
             conn,
-            backend.name,
+            backend,
             unknown_photo(603),
             [unknown_observation(0.20)],
+            0.15,
         )
         first_clusters = cluster_unknown_faces(conn, backend, 0.15)
         second_clusters = cluster_unknown_faces(conn, backend, 0.15)
@@ -3590,11 +3794,14 @@ def selftest():
             first_clusters == second_clusters,
             "discovery clustering: unchanged reruns keep stable cluster ids and members",
         )
+        other_backend = StubBackend()
+        other_backend.name = "other-engine"
         reconcile_unknown_photo(
             conn,
-            "other-engine",
+            other_backend,
             unknown_photo(604),
             [unknown_observation(0.02)],
+            0.15,
         )
         cluster_unknown_faces(conn, backend, 0.15)
         check_that(
@@ -3602,6 +3809,46 @@ def selftest():
                 "SELECT cluster_id FROM unknown_faces WHERE engine = 'other-engine'"
             ).fetchone()[0] == "",
             "discovery clustering: another engine is never assigned into this engine's clusters",
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend,
+            unknown_photo(606),
+            [unknown_observation(0.11)],
+            0.15,
+        )
+        scoped_ids = [
+            int(row[0])
+            for row in conn.execute(
+                """SELECT id FROM unknown_faces
+                   WHERE engine = ? AND photo_id IN (601, 603)
+                   ORDER BY id""",
+                (backend.name,),
+            )
+        ]
+        scoped_clusters = cluster_unknown_faces(
+            conn,
+            backend,
+            0.15,
+            scoped_ids,
+        )
+        scoped_photos = {
+            occurrence["photo"]
+            for cluster in discovery_metadata(conn, backend.name, scoped_ids)
+            for occurrence in cluster["occurrences"]
+        }
+        check_that(
+            sorted(len(ids) for _, ids in scoped_clusters) == [1, 1]
+            and scoped_photos == {601, 603},
+            "discovery scope: out-of-scope vectors neither cluster with nor appear beside current rows",
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM unknown_faces
+                   WHERE engine = ? AND photo_id IN (602, 606)""",
+                (backend.name,),
+            ).fetchone()[0] == 2,
+            "discovery scope: out-of-scope observations remain stored for a broader later run",
         )
         rejected_unknown = unresolved_observations(
             {"rejected": ["Rejected Person"]},
@@ -3627,9 +3874,10 @@ def selftest():
         )
         reconcile_unknown_photo(
             conn,
-            backend.name,
+            backend,
             unknown_photo(601),
             corrected_known,
+            0.15,
         )
         check_that(
             conn.execute(
@@ -3642,15 +3890,21 @@ def selftest():
         with conn:
             conn.execute(
                 """INSERT INTO unknown_dismissals (
-                       engine, photo_id, face_key, dismissed_at
-                   ) VALUES (?, 605, 'i:0', 1)""",
-                (backend.name,),
+                      engine, photo_id,
+                      box_x, box_y, box_w, box_h,
+                      vector, dismissed_at
+                   ) VALUES (?, 605, 10, 10, 20, 20, ?, 1)""",
+                (
+                   backend.name,
+                   np.array([0.3, 0.0, 0.0], dtype=np.float32).tobytes(),
+                ),
             )
         reconcile_unknown_photo(
             conn,
-            backend.name,
+            backend,
             unknown_photo(605),
-            [unknown_observation(0.3)],
+            [unknown_observation(0.31, [12, 11, 20, 20], "i:1")],
+            0.15,
         )
         check_that(
             conn.execute(
@@ -3658,7 +3912,37 @@ def selftest():
                    WHERE engine = ? AND photo_id = 605""",
                 (backend.name,),
             ).fetchone()[0] == 0,
-            "discovery db: locally dismissed detector mistakes stay dismissed",
+            "discovery dismissal: the same face stays dismissed after small movement and reordering",
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend,
+            unknown_photo(605),
+            [unknown_observation(2.0, [60, 10, 20, 20], "i:0")],
+            0.15,
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM unknown_faces
+                   WHERE engine = ? AND photo_id = 605""",
+                (backend.name,),
+            ).fetchone()[0] == 1,
+            "discovery dismissal: a different face moving into ordinal zero remains visible",
+        )
+        reconcile_unknown_photo(
+            conn,
+            backend,
+            unknown_photo(605),
+            [unknown_observation(2.0, [11, 10, 20, 20], "i:0")],
+            0.15,
+        )
+        check_that(
+            conn.execute(
+                """SELECT COUNT(*) FROM unknown_faces
+                   WHERE engine = ? AND photo_id = 605""",
+                (backend.name,),
+            ).fetchone()[0] == 1,
+            "discovery dismissal: box overlap alone cannot suppress a different embedding",
         )
 
         class LearnApi:
@@ -3728,6 +4012,20 @@ def selftest():
         raw = sqlite3.connect(legacy)
         raw.execute("CREATE TABLE refs (id INTEGER PRIMARY KEY, person TEXT, photo_id INTEGER, vector BLOB)")
         raw.execute("INSERT INTO refs (person, photo_id, vector) VALUES ('Old', 1, ?)", (vec,))
+        raw.execute(
+            """CREATE TABLE unknown_dismissals (
+                   engine TEXT NOT NULL,
+                   photo_id INTEGER NOT NULL,
+                   face_key TEXT NOT NULL,
+                   dismissed_at INTEGER NOT NULL,
+                   PRIMARY KEY(engine, photo_id, face_key)
+               )"""
+        )
+        raw.execute(
+            """INSERT INTO unknown_dismissals (
+                   engine, photo_id, face_key, dismissed_at
+               ) VALUES ('old-engine', 1, 'i:0', 1)"""
+        )
         raw.commit()
         raw.close()
         globals()["DB_PATH"] = legacy
@@ -3743,6 +4041,15 @@ def selftest():
         check_that(
             {"unknown_faces", "unknown_clusters", "unknown_dismissals"}.issubset(migrated_tables),
             "db: legacy databases gain discovery tables without losing references",
+        )
+        dismissal_cols = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(unknown_dismissals)")
+        }
+        check_that(
+            "vector" in dismissal_cols
+            and conn.execute("SELECT COUNT(*) FROM unknown_dismissals").fetchone()[0] == 0,
+            "db: unsafe ordinal-only dismissals are invalidated during migration",
         )
         conn.close()
     finally:
@@ -4015,7 +4322,7 @@ def selftest():
         discovery_conn = db()
         reconcile_unknown_photo(
             discovery_conn,
-            backend.name,
+            backend,
             {
                 "id": 701,
                 "url": "selftest://701",
@@ -4029,8 +4336,16 @@ def selftest():
                 "image_height": 80,
                 "vector": np.array([0.0, 0.0, 0.0], dtype=np.float32),
             }],
+            0.15,
         )
-        cluster_unknown_faces(discovery_conn, backend, 0.15)
+        discovery_scope = [
+            int(row[0])
+            for row in discovery_conn.execute(
+                "SELECT id FROM unknown_faces WHERE engine = ?",
+                (backend.name,),
+            )
+        ]
+        cluster_unknown_faces(discovery_conn, backend, 0.15, discovery_scope)
         globals()["_open_preview_html"] = capture_discovery_url
 
         def run_discovery_board():
@@ -4040,6 +4355,7 @@ def selftest():
                 backend,
                 0.15,
                 ["Anna"],
+                discovery_scope,
             )
 
         discovery_thread = threading.Thread(target=run_discovery_board, daemon=True)
@@ -4288,7 +4604,7 @@ def main():
         discovery_limit = args.discovery_limit or cfg_discovery_limit(cfg)
         if discovery_limit < 1 or discovery_limit > 1000:
             sys.exit("--discovery-limit must be between 1 and 1000")
-        threshold = cfg_discovery_tolerance(cfg, engine)
+        threshold = cfg_discovery_tolerance(cfg, backend.name)
         run_discovery(
             api,
             conn,

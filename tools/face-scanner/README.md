@@ -176,7 +176,7 @@ python scan-gui.py
 - Tick options, click **Start**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
 - In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
-- In discovery mode, each contact sheet is a conservative, engine-isolated cluster. Open it, deselect mistakes, type one known or new person name, and confirm. That one name applies to every selected face. Unselected faces remain unknown and are reclustered; **Dismiss selected locally** suppresses obvious detector mistakes without changing or deleting the WordPress photo.
+- In discovery mode, each contact sheet is a conservative, engine-isolated cluster from the current date/limit preparation scope. Open it, deselect mistakes, type one known or new person name, and confirm. That one name applies to every selected face. Unselected faces remain unknown and are reclustered; **Dismiss selected locally** suppresses the same local face using its rectangle and embedding, even if detector order changes, without changing or deleting the WordPress photo.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
 - The labeler has live outline/opacity settings plus zoom, fit, center, and pan controls. You can also drag the image to pan, double-click to fit, and use Ctrl+wheel to zoom.
 - In the WordPress photo editor, **Not in photo** removes one wrong person suggestion and remembers that photo/person rejection. Later scans may suggest other people, but cannot resurrect that rejected person or auto-accept them on that photo.
@@ -273,7 +273,9 @@ them up as explicit training examples.
 threshold; lower values create smaller, stricter clusters. The default is
 engine-specific. `"discovery_limit"` caps preparation at the latest 1,000
 approved library photos. The CLI `--discovery-limit N` and the existing upload
-date flags can narrow a pass further.
+date flags can narrow a pass further. A narrowed board clusters and displays
+only observations refreshed in that pass; older local rows remain available
+for a later, broader run but cannot influence the current contact sheets.
 
 ---
 
