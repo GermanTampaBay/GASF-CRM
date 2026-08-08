@@ -152,7 +152,7 @@ face rectangles use the same orientation Edge displays.
 | Command | What it does |
 |---|---|
 | `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
-| `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
+| `python scan.py --learn` | Refresh the reference set from newly tagged photos first. It also advances a bounded, resumable legacy-quality backfill. |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
 | `python scan.py --label --label-flow` | Mature refinement pass: learn corrections, face-scan new photos, label only unresolved work, relearn those labels, then run the full face/caption scan. |
 | `python scan.py --discover` | Refresh unresolved observations, cluster them locally, and open the loopback-only People Discovery contact-sheet board. |
@@ -261,6 +261,18 @@ one photo's truth and recomputes affected selections in one SQLite transaction.
 No pose score is invented: neither supported backend currently exposes one
 reliably through the shared abstraction.
 
+References also carry the WordPress person term id and canonical display name.
+Alias spellings therefore share one reference floor, a rename updates the
+display name without splitting vectors, and a merge moves later reconciliation
+onto the surviving identity. Older databases retain their exact-name rows until
+the confirmed photo is reprocessed.
+
+Databases created before objective quality metadata are backfilled incrementally
+in batches of 25 photos during ordinary learn/watch/refinement passes. A failed
+image leaves its old reference untouched for the next pass. Each engine has its
+own resumable completion marker, which is written only after no synthetic
+quality rows remain.
+
 ### People Discovery stays local
 
 `--discover` stores unresolved observations and their clusters only in
@@ -333,24 +345,27 @@ Every reference face is stored in `faces.db` **stamped with the engine that
 produced it**, and the scanner only ever compares a face against references from
 the same engine. Switching engines is therefore safe: the new one simply
 relearns into its own vectors and never misreads the other's. Unknown
-observations and clusters carry the same engine boundary. `--status` shows
-active/retained counts and average objective quality per engine.
+observations, clusters, and confidence evidence carry the same engine boundary.
+Legacy evidence without an engine is retained but cannot influence a current
+recommendation. `--status` shows active/retained counts, measured-quality
+backfill progress, and average objective quality per engine.
 
 ## Confidence calibration
 
 WordPress retains a bounded, non-biometric history of offered name, confidence,
-photo, and rectangle facts after a suggestion disappears. A matching explicit
-face-box label or auto-accepted box is positive; **Not in photo** is negative.
-No-action and unrelated person tags do not count, and negative outcomes never
-become face vectors.
+photo, rectangle, and recognition-engine facts after a suggestion disappears. A
+matching face-box label explicitly saved by a human is positive; **Not in
+photo** is negative. Machine auto-accept, no-action, and unrelated person tags
+do not count, and negative outcomes never become face vectors.
 
-The scanner groups explicit outcomes into five-point confidence bands and tests
-candidate thresholds with a 99% Wilson confidence lower bound. It recommends a
-threshold only after the configured minimum sample count and only when that
-conservative floor meets the target precision (99% by default). `--status`,
-normal scan completion, and the WordPress face admin panel show the concise
-result. A recommendation is advice: it never changes the saved auto-accept
-setting. `calibration_target_precision` may only be 0.99 or higher, and
+The scanner filters evidence to its currently resolved backend, groups explicit
+outcomes into five-point confidence bands, and tests candidate thresholds with a
+99% Wilson confidence lower bound. It recommends a threshold only after the
+configured minimum sample count and only when that conservative floor meets the
+target precision (99% by default). `--status`, normal scan completion, and the
+WordPress face admin panel show the concise engine-specific result. A
+recommendation is advice: it never changes the saved auto-accept setting.
+`calibration_target_precision` may only be 0.99 or higher, and
 `calibration_min_samples` has a hard floor of 20.
 
 ## Tuning the tolerance

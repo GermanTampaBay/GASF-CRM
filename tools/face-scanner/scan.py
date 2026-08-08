@@ -140,6 +140,8 @@ DEFAULT_DISCOVERY_TOLERANCE = {
 MIN_REFERENCES = 3
 MAX_ACTIVE_REFERENCES = 12
 MIN_ACTIVE_QUALITY = 0.28
+QUALITY_METRICS_VERSION = 1
+QUALITY_BACKFILL_BATCH = 25
 ACTIVE_LEARNING_THRESHOLD = 0.45
 ACTIVE_LEARNING_MAX = 100
 CALIBRATION_TARGET_PRECISION = 0.99
@@ -770,6 +772,8 @@ def _migrate(conn):
         """CREATE TABLE IF NOT EXISTS refs (
                id INTEGER PRIMARY KEY,
                person TEXT NOT NULL,
+               person_id INTEGER NOT NULL DEFAULT 0,
+               canonical_name TEXT NOT NULL DEFAULT '',
                photo_id INTEGER NOT NULL,
                engine TEXT NOT NULL DEFAULT '',
                face_key TEXT NOT NULL DEFAULT '0',
@@ -778,6 +782,7 @@ def _migrate(conn):
                sharpness REAL NOT NULL DEFAULT 0,
                clipping REAL NOT NULL DEFAULT 0,
                quality REAL NOT NULL DEFAULT 0.5,
+               quality_measured INTEGER NOT NULL DEFAULT 0,
                redundancy REAL NOT NULL DEFAULT 0,
                active INTEGER NOT NULL DEFAULT 1,
                captured_at TEXT NOT NULL DEFAULT '',
@@ -865,11 +870,14 @@ def _migrate(conn):
         conn.execute("ALTER TABLE refs ADD COLUMN face_key TEXT NOT NULL DEFAULT '0'")
         conn.execute("UPDATE refs SET face_key = '0' WHERE face_key IS NULL OR face_key = ''")
     ref_additions = {
+        "person_id": "INTEGER NOT NULL DEFAULT 0",
+        "canonical_name": "TEXT NOT NULL DEFAULT ''",
         "face_width": "INTEGER NOT NULL DEFAULT 0",
         "face_height": "INTEGER NOT NULL DEFAULT 0",
         "sharpness": "REAL NOT NULL DEFAULT 0",
         "clipping": "REAL NOT NULL DEFAULT 0",
         "quality": "REAL NOT NULL DEFAULT 0.5",
+        "quality_measured": "INTEGER NOT NULL DEFAULT 0",
         "redundancy": "REAL NOT NULL DEFAULT 0",
         "active": "INTEGER NOT NULL DEFAULT 1",
         "captured_at": "TEXT NOT NULL DEFAULT ''",
@@ -878,6 +886,10 @@ def _migrate(conn):
     for column, declaration in ref_additions.items():
         if column not in cols:
             conn.execute(f"ALTER TABLE refs ADD COLUMN {column} {declaration}")
+    conn.execute(
+        "UPDATE refs SET canonical_name = person "
+        "WHERE canonical_name IS NULL OR canonical_name = ''"
+    )
 
     if not _has_unique_photo_engine_face(conn):
         conn.execute("DROP TABLE IF EXISTS refs_new")
@@ -885,6 +897,8 @@ def _migrate(conn):
             """CREATE TABLE refs_new (
                   id INTEGER PRIMARY KEY,
                   person TEXT NOT NULL,
+                  person_id INTEGER NOT NULL DEFAULT 0,
+                  canonical_name TEXT NOT NULL DEFAULT '',
                   photo_id INTEGER NOT NULL,
                   engine TEXT NOT NULL DEFAULT '',
                   face_key TEXT NOT NULL DEFAULT '0',
@@ -893,6 +907,7 @@ def _migrate(conn):
                   sharpness REAL NOT NULL DEFAULT 0,
                   clipping REAL NOT NULL DEFAULT 0,
                   quality REAL NOT NULL DEFAULT 0.5,
+                  quality_measured INTEGER NOT NULL DEFAULT 0,
                   redundancy REAL NOT NULL DEFAULT 0,
                   active INTEGER NOT NULL DEFAULT 1,
                   captured_at TEXT NOT NULL DEFAULT '',
@@ -902,14 +917,14 @@ def _migrate(conn):
         )
         conn.execute(
             """INSERT INTO refs_new (
-                   id, person, photo_id, engine, face_key,
+                   id, person, person_id, canonical_name, photo_id, engine, face_key,
                    face_width, face_height, sharpness, clipping,
-                   quality, redundancy, active, captured_at, vector
+                   quality, quality_measured, redundancy, active, captured_at, vector
                )
-               SELECT r.id, r.person, r.photo_id, r.engine,
+               SELECT r.id, r.person, r.person_id, r.canonical_name, r.photo_id, r.engine,
                       COALESCE(NULLIF(r.face_key, ''), '0'),
                       r.face_width, r.face_height, r.sharpness, r.clipping,
-                      r.quality, r.redundancy, r.active, r.captured_at, r.vector
+                      r.quality, r.quality_measured, r.redundancy, r.active, r.captured_at, r.vector
                FROM refs r
                INNER JOIN (
                    SELECT photo_id, engine, COALESCE(NULLIF(face_key, ''), '0') AS face_key, MAX(id) AS keep_id
@@ -920,10 +935,15 @@ def _migrate(conn):
         conn.execute("DROP TABLE refs")
         conn.execute("ALTER TABLE refs_new RENAME TO refs")
 
-    conn.execute("CREATE INDEX IF NOT EXISTS refs_person ON refs(engine, person)")
+    conn.execute("DROP INDEX IF EXISTS refs_person")
+    conn.execute("DROP INDEX IF EXISTS refs_active_person")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS refs_identity "
+        "ON refs(engine, person_id, canonical_name, person)"
+    )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS refs_active_person "
-        "ON refs(engine, person, active, quality DESC, id)"
+        "ON refs(engine, person_id, canonical_name, active, quality DESC, id)"
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS unknown_faces_engine_cluster "
@@ -937,7 +957,7 @@ def _migrate(conn):
         "CREATE INDEX IF NOT EXISTS unknown_dismissals_photo "
         "ON unknown_dismissals(engine, photo_id)"
     )
-    selection_version = "2"
+    selection_version = "3"
     current_selection_version = conn.execute(
         "SELECT v FROM state WHERE k = 'reference_selection_version'"
     ).fetchone()
@@ -975,6 +995,37 @@ def state_get(conn, k, default=""):
 def state_set(conn, k, v):
     conn.execute("INSERT INTO state (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", (k, str(v)))
     conn.commit()
+
+
+def quality_backfill_key(engine):
+    return state_key(engine, "quality_metrics_version")
+
+
+def quality_backfill_photo_ids(conn, engine, limit=QUALITY_BACKFILL_BATCH):
+    return [
+        int(row[0])
+        for row in conn.execute(
+            """SELECT photo_id FROM refs
+               WHERE engine = ? AND quality_measured = 0
+               GROUP BY photo_id ORDER BY photo_id LIMIT ?""",
+            (engine, max(1, int(limit))),
+        )
+    ]
+
+
+def update_quality_backfill_state(conn, engine):
+    pending = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM refs WHERE engine = ? AND quality_measured = 0",
+            (engine,),
+        ).fetchone()[0]
+    )
+    if pending == 0:
+        state_set(conn, quality_backfill_key(engine), QUALITY_METRICS_VERSION)
+    else:
+        conn.execute("DELETE FROM state WHERE k = ?", (quality_backfill_key(engine),))
+        conn.commit()
+    return pending
 
 
 def reference_quality(display_pixels, box_css):
@@ -1062,32 +1113,68 @@ def _captured_year(raw):
     return int(match.group(1)) if match else 0
 
 
-def refresh_reference_selection(conn, engine=None, people=None):
-    """Select a deterministic, bounded, quality-first diverse subset per person."""
-    conditions = []
+def _reference_identity(person_id, canonical_name, person):
+    person_id = max(0, int(person_id or 0))
+    display = str(canonical_name or person or "").strip()
+    if person_id:
+        return ("term", person_id), display
+    legacy = str(person or display).strip()
+    return ("legacy", legacy), display or legacy
+
+
+def refresh_reference_selection(conn, engine=None, identities=None):
+    """Select a deterministic, bounded, quality-first subset per stable identity."""
     params = []
+    where = ""
     if engine:
-        conditions.append("engine = ?")
+        where = " WHERE engine = ?"
         params.append(engine)
-    if people is not None:
-        clean_people = sorted({str(person) for person in people if str(person)})
-        if not clean_people:
+    requested = None
+    if identities is not None:
+        requested = set()
+        for identity in identities:
+            if isinstance(identity, tuple) and len(identity) == 2:
+                requested.add((str(identity[0]), identity[1]))
+            elif str(identity):
+                requested.add(("legacy", str(identity)))
+        if not requested:
             return
-        conditions.append("person IN (" + ",".join("?" for _ in clean_people) + ")")
-        params.extend(clean_people)
-    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-    groups = conn.execute(
-        f"SELECT DISTINCT engine, person FROM refs{where} ORDER BY engine, person",
+    raw_groups = conn.execute(
+        f"""SELECT engine, person_id,
+                   CASE WHEN person_id > 0 THEN '' ELSE person END
+            FROM refs{where}
+            GROUP BY engine, person_id,
+                     CASE WHEN person_id > 0 THEN '' ELSE person END
+            ORDER BY engine, person_id,
+                     CASE WHEN person_id > 0 THEN '' ELSE person END""",
         params,
     ).fetchall()
-    for group_engine, person in groups:
-        rows = conn.execute(
-            """SELECT id, photo_id, quality, captured_at, vector
-               FROM refs WHERE engine = ? AND person = ? ORDER BY id""",
-            (group_engine, person),
-        ).fetchall()
+    for group_engine, person_id, legacy_name in raw_groups:
+        token = ("term", int(person_id)) if int(person_id) > 0 else ("legacy", str(legacy_name))
+        if requested is not None and token not in requested:
+            continue
+        if int(person_id) > 0:
+            rows = conn.execute(
+                """SELECT id, photo_id, quality, quality_measured, captured_at,
+                          vector, canonical_name, person
+                   FROM refs WHERE engine = ? AND person_id = ? ORDER BY id""",
+                (group_engine, int(person_id)),
+            ).fetchall()
+            group_where = "engine = ? AND person_id = ?"
+            group_params = (group_engine, int(person_id))
+        else:
+            rows = conn.execute(
+                """SELECT id, photo_id, quality, quality_measured, captured_at,
+                          vector, canonical_name, person
+                   FROM refs
+                   WHERE engine = ? AND person_id = 0 AND person = ?
+                   ORDER BY id""",
+                (group_engine, str(legacy_name)),
+            ).fetchall()
+            group_where = "engine = ? AND person_id = 0 AND person = ?"
+            group_params = (group_engine, str(legacy_name))
         usable = []
-        for row_id, photo_id, quality, captured_at, blob in rows:
+        for row_id, photo_id, quality, measured, captured_at, blob, canonical_name, person in rows:
             vector = np.frombuffer(blob, dtype=np.float32)
             if vector.size < 1 or not np.all(np.isfinite(vector)):
                 continue
@@ -1095,8 +1182,14 @@ def refresh_reference_selection(conn, engine=None, people=None):
                 {
                     "id": int(row_id),
                     "photo_id": int(photo_id),
-                    "quality": max(0.0, min(1.0, float(quality))),
+                    "quality": (
+                        max(0.0, min(1.0, float(quality)))
+                        if int(measured)
+                        else 0.5
+                    ),
+                    "quality_measured": bool(measured),
                     "captured_at": str(captured_at or ""),
+                    "display": str(canonical_name or person or ""),
                     "vector": vector,
                 }
             )
@@ -1175,8 +1268,8 @@ def refresh_reference_selection(conn, engine=None, people=None):
             selected.append(candidate)
         active_ids = {row["id"] for row in selected}
         conn.execute(
-            "UPDATE refs SET active = 0 WHERE engine = ? AND person = ?",
-            (group_engine, person),
+            f"UPDATE refs SET active = 0 WHERE {group_where}",
+            group_params,
         )
         for candidate in usable:
             conn.execute(
@@ -1198,20 +1291,36 @@ def replace_photo_references(conn, photo_id, engine, references):
             (photo_id, engine),
         ).fetchone()[0]
     )
-    old_people = {
-        row[0]
+    old_identities = {
+        _reference_identity(row[0], row[1], row[2])[0]
         for row in conn.execute(
-            "SELECT DISTINCT person FROM refs WHERE photo_id = ? AND engine = ?",
+            """SELECT DISTINCT person_id, canonical_name, person
+               FROM refs WHERE photo_id = ? AND engine = ?""",
             (photo_id, engine),
         )
     }
     prepared = []
     for row in rows:
-        person, face_key, vector = row[:3]
+        raw_identity, face_key, vector = row[:3]
+        if isinstance(raw_identity, dict):
+            person_id = max(0, int(raw_identity.get("person_id") or 0))
+            canonical_name = str(
+                raw_identity.get("canonical_name")
+                or raw_identity.get("name")
+                or ""
+            ).strip()
+        else:
+            person_id = 0
+            canonical_name = str(raw_identity or "").strip()
+        if not canonical_name:
+            continue
+        person = canonical_name
         metrics = row[3] if len(row) > 3 and isinstance(row[3], dict) else {}
         prepared.append(
             (
                 person,
+                person_id,
+                canonical_name,
                 photo_id,
                 engine,
                 face_key,
@@ -1220,6 +1329,7 @@ def replace_photo_references(conn, photo_id, engine, references):
                 max(0.0, min(1.0, float(metrics.get("sharpness", 0)))),
                 max(0.0, min(1.0, float(metrics.get("clipping", 0)))),
                 max(0.0, min(1.0, float(metrics.get("quality", 0.5)))),
+                1,
                 str(metrics.get("captured_at") or "")[:40],
                 np.asarray(vector, dtype=np.float32).tobytes(),
             )
@@ -1229,34 +1339,53 @@ def replace_photo_references(conn, photo_id, engine, references):
             "DELETE FROM refs WHERE photo_id = ? AND engine = ?",
             (photo_id, engine),
         )
+        for person_id, canonical_name in sorted(
+            {(row[1], row[2]) for row in prepared if row[1] > 0}
+        ):
+            conn.execute(
+                """UPDATE refs SET person = ?, canonical_name = ?
+                   WHERE engine = ? AND person_id = ?""",
+                (canonical_name, canonical_name, engine, person_id),
+            )
         conn.executemany(
             """INSERT INTO refs (
-                   person, photo_id, engine, face_key,
+                   person, person_id, canonical_name, photo_id, engine, face_key,
                    face_width, face_height, sharpness, clipping,
-                   quality, captured_at, vector
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   quality, quality_measured, captured_at, vector
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             prepared,
         )
         refresh_reference_selection(
             conn,
             engine,
-            old_people.union({row[0] for row in prepared}),
+            old_identities.union(
+                {_reference_identity(row[1], row[2], row[0])[0] for row in prepared}
+            ),
         )
-    return old_count, len(rows)
+    return old_count, len(prepared)
 
 
 def load_references(conn, engine):
     """person -> stacked vectors for this engine, for people with enough
     examples to trust. Vectors from other engines are invisible here."""
-    vectors = {}
-    for person, blob in conn.execute(
-        """SELECT person, vector FROM refs
+    identities = {}
+    for person_id, canonical_name, person, blob in conn.execute(
+        """SELECT person_id, canonical_name, person, vector FROM refs
            WHERE engine = ? AND active = 1
-           ORDER BY person, quality DESC, id""",
+           ORDER BY person_id, canonical_name, person, quality DESC, id""",
         (engine,),
     ):
-        vectors.setdefault(person, []).append(np.frombuffer(blob, dtype=np.float32))
-    return {p: np.vstack(vs) for p, vs in vectors.items() if len(vs) >= MIN_REFERENCES}
+        token, display = _reference_identity(person_id, canonical_name, person)
+        entry = identities.setdefault(token, {"display": display, "vectors": []})
+        if display:
+            entry["display"] = display
+        entry["vectors"].append(np.frombuffer(blob, dtype=np.float32))
+    vectors = {}
+    for entry in identities.values():
+        if len(entry["vectors"]) < MIN_REFERENCES:
+            continue
+        vectors.setdefault(entry["display"], []).extend(entry["vectors"])
+    return {name: np.vstack(rows) for name, rows in vectors.items()}
 
 
 def _unknown_face_key(index):
@@ -1598,11 +1727,19 @@ def wilson_lower_bound(positive, total, z=CALIBRATION_WILSON_Z):
     return max(0.0, (center - margin) / (1.0 + z2 / total))
 
 
-def calibration_report(samples, target=CALIBRATION_TARGET_PRECISION, minimum=CALIBRATION_MIN_SAMPLES):
+def calibration_report(
+    samples,
+    engine,
+    target=CALIBRATION_TARGET_PRECISION,
+    minimum=CALIBRATION_MIN_SAMPLES,
+):
     """Empirical bands and a threshold whose 99% Wilson floor meets the target."""
+    engine = str(engine or "").strip()
     clean = []
     for sample in samples or []:
         if not isinstance(sample, dict):
+            continue
+        if str(sample.get("engine") or "").strip() != engine:
             continue
         outcome = str(sample.get("outcome") or "").lower()
         if outcome not in ("positive", "negative"):
@@ -1657,7 +1794,8 @@ def calibration_report(samples, target=CALIBRATION_TARGET_PRECISION, minimum=CAL
 
     positives = sum(1 for _, positive in clean if positive)
     return {
-        "version": 1,
+        "version": 2,
+        "engine": engine,
         "evaluated": len(clean),
         "positive": positives,
         "negative": len(clean) - positives,
@@ -1670,10 +1808,11 @@ def calibration_report(samples, target=CALIBRATION_TARGET_PRECISION, minimum=CAL
     }
 
 
-def sync_calibration(api, cfg, publish=True):
-    data = api.get("/calibration", limit=5000)
+def sync_calibration(api, cfg, engine, publish=True):
+    data = api.get("/calibration", limit=5000, engine=engine)
     report = calibration_report(
         data.get("samples", []) if isinstance(data, dict) else [],
+        engine,
         cfg_calibration_target(cfg),
         cfg_calibration_min_samples(cfg),
     )
@@ -1686,14 +1825,15 @@ def sync_calibration(api, cfg, publish=True):
 
 
 def calibration_summary(report):
+    prefix = f"[{report.get('engine')}] " if report.get("engine") else ""
     recommendation = report.get("recommended_threshold")
     if recommendation is None:
         return (
-            f"{int(report.get('evaluated', 0))} explicit outcome(s); "
+            f"{prefix}{int(report.get('evaluated', 0))} explicit outcome(s); "
             f"insufficient evidence for a {100 * float(report.get('target_precision', 0.99)):.2f}% precision recommendation"
         )
     return (
-        f"recommend {int(recommendation)}%+ from "
+        f"{prefix}recommend {int(recommendation)}%+ from "
         f"{int(report.get('recommendation_samples', 0))} outcome(s), "
         f"{100 * float(report.get('lower_bound', 0)):.2f}% conservative lower bound; "
         f"saved setting remains {int(report.get('current_threshold', 0))}%"
@@ -2506,23 +2646,18 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
 
 def prioritize_active_learning(items, conn, backend, tolerance):
     """Rank unresolved local work by known, auditable information-value signals."""
-    ref_counts = {
-        person: int(count)
-        for person, count in conn.execute(
-            """SELECT person, COUNT(*) FROM refs
-               WHERE engine = ? AND active = 1 GROUP BY person""",
-            (backend.name,),
-        )
-    }
+    ref_counts = {}
     ref_years = {}
-    for person, captured_at in conn.execute(
-        """SELECT person, captured_at FROM refs
-           WHERE engine = ? AND active = 1 AND captured_at <> ''""",
+    for person_id, canonical_name, person, captured_at in conn.execute(
+        """SELECT person_id, canonical_name, person, captured_at FROM refs
+           WHERE engine = ? AND active = 1""",
         (backend.name,),
     ):
+        _, display = _reference_identity(person_id, canonical_name, person)
+        ref_counts[display] = ref_counts.get(display, 0) + 1
         year = _captured_year(captured_at)
         if year:
-            ref_years.setdefault(person, set()).add(year)
+            ref_years.setdefault(display, set()).add(year)
 
     unknown = []
     for item_index, item in enumerate(items):
@@ -3501,6 +3636,114 @@ def local_label(
 # --------------------------------------------------------------------------- learn
 
 
+def _person_identity_fact(raw, fallback=""):
+    raw = raw if isinstance(raw, dict) else {}
+    name = str(
+        raw.get("canonical_name")
+        or raw.get("name")
+        or fallback
+        or ""
+    ).strip()
+    try:
+        person_id = max(0, int(raw.get("person_id") or 0))
+    except (TypeError, ValueError):
+        person_id = 0
+    return {"person_id": person_id, "canonical_name": name}
+
+
+def _learn_photo(api, conn, backend, photo, verbose=True):
+    """Reconcile one photo only after its pixels were processed successfully."""
+    photo_id = int(photo["id"])
+    context = _photo_context(photo)
+    captured_at = context["taken_at"] or context["uploaded_at"]
+    people = [str(name).strip() for name in photo.get("people", []) if str(name).strip()]
+    person_facts = [
+        _person_identity_fact(fact)
+        for fact in (photo.get("person_facts") or [])
+        if isinstance(fact, dict)
+    ]
+    if not person_facts:
+        person_facts = [_person_identity_fact({}, name) for name in people]
+    labels = [label for label in (photo.get("labels") or []) if isinstance(label, dict)]
+
+    if labels:
+        try:
+            display_pixels = display_rgb_array(api.image(photo["url"]))
+            found = backend.embed_rgb(display_pixels)
+        except Exception as e:
+            if verbose:
+                print(f"  #{photo_id}: {e}")
+            return {"success": False, "old": 0, "new": 0, "skipped": 0}
+        if not found:
+            old_count, _ = replace_photo_references(conn, photo_id, backend.name, [])
+            return {"success": True, "old": old_count, "new": 0, "skipped": 1}
+
+        det_boxes = [css_box_to_xywh(box) for (box, _) in found]
+        used = set()
+        replacements = []
+        for label_index, label in enumerate(labels):
+            identity = _person_identity_fact(label)
+            box = label.get("box") or []
+            if (
+                not identity["canonical_name"]
+                or not isinstance(box, (list, tuple))
+                or len(box) != 4
+            ):
+                continue
+            target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+            best_i, best_iou = -1, 0.0
+            for found_index, detected_box in enumerate(det_boxes):
+                if found_index in used:
+                    continue
+                iou = box_iou_xywh(target, detected_box)
+                if iou > best_iou:
+                    best_i, best_iou = found_index, iou
+            if best_i < 0 or best_iou < 0.15:
+                continue
+            used.add(best_i)
+            box_css, vector = found[best_i]
+            face_key = (
+                f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{label_index}"
+            )
+            metrics = reference_quality(display_pixels, box_css)
+            metrics["captured_at"] = captured_at
+            replacements.append((identity, face_key, vector, metrics))
+        old_count, new_count = replace_photo_references(
+            conn, photo_id, backend.name, replacements
+        )
+        return {
+            "success": True,
+            "old": old_count,
+            "new": new_count,
+            "skipped": 1 if new_count == 0 else 0,
+        }
+
+    if len(person_facts) != 1:
+        old_count, _ = replace_photo_references(conn, photo_id, backend.name, [])
+        return {"success": True, "old": old_count, "new": 0, "skipped": 1}
+    try:
+        display_pixels = display_rgb_array(api.image(photo["url"]))
+        found = backend.embed_rgb(display_pixels)
+    except Exception as e:
+        if verbose:
+            print(f"  #{photo_id}: {e}")
+        return {"success": False, "old": 0, "new": 0, "skipped": 0}
+    if len(found) != 1:
+        old_count, _ = replace_photo_references(conn, photo_id, backend.name, [])
+        return {"success": True, "old": old_count, "new": 0, "skipped": 1}
+
+    box_css, vector = found[0]
+    metrics = reference_quality(display_pixels, box_css)
+    metrics["captured_at"] = captured_at
+    old_count, new_count = replace_photo_references(
+        conn,
+        photo_id,
+        backend.name,
+        [(person_facts[0], "0", vector, metrics)],
+    )
+    return {"success": True, "old": old_count, "new": new_count, "skipped": 0}
+
+
 def learn(api, conn, backend, verbose=True):
     """
     Grow the reference set from photos volunteers have actually tagged.
@@ -3533,6 +3776,39 @@ def learn(api, conn, backend, verbose=True):
     )
     beat.start()
     try:
+        backfill_before = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM refs WHERE engine = ? AND quality_measured = 0",
+                (backend.name,),
+            ).fetchone()[0]
+        )
+        backfill_ids = quality_backfill_photo_ids(conn, backend.name)
+        if backfill_ids:
+            data = api.get(
+                "/confirmed",
+                photos=",".join(str(photo_id) for photo_id in backfill_ids),
+                include_empty=1,
+                limit=len(backfill_ids),
+            )
+            for photo in data.get("photos", []):
+                try:
+                    result = _learn_photo(api, conn, backend, photo, verbose)
+                    if result["success"]:
+                        learned_ids.add(int(photo["id"]))
+                        removed += int(result["old"])
+                        added += int(result["new"])
+                        skipped += int(result["skipped"])
+                finally:
+                    processed += 1
+            pending = update_quality_backfill_state(conn, backend.name)
+            if verbose:
+                print(
+                    f"quality backfill: {max(0, backfill_before - pending)} "
+                    f"reference row(s) refreshed this pass; {pending} remain"
+                )
+        else:
+            update_quality_backfill_state(conn, backend.name)
+
         while True:
             params = {"limit": 100}
             if include_empty:
@@ -3548,8 +3824,6 @@ def learn(api, conn, backend, verbose=True):
 
             for p in photos:
                 photo_id = int(p["id"])
-                context = _photo_context(p)
-                captured_at = context["taken_at"] or context["uploaded_at"]
                 modified = str(p.get("modified") or "")
                 if modified:
                     if modified > since_mod or (modified == since_mod and photo_id > since_id):
@@ -3558,95 +3832,12 @@ def learn(api, conn, backend, verbose=True):
                     since_id = max(since_id, photo_id)
 
                 try:
-                    people = [n for n in p.get("people", []) if n.strip()]
-                    labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
-                    if labels:
-                        try:
-                            display_pixels = display_rgb_array(api.image(p["url"]))
-                            found = backend.embed_rgb(display_pixels)
-                        except Exception as e:  # a missing file must not stop the run
-                            if verbose:
-                                print(f"  #{p['id']}: {e}")
-                            continue
-                        if not found:
-                            old_count, _ = replace_photo_references(
-                                conn, photo_id, backend.name, []
-                            )
-                            removed += old_count
-                            learned_ids.add(photo_id)
-                            skipped += 1
-                            continue
-
-                        det_boxes = [css_box_to_xywh(b) for (b, _) in found]
-                        used = set()
-                        replacements = []
-                        for li, lbl in enumerate(labels):
-                            name = str(lbl.get("name") or "").strip()
-                            box = lbl.get("box") or []
-                            if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
-                                continue
-                            target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
-                            best_i, best_iou = -1, 0.0
-                            for j, db in enumerate(det_boxes):
-                                if j in used:
-                                    continue
-                                iou = box_iou_xywh(target, db)
-                                if iou > best_iou:
-                                    best_i, best_iou = j, iou
-                            if best_i < 0 or best_iou < 0.15:
-                                continue
-                            used.add(best_i)
-                            box_css, vector = found[best_i]
-                            face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
-                            metrics = reference_quality(display_pixels, box_css)
-                            metrics["captured_at"] = captured_at
-                            replacements.append((name, face_key, vector, metrics))
-                        old_count, new_count = replace_photo_references(
-                            conn, photo_id, backend.name, replacements
-                        )
-                        removed += old_count
-                        added += new_count
+                    result = _learn_photo(api, conn, backend, p, verbose)
+                    if result["success"]:
+                        removed += int(result["old"])
+                        added += int(result["new"])
+                        skipped += int(result["skipped"])
                         learned_ids.add(photo_id)
-                        if new_count == 0:
-                            skipped += 1
-                        continue
-
-                    if len(people) != 1:
-                        old_count, _ = replace_photo_references(
-                            conn, photo_id, backend.name, []
-                        )
-                        removed += old_count
-                        learned_ids.add(photo_id)
-                        skipped += 1
-                        continue
-                    try:
-                        display_pixels = display_rgb_array(api.image(p["url"]))
-                        found = backend.embed_rgb(display_pixels)
-                    except Exception as e:  # a missing file must not stop the run
-                        if verbose:
-                            print(f"  #{p['id']}: {e}")
-                        continue
-                    if len(found) != 1:
-                        old_count, _ = replace_photo_references(
-                            conn, photo_id, backend.name, []
-                        )
-                        removed += old_count
-                        learned_ids.add(photo_id)
-                        skipped += 1
-                        continue
-
-                    box_css, vector = found[0]
-                    metrics = reference_quality(display_pixels, box_css)
-                    metrics["captured_at"] = captured_at
-                    old_count, new_count = replace_photo_references(
-                        conn,
-                        photo_id,
-                        backend.name,
-                        [(people[0].strip(), "0", vector, metrics)],
-                    )
-                    removed += old_count
-                    added += new_count
-                    learned_ids.add(photo_id)
                 finally:
                     processed += 1
                     if verbose and processed % 20 == 0:
@@ -3660,6 +3851,7 @@ def learn(api, conn, backend, verbose=True):
                 state_set(conn, wk_mod, since_mod)
             state_set(conn, wk_id, since_id)
             state_set(conn, state_key(backend.name, "learned_to"), since_id)
+        update_quality_backfill_state(conn, backend.name)
     finally:
         beat.stop()
 
@@ -3740,7 +3932,7 @@ def scan(
                 )
                 print(f"{data.get('remaining', 0)} still waiting")
             try:
-                report = sync_calibration(api, cfg)
+                report = sync_calibration(api, cfg, backend.name)
                 if verbose:
                     print("calibration: " + calibration_summary(report))
             except Exception as e:
@@ -4036,28 +4228,56 @@ def status(api, conn, cfg):
         print("local caption model: off")
 
     rows = conn.execute(
-        """SELECT engine, person, COUNT(*), SUM(active), AVG(quality)
-           FROM refs GROUP BY engine, person ORDER BY engine, COUNT(*) DESC"""
+        """SELECT engine, person_id, canonical_name, person,
+                  COUNT(*), SUM(active), SUM(quality), SUM(quality_measured)
+           FROM refs
+           GROUP BY engine, person_id, canonical_name, person
+           ORDER BY engine, COUNT(*) DESC"""
     ).fetchall()
-    by_engine = {}
-    for eng, person, total, active, average_quality in rows:
-        by_engine.setdefault(eng or "(unstamped)", []).append(
-            (person, int(total), int(active or 0), float(average_quality or 0))
+    grouped = {}
+    for eng, person_id, canonical_name, person, total, active, quality_sum, measured in rows:
+        token, display = _reference_identity(person_id, canonical_name, person)
+        key = (eng or "(unstamped)", token)
+        entry = grouped.setdefault(
+            key,
+            {"display": display, "total": 0, "active": 0, "quality": 0.0, "measured": 0},
         )
+        entry["display"] = display or entry["display"]
+        entry["total"] += int(total)
+        entry["active"] += int(active or 0)
+        entry["quality"] += float(quality_sum or 0)
+        entry["measured"] += int(measured or 0)
+    by_engine = {}
+    for (eng, _), entry in grouped.items():
+        average_quality = entry["quality"] / max(1, entry["total"])
+        by_engine.setdefault(eng, []).append(
+            (
+                entry["display"],
+                entry["total"],
+                entry["active"],
+                average_quality,
+                entry["measured"],
+            )
+        )
+    for people in by_engine.values():
+        people.sort(key=lambda row: (-row[1], row[0].casefold()))
 
     if not by_engine:
         print("reference set: empty — run with --learn once photos are tagged")
     for eng, people in by_engine.items():
-        total = sum(n for _, n, _, _ in people)
-        active_total = sum(active for _, _, active, _ in people)
+        total = sum(n for _, n, _, _, _ in people)
+        active_total = sum(active for _, _, active, _, _ in people)
+        measured_total = sum(measured for _, _, _, _, measured in people)
         mark = " (active)" if resolved and eng == _resolved_name(resolved) else ""
         print(
             f"\nreference set [{eng}]{mark}: {len(people)} person(s), "
-            f"{active_total}/{total} active/retained face(s)"
+            f"{active_total}/{total} active/retained face(s), "
+            f"{measured_total}/{total} quality-measured"
         )
-        for person, n, active, average_quality in people[:20]:
+        for person, n, active, average_quality, measured in people[:20]:
             need = "" if active >= MIN_REFERENCES else f"  (needs {MIN_REFERENCES - active} more usable)"
-            print(f"  {active:2d}/{n:<3d}  q={average_quality:.2f}  {person}{need}")
+            pending = "" if measured == n else f"  ({n - measured} quality backfill pending)"
+            print(f"  {active:2d}/{n:<3d}  q={average_quality:.2f}  {person}{need}{pending}")
         if len(people) > 20:
             print(f"  ... and {len(people) - 20} more")
         print(f"  learned up to photo #{state_get(conn, state_key(eng, 'learned_to'), '0')}")
@@ -4074,7 +4294,9 @@ def status(api, conn, cfg):
 
     if api is not None:
         try:
-            report = sync_calibration(api, cfg)
+            if not resolved:
+                raise RuntimeError("no recognition backend is installed")
+            report = sync_calibration(api, cfg, _resolved_name(resolved))
             print("\nconfidence calibration:")
             print("  " + calibration_summary(report))
             print("  recommendations never change the saved WordPress threshold")
@@ -4353,13 +4575,26 @@ def selftest():
     )
 
     insufficient = calibration_report(
-        [{"confidence": 99, "outcome": "positive"} for _ in range(29)],
+        [
+            {"engine": "engineA", "confidence": 99, "outcome": "positive"}
+            for _ in range(29)
+        ],
+        "engineA",
         target=0.99,
         minimum=30,
     )
     sufficient = calibration_report(
-        [{"confidence": 99, "outcome": "positive"} for _ in range(700)]
-        + [{"confidence": 94, "outcome": "negative"} for _ in range(4)],
+        [
+            {"engine": "engineA", "confidence": 99, "outcome": "positive"}
+            for _ in range(700)
+        ]
+        + [
+            {"engine": "engineA", "confidence": 94, "outcome": "negative"}
+            for _ in range(4)
+        ]
+        + [{"engine": "engineB", "confidence": 99, "outcome": "negative"}]
+        + [{"confidence": 99, "outcome": "positive"}],
+        "engineA",
         target=0.99,
         minimum=30,
     )
@@ -4378,6 +4613,12 @@ def selftest():
         bands["90-94%"]["total"] == 4
         and bands["95-99%"]["positive"] == 700,
         "calibration: confidence-band outcome counts are deterministic",
+    )
+    check_that(
+        sufficient["engine"] == "engineA"
+        and sufficient["evaluated"] == 704
+        and sufficient["negative"] == 4,
+        "calibration: mixed-engine and legacy evidence cannot influence the resolved engine",
     )
 
     # database: schema, per-engine isolation, the MIN_REFERENCES floor, watermarks.
@@ -4405,6 +4646,94 @@ def selftest():
         state_set(conn, state_key("engineA", "learned_to"), 103)
         check_that(state_get(conn, state_key("engineB", "learned_to"), "0") == "0",
                    "db: learn watermarks are per engine")
+        alias_vectors = [
+            ("Jürgen Example", 1101, 501),
+            ("Juergen Example", 1102, 501),
+            ("Jurgen Example", 1103, 501),
+        ]
+        for display, photo_id, person_id in alias_vectors:
+            conn.execute(
+                """INSERT INTO refs (
+                       person, person_id, canonical_name, photo_id, engine,
+                       face_key, quality_measured, vector
+                   ) VALUES (?, ?, 'Jürgen Example', ?, 'engineA', '0', 1, ?)""",
+                (display, person_id, photo_id, vec),
+            )
+        conn.commit()
+        refresh_reference_selection(conn, "engineA", {("term", 501)})
+        conn.commit()
+        alias_refs = load_references(conn, "engineA")
+        check_that(
+            "Jürgen Example" in alias_refs
+            and alias_refs["Jürgen Example"].shape == (MIN_REFERENCES, 3)
+            and not any(name in alias_refs for name in ("Juergen Example", "Jurgen Example")),
+            "reference identity: alias spellings share one minimum-reference floor",
+        )
+        replace_photo_references(
+            conn,
+            1101,
+            "engineA",
+            [(
+                {"person_id": 501, "canonical_name": "Jürgen Renamed"},
+                "0",
+                np.array([1.0, 2.0, 3.0], dtype=np.float32),
+                {"quality": 0.8},
+            )],
+        )
+        renamed_rows = conn.execute(
+            """SELECT DISTINCT person_id, canonical_name FROM refs
+               WHERE engine = 'engineA' AND person_id = 501"""
+        ).fetchall()
+        check_that(
+            renamed_rows == [(501, "Jürgen Renamed")]
+            and "Jürgen Renamed" in load_references(conn, "engineA"),
+            "reference identity: a stable term rename updates every retained row",
+        )
+        for photo_id in (1201, 1202):
+            replace_photo_references(
+                conn,
+                photo_id,
+                "engineA",
+                [(
+                    {"person_id": 601, "canonical_name": "Merge Source"},
+                    "0",
+                    np.array([2.0, float(photo_id), 0.0], dtype=np.float32),
+                    {"quality": 0.8},
+                )],
+            )
+        replace_photo_references(
+            conn,
+            1203,
+            "engineA",
+            [(
+                {"person_id": 602, "canonical_name": "Merge Destination"},
+                "0",
+                np.array([2.0, 1203.0, 0.0], dtype=np.float32),
+                {"quality": 0.8},
+            )],
+        )
+        for photo_id in (1201, 1202):
+            replace_photo_references(
+                conn,
+                photo_id,
+                "engineA",
+                [(
+                    {"person_id": 602, "canonical_name": "Merge Destination"},
+                    "0",
+                    np.array([2.0, float(photo_id), 0.0], dtype=np.float32),
+                    {"quality": 0.8},
+                )],
+            )
+        merged_ids = conn.execute(
+            """SELECT DISTINCT person_id FROM refs
+               WHERE engine = 'engineA' AND photo_id BETWEEN 1201 AND 1203"""
+        ).fetchall()
+        check_that(
+            merged_ids == [(602,)]
+            and "Merge Destination" in load_references(conn, "engineA")
+            and "Merge Source" not in load_references(conn, "engineA"),
+            "reference identity: merge reconciliation leaves no competing local identity",
+        )
         for offset in range(18):
             person = "Diverse"
             vector = np.array(
@@ -4759,7 +5088,12 @@ def selftest():
             "modified": "2026-08-08 01:00:00",
             "url": "selftest://501",
             "people": [],
-            "labels": [{"name": "Anna", "box": [10, 10, 20, 20]}],
+            "labels": [{
+                "name": "Anna",
+                "person_id": 701,
+                "canonical_name": "Anna",
+                "box": [10, 10, 20, 20],
+            }],
         })
         learn(first, conn, backend, verbose=False)
         corrected = LearnApi({
@@ -4767,15 +5101,22 @@ def selftest():
             "modified": "2026-08-08 01:00:01",
             "url": "selftest://501",
             "people": [],
-            "labels": [{"name": "Berta", "box": [10, 10, 20, 20]}],
+            "labels": [{
+                "name": "Berta",
+                "person_id": 702,
+                "canonical_name": "Berta",
+                "box": [10, 10, 20, 20],
+            }],
         })
         learn(corrected, conn, backend, verbose=False)
         rows = conn.execute(
-            "SELECT person FROM refs WHERE photo_id = 501 AND engine = ?",
+            """SELECT person, person_id, canonical_name FROM refs
+               WHERE photo_id = 501 AND engine = ?""",
             (backend.name,),
         ).fetchall()
         check_that(
-            rows == [("Berta",)] and corrected.get_params[0].get("include_empty") == 1,
+            rows == [("Berta", 702, "Berta")]
+            and corrected.get_params[0].get("include_empty") == 1,
             "learn: correcting a face replaces its old reference and requests removals",
         )
         removed = LearnApi({
@@ -4791,6 +5132,84 @@ def selftest():
             (backend.name,),
         ).fetchone()[0]
         check_that(left == 0, "learn: removing confirmed truth deletes the photo's stale references")
+
+        for photo_id, measured in ((1301, 1), (1302, 1), (1303, 0)):
+            conn.execute(
+                """INSERT INTO refs (
+                       person, person_id, canonical_name, photo_id, engine,
+                       face_key, quality, quality_measured, vector
+                   ) VALUES ('Backfill Person', 801, 'Backfill Person', ?, ?, '0', 0.5, ?, ?)""",
+                (photo_id, backend.name, measured, vec),
+            )
+        conn.commit()
+        watermark_before = state_get(conn, state_key(backend.name, "learned_modified"), "")
+        quality_image = io.BytesIO()
+        Image.fromarray(checker).save(quality_image, format="PNG")
+
+        class BackfillApi:
+            def __init__(self, fail_image):
+                self.fail_image = fail_image
+                self.backfill_requests = []
+
+            def get(self, path, **params):
+                if path != "/confirmed":
+                    raise RuntimeError(f"unexpected backfill path {path}")
+                if "photos" not in params:
+                    return {"photos": []}
+                self.backfill_requests.append(params)
+                return {
+                    "photos": [{
+                        "id": 1303,
+                        "modified": "2020-01-01 00:00:00",
+                        "url": "selftest://1303",
+                        "people": ["Backfill Person"],
+                        "person_facts": [{
+                            "person_id": 801,
+                            "canonical_name": "Backfill Person",
+                        }],
+                        "labels": [],
+                    }]
+                }
+
+            def image(self, _url):
+                if self.fail_image:
+                    raise RuntimeError("temporary image failure")
+                return quality_image.getvalue()
+
+            def post(self, path, _payload):
+                if path != "/learned":
+                    raise RuntimeError(f"unexpected backfill post {path}")
+                return {"ok": True}
+
+        failed_backfill = BackfillApi(True)
+        learn(failed_backfill, conn, backend, verbose=False)
+        failed_state = conn.execute(
+            """SELECT COUNT(*), SUM(quality_measured) FROM refs
+               WHERE engine = ? AND person_id = 801""",
+            (backend.name,),
+        ).fetchone()
+        check_that(
+            failed_state == (3, 2)
+            and state_get(conn, quality_backfill_key(backend.name), "") != str(QUALITY_METRICS_VERSION),
+            "quality backfill: a failed photo preserves the corpus and remains resumable",
+        )
+        successful_backfill = BackfillApi(False)
+        learn(successful_backfill, conn, backend, verbose=False)
+        measured_row = conn.execute(
+            """SELECT quality_measured, face_width, face_height
+               FROM refs WHERE engine = ? AND photo_id = 1303""",
+            (backend.name,),
+        ).fetchone()
+        check_that(
+            measured_row
+            and measured_row[0] == 1
+            and measured_row[1] > 0
+            and measured_row[2] > 0
+            and len(load_references(conn, backend.name)["Backfill Person"]) >= MIN_REFERENCES
+            and state_get(conn, quality_backfill_key(backend.name), "") == str(QUALITY_METRICS_VERSION)
+            and state_get(conn, state_key(backend.name, "learned_modified"), "") == watermark_before,
+            "quality backfill: success records real metrics without resetting the learn watermark",
+        )
         conn.close()
 
         # migration: a pre-engine database is stamped as dlib, not reinterpreted.
@@ -4833,9 +5252,20 @@ def selftest():
             for row in conn.execute("PRAGMA table_info(refs)")
         }
         check_that(
-            {"quality", "redundancy", "active", "captured_at"}.issubset(migrated_ref_cols)
-            and conn.execute("SELECT COUNT(*) FROM refs").fetchone()[0] == 1,
-            "db: legacy references gain quality metadata without data loss",
+            {
+                "person_id", "canonical_name", "quality", "quality_measured",
+                "redundancy", "active", "captured_at",
+            }.issubset(migrated_ref_cols)
+            and conn.execute(
+                """SELECT person_id, canonical_name, quality_measured
+                   FROM refs"""
+            ).fetchone() == (0, "Old", 0)
+            and state_get(
+                conn,
+                quality_backfill_key("face_recognition:dlib-hog"),
+                "",
+            ) == "",
+            "db: legacy references remain intact and explicitly await real quality backfill",
         )
         dismissal_cols = {
             row[1]
