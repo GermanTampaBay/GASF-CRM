@@ -68,10 +68,12 @@ It is shown once. If you lose it, issue a new one.
 
 import argparse
 import base64
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
@@ -844,13 +846,17 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
     return items, dedup
 
 
-def _label_ui_html():
-    return """<!doctype html>
+def _label_ui_html(label_flow=False, session_token=""):
+    followup = "true" if label_flow else "false"
+    html = """<!doctype html>
 <html><head><meta charset="utf-8"><title>GASF Face Labeler</title>
 <style>
 body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0}
-.top{padding:12px 16px;border-bottom:1px solid #26324a;display:flex;gap:12px;align-items:center;justify-content:space-between}
-.main{padding:14px}
+.top{position:sticky;top:0;z-index:20;padding:12px 16px;border-bottom:1px solid #26324a;background:#0f172a;
+display:flex;gap:12px;align-items:center;justify-content:space-between}
+.topactions{display:flex;gap:12px;align-items:center}
+.finish{padding:8px 14px;border:1px solid #2563eb;border-radius:6px;background:#2563eb;color:white;cursor:pointer;font-weight:600}
+.main{padding:14px;overflow:auto}
 .view{display:none}
 .view.on{display:block}
 .gallery{border:1px solid #2d3748;border-radius:10px;background:#111827;padding:12px}
@@ -863,10 +869,10 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 .gbtn img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:6px;display:block;background:#0b1220}
 .gph{display:block;width:100%;aspect-ratio:1/1;border-radius:6px;background:#0b1220;border:1px dashed #334155}
 .gmeta{display:block;font-size:12px;padding:6px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.detail{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:14px}
-.stage{position:relative;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
+.detail{display:grid;grid-template-columns:minmax(0,1fr) clamp(300px,34vw,430px);gap:14px;align-items:start}
+.stage{position:relative;min-width:0;background:#111827;border:1px solid #2d3748;border-radius:8px;overflow:hidden;min-height:360px;text-align:center}
 .frame{position:relative;display:inline-block;max-width:100%;line-height:0}
-#photo{display:block;max-width:100%;height:auto;position:relative;z-index:1}
+#photo{display:block;max-width:100%;max-height:calc(100vh - 130px);width:auto;height:auto;position:relative;z-index:1}
 #ov{position:absolute;inset:0;pointer-events:none;z-index:2}
 .fb{position:absolute;border:3px solid #60a5fa;background:rgba(37,99,235,.16);border-radius:7px;
 box-shadow:0 0 0 1px rgba(15,23,42,.75),0 0 0 1px rgba(15,23,42,.75) inset}
@@ -877,21 +883,31 @@ border-radius:0 0 7px 0;font-weight:800;font-size:clamp(14px,1.15vw,18px);line-h
 .fb-ext-right-down span{left:100%;top:0;transform:translate(6px,6px)}
 .fb-ext-left-up span{left:auto;right:100%;top:0;transform:translate(-6px,-100%)}
 .fb-ext-left-down span{left:auto;right:100%;top:0;transform:translate(-6px,6px)}
-.side{border:1px solid #2d3748;border-radius:8px;padding:12px;background:#111827}
+.side{border:1px solid #2d3748;border-radius:8px;padding:12px;background:#111827;
+display:flex;flex-direction:column;max-height:calc(100vh - 130px)}
 .muted{color:#94a3b8}
 .people{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
 .pchip{background:#1f2937;color:#e5e7eb;border:1px solid #374151;border-radius:999px;padding:3px 10px;font-size:12px}
-.rows{display:grid;gap:8px;max-height:56vh;overflow:auto}
+.rows{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto}
 .row{display:grid;grid-template-columns:64px 1fr auto;gap:6px;align-items:center}
 .row label{font-size:12px;color:#cbd5e1}
 .row input{background:#0b1220;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:6px 8px}
 .row button{background:#1d4ed8;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer}
-.acts{display:flex;gap:8px;margin-top:12px}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;padding-top:8px}
 .acts button{padding:8px 12px;border:1px solid #334155;border-radius:6px;background:#0b1220;color:#e5e7eb;cursor:pointer}
 .acts .pri{background:#2563eb;border-color:#2563eb;color:white}
+.acts button:disabled,.finish:disabled{opacity:.55;cursor:wait}
+.finishview{max-width:620px;margin:12vh auto 0;padding:28px;border:1px solid #334155;border-radius:10px;background:#111827;text-align:center}
+.finishview h2{margin:0 0 10px}
+.finishview button{margin-top:14px;padding:8px 14px;border:1px solid #334155;border-radius:6px;background:#0b1220;color:#e5e7eb;cursor:pointer}
+.spinner{width:30px;height:30px;margin:18px auto;border:4px solid #334155;border-top-color:#60a5fa;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 </style></head>
 <body>
-<div class="top"><div><strong id="title">Loading…</strong><div class="muted" id="sub"></div></div><div id="stat" class="muted"></div></div>
+<div class="top">
+  <div><strong id="title">Loading...</strong><div class="muted" id="sub"></div></div>
+  <div class="topactions"><div id="stat" class="muted"></div><button id="finish" class="finish">Finish labeling</button></div>
+</div>
 <div class="main">
   <section class="view gallery on" id="galleryView">
     <div class="ghead"><h3>Photo gallery</h3><label class="muted">Show
@@ -910,24 +926,45 @@ border-radius:0 0 7px 0;font-weight:800;font-size:clamp(14px,1.15vw,18px);line-h
         <datalist id="peopleListLocal"></datalist>
         <datalist id="peopleListGlobal"></datalist>
       <div class="rows" id="rows"></div>
+      <div class="muted">Names save automatically when you move to another photo.</div>
       <div class="acts">
         <button id="back">Back</button>
         <button id="next">Next</button>
         <button id="save" class="pri">Save & Next</button>
         <button id="exit">Exit to gallery</button>
-        <button id="done">Done</button>
       </div>
     </div>
   </section>
+  <section class="view finishview" id="finishView" aria-live="polite">
+    <h2 id="finishTitle">Finishing labeling...</h2>
+    <div class="spinner" id="finishSpinner"></div>
+    <div id="finishMessage" class="muted">Saving any names on the current photo.</div>
+    <button id="finishBack" type="button" hidden>Back to labeling</button>
+  </section>
 </div>
 <script>
-let count=0, pos=0, current=null, activeGallery=[], allGallery=[];
+const labelFlow=__LABEL_FLOW__;
+const sessionToken=__LABEL_TOKEN__;
+let count=0, pos=0, current=null, activeGallery=[], allGallery=[], loadSeq=0, photoAbort=null;
+let saving=false, finishing=false, dirty=false, finishPollFailures=0, finishReturnView='galleryView';
 const nameSet = new Map();
-async function j(url,opt){ const r=await fetch(url,opt); if(!r.ok){throw new Error(await r.text()||r.statusText);} return r.json(); }
+async function j(url,opt){
+  const next=Object.assign({},opt||{});
+  const headers=new Headers(next.headers||{});
+  headers.set('X-GASF-Label-Token',sessionToken);
+  next.headers=headers;
+  const r=await fetch(url,next);
+  if(!r.ok){throw new Error(await r.text()||r.statusText);}
+  return r.json();
+}
 function setText(id,t){document.getElementById(id).textContent=t;}
 function esc(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-function showGallery(){ document.getElementById('galleryView').classList.add('on'); document.getElementById('detailView').classList.remove('on'); }
-function showDetail(){ document.getElementById('galleryView').classList.remove('on'); document.getElementById('detailView').classList.add('on'); }
+function showOnly(id){
+  document.querySelectorAll('.main > .view').forEach(v=>v.classList.toggle('on',v.id===id));
+}
+function showGallery(){ showOnly('galleryView'); }
+function showDetail(){ showOnly('detailView'); }
+function showFinish(){ showOnly('finishView'); }
 function gallerySub(){
   const f = (document.getElementById('gfilter')||{}).value || 'all';
   const nouns = {all:'photo', partial:'partially tagged photo', untagged:'untagged photo'};
@@ -986,6 +1023,7 @@ function drawCurrent(){
 }
 function render(p){
   current=p;
+  dirty=false;
   showDetail();
   setText('title', `Photo #${p.id}`);
   setText('sub', `${p.boxes.length} face box(es)`);
@@ -1014,10 +1052,11 @@ function render(p){
     const i=b.getAttribute('data-fill');
     const hint=(p.hints||[]).find(h=>String(h.index)===String(i));
     const inp=rows.querySelector(`input[data-i="${i}"]`);
-    if(inp && hint && hint.name){inp.value=hint.name; inp.focus();}
+    if(inp && hint && hint.name){inp.value=hint.name; dirty=true; inp.focus();}
   });
   rows.querySelectorAll('input[data-i]').forEach(inp=>{
     inp.addEventListener('input', ()=>{
+      dirty=true;
       if(!localNames.length){ inp.setAttribute('list','peopleListGlobal'); return; }
       const vA=foldName(inp.value||'', true);
       const vB=foldName(inp.value||'', false);
@@ -1034,17 +1073,42 @@ function render(p){
   refreshNameList();
 }
 async function load(globalIndex){
-  const p = await j(`/api/photo?i=${globalIndex}`);
+  const seq = ++loadSeq;
+  if(photoAbort){ photoAbort.abort(); }
+  photoAbort = new AbortController();
+  const r = await fetch(`/api/photo?i=${globalIndex}`, {
+    signal:photoAbort.signal,
+    headers:{'X-GASF-Label-Token':sessionToken}
+  });
+  if (seq !== loadSeq) { return; }
+  if(!r.ok){ throw new Error(await r.text()||r.statusText); }
+  const p = await r.json();
+  if (seq !== loadSeq) { return; }
   render(p);
+}
+async function openByPos(newPos){
+  if(finishing || newPos < 0 || newPos >= count || !activeGallery[newPos]){ return; }
+  pos = newPos;
+  setText('sub', 'Loading photo...');
+  try{
+    await load(activeGallery[pos].global_i);
+  } catch (e){
+    if(e && e.name !== 'AbortError'){
+      setText('sub', e.message ? e.message : String(e));
+    }
+  }
 }
 function paintGallery(){
   const gl=document.getElementById('glist');
+  if(!activeGallery.length){
+    gl.innerHTML='<div class="muted">No photos in this filter.</div>';
+    return;
+  }
   gl.innerHTML=activeGallery.map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}">${
     g.thumb ? `<img src="${g.thumb}" alt="">` : `<span class="gph" aria-hidden="true"></span>`
   }<span class="gmeta">#${g.id}</span></button>`).join('');
   gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{
-    pos = parseInt(b.getAttribute('data-i'),10)||0;
-    await load(activeGallery[pos].global_i);
+    await openByPos(parseInt(b.getAttribute('data-i'),10)||0);
   });
 }
 function applyFilter(){
@@ -1072,8 +1136,8 @@ async function init(){
   applyFilter();
   if(!count){ setText('title','Nothing to label'); return; }
 }
-async function saveAndNext(){
-  if(!current){return;}
+function collectLabels(){
+  if(!current){return [];}
   const labels=[];
   document.querySelectorAll('#rows input').forEach(inp=>{
     const name=inp.value.trim(); if(!name){return;}
@@ -1081,21 +1145,164 @@ async function saveAndNext(){
     const i=parseInt(inp.getAttribute('data-i'),10); labels.push({name, box: current.boxes[i]});
   });
   refreshNameList();
-  if(labels.length){ await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})}); }
-  if(pos+1 < count){ pos += 1; await load(activeGallery[pos].global_i); } else { setText('sub','Saved. End of batch.'); }
+  return labels;
+}
+function updateGalleryStatus(photoId, labels){
+  const status = !labels.length ? 'untagged' : (current && labels.length >= current.boxes.length ? 'full' : 'partial');
+  const item = allGallery.find(g=>Number(g.id)===Number(photoId));
+  if(item){ item.status=status; }
+}
+async function saveCurrentOnly(){
+  if(!current || !dirty || saving){return 0;}
+  const labels=collectLabels();
+  if(!labels.length){
+    dirty=false;
+    return 0;
+  }
+  saving=true;
+  const saveBtn=document.getElementById('save');
+  const finishBtn=document.getElementById('finish');
+  saveBtn.disabled=true;
+  finishBtn.disabled=true;
+  saveBtn.textContent='Saving...';
+  try{
+    const out = await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})});
+    updateGalleryStatus(current.id,labels);
+    dirty=false;
+    return Number((out && out.stored) || 0);
+  } finally {
+    saving=false;
+    saveBtn.disabled=false;
+    finishBtn.disabled=false;
+    saveBtn.textContent='Save & Next';
+  }
+}
+async function saveAndNext(){
+  if(!current || saving){return;}
+  try{
+    await saveCurrentOnly();
+    if(pos+1 < count){ await openByPos(pos + 1); }
+    else { setText('sub','Saved. End of batch.'); }
+  } catch(e){
+    setText('sub', e && e.message ? e.message : String(e));
+  }
+}
+async function saveAndOpen(newPos){
+  if(saving || finishing){return;}
+  try{
+    await saveCurrentOnly();
+    await openByPos(newPos);
+  } catch(e){
+    setText('sub',e && e.message ? e.message : String(e));
+  }
+}
+async function pollFinish(){
+  if(!finishing){return;}
+  try{
+    const s=await j('/api/finish-status');
+    finishPollFailures=0;
+    if(s.status==='done'){
+      setText('finishTitle','Labeling finished');
+      setText('finishMessage',labelFlow
+        ? 'Your labels are saved. Learning and scanning are continuing in ScanGUI.'
+        : 'Your labels are saved. You can close this tab.');
+      document.getElementById('finishSpinner').hidden=true;
+      document.getElementById('finish').disabled=true;
+      return;
+    }
+    if(s.status==='error'){
+      finishing=false;
+      setText('finishTitle','Could not finish');
+      setText('finishMessage',s.message||'The current labels could not be saved.');
+      document.getElementById('finishSpinner').hidden=true;
+      document.getElementById('finishBack').hidden=false;
+      document.getElementById('finish').disabled=false;
+      document.getElementById('finish').textContent='Finish labeling';
+      return;
+    }
+    setText('finishMessage',s.message||'Saving any names on the current photo.');
+    setTimeout(pollFinish,400);
+  } catch(e){
+    finishPollFailures += 1;
+    if(finishPollFailures < 5){
+      setText('finishMessage','Still waiting for ScanGUI to confirm the save...');
+      setTimeout(pollFinish,800);
+      return;
+    }
+    setText('finishTitle','Finish sent to ScanGUI');
+    setText('finishMessage','This page could not confirm the final status. Check the ScanGUI output before closing this tab.');
+    document.getElementById('finishSpinner').hidden=true;
+  }
+}
+async function beginFinish(){
+  if(finishing || saving){return;}
+  finishing=true;
+  finishPollFailures=0;
+  finishReturnView=document.getElementById('detailView').classList.contains('on')?'detailView':'galleryView';
+  if(photoAbort){photoAbort.abort();}
+  const finishBtn=document.getElementById('finish');
+  finishBtn.disabled=true;
+  finishBtn.textContent='Finishing...';
+  document.getElementById('finishBack').hidden=true;
+  document.getElementById('finishSpinner').hidden=false;
+  setText('finishTitle','Finishing labeling...');
+  setText('finishMessage','Saving any names on the current photo.');
+  showFinish();
+  const labels=dirty ? collectLabels() : [];
+  try{
+    await j('/api/finish',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({photo:current?current.id:0,labels})
+    });
+    pollFinish();
+  } catch(e){
+    finishing=false;
+    setText('finishTitle','Could not finish');
+    setText('finishMessage',e && e.message ? e.message : String(e));
+    document.getElementById('finishSpinner').hidden=true;
+    document.getElementById('finishBack').hidden=false;
+    finishBtn.disabled=false;
+    finishBtn.textContent='Finish labeling';
+  }
 }
 document.getElementById('save').onclick=saveAndNext;
-document.getElementById('back').onclick=async()=>{ if(pos>0){ pos -= 1; await load(activeGallery[pos].global_i); } };
-document.getElementById('next').onclick=async()=>{ if(pos+1 < count){ pos += 1; await load(activeGallery[pos].global_i); } };
-document.getElementById('exit').onclick=()=>{ showGallery(); setText('title','Photo gallery'); setText('sub', gallerySub()); setText('stat',''); };
-document.getElementById('done').onclick=async()=>{ await j('/api/done',{method:'POST'}); setText('sub','Done. You can close this tab.'); };
+document.getElementById('back').onclick=async()=>{ await saveAndOpen(pos - 1); };
+document.getElementById('next').onclick=async()=>{ await saveAndOpen(pos + 1); };
+document.getElementById('exit').onclick=async()=>{
+  if(saving || finishing){return;}
+  try{
+    await saveCurrentOnly();
+    applyFilter();
+  } catch(e){
+    setText('sub',e && e.message ? e.message : String(e));
+  }
+};
+document.getElementById('finish').onclick=beginFinish;
+document.getElementById('finishBack').onclick=()=>{
+  showOnly(finishReturnView);
+  document.getElementById('finishBack').hidden=true;
+};
 window.addEventListener('resize', ()=>drawCurrent());
 document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ setTimeout(drawCurrent, 60); } });
 init().catch(e=>{ setText('title','Error'); setText('sub', e.message||String(e)); });
 </script></body></html>"""
+    return (
+        html.replace("__LABEL_FLOW__", followup)
+        .replace("__LABEL_TOKEN__", json.dumps(session_token))
+    )
 
 
-def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", uploaded_before=""):
+def local_label(
+    api,
+    conn,
+    backend,
+    tolerance,
+    limit=500,
+    uploaded_after="",
+    uploaded_before="",
+    label_flow=False,
+):
     """Interactive local browser UI: tag faces and step next in one page."""
     items, people_names = _collect_label_items(
         api,
@@ -1110,7 +1317,17 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
         print("No confirmed photos with detectable faces are available for local labeling.")
         return 0
 
-    state = {"items": items, "saved": 0, "done": threading.Event(), "people": people_names}
+    state = {
+        "items": items,
+        "saved": 0,
+        "done": threading.Event(),
+        "people": people_names,
+        "lock": threading.Lock(),
+        "finish": {"status": "idle", "message": ""},
+        "token": secrets.token_urlsafe(32),
+        "image_cache": OrderedDict(),
+        "finish_thread": None,
+    }
 
     class LabelHandler(BaseHTTPRequestHandler):
         def _write(self, code, payload, ctype="application/json; charset=utf-8"):
@@ -1118,6 +1335,16 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            if ctype.startswith("text/html"):
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'self'; img-src 'self' data:; "
+                    "style-src 'unsafe-inline'; script-src 'unsafe-inline'; "
+                    "connect-src 'self'; frame-ancestors 'none'",
+                )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             try:
@@ -1126,10 +1353,23 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
                 # Browser tab closed or navigation interrupted mid-response.
                 return
 
+        def _authorized(self):
+            supplied = self.headers.get("X-GASF-Label-Token", "")
+            return bool(supplied) and secrets.compare_digest(supplied, state["token"])
+
         def do_GET(self):
             u = urlparse(self.path)
             if u.path == "/":
-                return self._write(200, _label_ui_html(), "text/html; charset=utf-8")
+                supplied = (parse_qs(u.query or "").get("token") or [""])[0]
+                if not supplied or not secrets.compare_digest(supplied, state["token"]):
+                    return self._write(403, "Forbidden", "text/plain; charset=utf-8")
+                return self._write(
+                    200,
+                    _label_ui_html(label_flow, state["token"]),
+                    "text/html; charset=utf-8",
+                )
+            if not self._authorized():
+                return self._write(403, json.dumps({"error": "Forbidden"}))
             if u.path == "/api/meta":
                 gallery = [
                     {"id": it["id"], "thumb": it.get("thumb", ""), "status": it.get("status", "untagged"), "global_i": i}
@@ -1141,25 +1381,49 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
                     "people": state["people"],
                     "gallery": gallery,
                 }))
+            if u.path == "/api/finish-status":
+                with state["lock"]:
+                    status = dict(state["finish"])
+                    status["saved_total"] = state["saved"]
+                return self._write(200, json.dumps(status))
             if u.path == "/api/photo":
                 q = parse_qs(u.query or "")
-                i = int((q.get("i") or ["0"])[0] or 0)
+                try:
+                    i = int((q.get("i") or ["0"])[0] or 0)
+                except (TypeError, ValueError):
+                    return self._write(400, json.dumps({"error": "Invalid photo index"}))
                 if i < 0 or i >= len(state["items"]):
                     return self._write(404, json.dumps({"error": "No such photo index"}))
-                item = state["items"][i]
-                if not item.get("image"):
+                item = dict(state["items"][i])
+                with state["lock"]:
+                    image_bytes = state["image_cache"].get(i)
+                    if image_bytes is not None:
+                        state["image_cache"].move_to_end(i)
+                if image_bytes is None:
                     try:
                         image_bytes = api.image(item["url"])
-                    except Exception as e:
+                    except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
                         return self._write(502, json.dumps({"error": f"Could not load photo #{item.get('id')}: {e}"}))
-                    mime = _mime_for_image(image_bytes)
-                    item["image"] = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+                    with state["lock"]:
+                        state["image_cache"][i] = image_bytes
+                        state["image_cache"].move_to_end(i)
+                        while len(state["image_cache"]) > 4:
+                            state["image_cache"].popitem(last=False)
+                mime = _mime_for_image(image_bytes)
+                item["image"] = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('ascii')}"
                 return self._write(200, json.dumps(item))
             return self._write(404, json.dumps({"error": "Not found"}))
 
         def do_POST(self):
             u = urlparse(self.path)
-            n = int(self.headers.get("Content-Length", "0") or 0)
+            if not self._authorized():
+                return self._write(403, json.dumps({"error": "Forbidden"}))
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                return self._write(400, json.dumps({"error": "Invalid content length"}))
+            if n > 1024 * 1024:
+                return self._write(413, json.dumps({"error": "Request too large"}))
             raw = self.rfile.read(n) if n > 0 else b"{}"
             try:
                 data = json.loads(raw.decode("utf-8") or "{}")
@@ -1167,20 +1431,69 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
                 return self._write(400, json.dumps({"error": "Invalid JSON"}))
 
             if u.path == "/api/save":
-                photo = int(data.get("photo") or 0)
+                try:
+                    photo = int(data.get("photo") or 0)
+                except (TypeError, ValueError):
+                    return self._write(400, json.dumps({"error": "Invalid photo id"}))
                 labels = [l for l in (data.get("labels") or []) if isinstance(l, dict)]
                 if photo < 1:
                     return self._write(400, json.dumps({"error": "Missing photo id"}))
                 if not labels:
                     return self._write(200, json.dumps({"ok": True, "stored": 0, "saved_total": state["saved"]}))
-                out = api.post("/label", {"photo": photo, "labels": labels})
+                try:
+                    out = api.post("/label", {"photo": photo, "labels": labels})
+                except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
+                    return self._write(502, json.dumps({"error": f"Could not save labels: {e}"}))
                 kept = int(out.get("stored") or 0)
-                state["saved"] += kept
-                return self._write(200, json.dumps({"ok": True, "stored": kept, "saved_total": state["saved"]}))
+                with state["lock"]:
+                    state["saved"] += kept
+                    saved_total = state["saved"]
+                return self._write(200, json.dumps({"ok": True, "stored": kept, "saved_total": saved_total}))
 
-            if u.path == "/api/done":
-                state["done"].set()
-                return self._write(200, json.dumps({"ok": True, "saved_total": state["saved"]}))
+            if u.path == "/api/finish":
+                try:
+                    photo = int(data.get("photo") or 0)
+                except (TypeError, ValueError):
+                    return self._write(400, json.dumps({"error": "Invalid photo id"}))
+                labels = [l for l in (data.get("labels") or []) if isinstance(l, dict)]
+                if labels and photo < 1:
+                    return self._write(400, json.dumps({"error": "Missing photo id"}))
+                with state["lock"]:
+                    if state["finish"]["status"] == "saving":
+                        return self._write(409, json.dumps({"error": "Finish is already in progress"}))
+                    state["finish"] = {
+                        "status": "saving",
+                        "message": "Saving the current photo to WordPress..." if labels else "Closing the labeling session...",
+                    }
+
+                def finish():
+                    try:
+                        kept = 0
+                        if labels:
+                            out = api.post("/label", {"photo": photo, "labels": labels})
+                            kept = int(out.get("stored") or 0)
+                        with state["lock"]:
+                            state["saved"] += kept
+                            state["finish"] = {
+                                "status": "done",
+                                "message": "Labels saved. Labeling is complete.",
+                            }
+                        # Leave the status endpoint alive long enough for the page to
+                        # render success before the CLI advances to learn/scan.
+                        if not state["done"].wait(2.0):
+                            state["done"].set()
+                    except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
+                        with state["lock"]:
+                            state["finish"] = {
+                                "status": "error",
+                                "message": str(e) or e.__class__.__name__,
+                            }
+
+                finish_thread = threading.Thread(target=finish, daemon=False)
+                with state["lock"]:
+                    state["finish_thread"] = finish_thread
+                finish_thread.start()
+                return self._write(202, json.dumps({"ok": True, "status": "saving"}))
 
             return self._write(404, json.dumps({"error": "Not found"}))
 
@@ -1188,11 +1501,16 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
             return
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), LabelHandler)
+    # A cancelled browser navigation may leave an upstream image request alive.
+    # Those stale request threads must never keep Finish from closing the UI.
+    server.daemon_threads = True
+    server.block_on_close = False
     port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    label_url = f"http://127.0.0.1:{port}/?token={state['token']}"
     print(f"label UI: http://127.0.0.1:{port}/")
-    _open_preview_html(f"http://127.0.0.1:{port}/")
+    _open_preview_html(label_url)
 
     try:
         while not state["done"].wait(0.25):
@@ -1203,6 +1521,11 @@ def local_label(api, conn, backend, tolerance, limit=500, uploaded_after="", upl
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+        with state["lock"]:
+            finish_thread = state["finish_thread"]
+        if finish_thread is not None and finish_thread.is_alive():
+            print("Waiting for the current label save to finish...")
+            finish_thread.join(timeout=125.0)
 
     return state["saved"]
 
@@ -1751,6 +2074,104 @@ def selftest():
         resolved_bad = False
     check_that(not resolved_bad, "engine: an unknown engine name is refused")
 
+    # Local labeler lifecycle: token guard, asynchronous save, and clean finish.
+    original_collect = globals()["_collect_label_items"]
+    original_open = globals()["_open_preview_html"]
+    opened = {}
+    opened_event = threading.Event()
+    label_result = {}
+
+    class StubApi:
+        def post(self, path, payload):
+            if path != "/label":
+                raise RuntimeError(f"unexpected stub path {path}")
+            return {"stored": len(payload.get("labels") or [])}
+
+    def stub_collect(*args, **kwargs):
+        return (
+            [{
+                "id": 7,
+                "url": "https://example.invalid/photo.jpg",
+                "people": [],
+                "boxes": [[10, 10, 20, 20]],
+                "hints": [],
+                "prefill": {},
+                "status": "untagged",
+                "thumb": "",
+            }],
+            ["Anna"],
+        )
+
+    def stub_open(url):
+        opened["url"] = url
+        opened_event.set()
+
+    label_thread = None
+    try:
+        globals()["_collect_label_items"] = stub_collect
+        globals()["_open_preview_html"] = stub_open
+
+        def run_labeler():
+            label_result["saved"] = local_label(
+                StubApi(),
+                None,
+                None,
+                0.5,
+                label_flow=True,
+            )
+
+        label_thread = threading.Thread(target=run_labeler, daemon=True)
+        label_thread.start()
+        ready = opened_event.wait(3.0)
+        check_that(ready, "label UI: local server starts")
+        if ready:
+            label_url = opened["url"]
+            token = (parse_qs(urlparse(label_url).query).get("token") or [""])[0]
+            base = label_url.split("/?token=", 1)[0]
+            denied = requests.get(base + "/api/meta", timeout=3)
+            check_that(denied.status_code == 403, "label UI: API rejects requests without its session token")
+            headers = {"X-GASF-Label-Token": token}
+            page = requests.get(label_url, timeout=3)
+            check_that(
+                page.status_code == 200 and "Finish labeling" in page.text,
+                "label UI: authenticated page renders finish action",
+            )
+            accepted = requests.post(
+                base + "/api/finish",
+                headers=headers,
+                json={
+                    "photo": 7,
+                    "labels": [{"name": "Anna", "box": [10, 10, 20, 20]}],
+                },
+                timeout=3,
+            )
+            check_that(accepted.status_code == 202, "label UI: finish request is accepted immediately")
+            deadline = time.monotonic() + 3.0
+            finish_status = {}
+            while time.monotonic() < deadline:
+                finish_status = requests.get(
+                    base + "/api/finish-status",
+                    headers=headers,
+                    timeout=3,
+                ).json()
+                if finish_status.get("status") == "done":
+                    break
+                time.sleep(0.05)
+            check_that(
+                finish_status.get("status") == "done",
+                "label UI: finish reports saved completion",
+            )
+            label_thread.join(timeout=4.0)
+            check_that(
+                not label_thread.is_alive() and label_result.get("saved") == 1,
+                "label UI: finish closes server after persisting labels",
+            )
+    except requests.RequestException as e:
+        check_that(False, f"label UI: localhost lifecycle ({e})")
+    finally:
+        globals()["_collect_label_items"] = original_collect
+        globals()["_open_preview_html"] = original_open
+
     print("\n" + ("selftest passed." if not failures else f"selftest FAILED: {len(failures)} problem(s)."))
     return 0 if not failures else 1
 
@@ -1826,7 +2247,16 @@ def main():
                 "label window: "
                 f"{uploaded_after or 'start'} .. {uploaded_before or 'now'}"
             )
-        stored = local_label(api, conn, backend, tolerance, args.label_limit, uploaded_after, uploaded_before)
+        stored = local_label(
+            api,
+            conn,
+            backend,
+            tolerance,
+            args.label_limit,
+            uploaded_after,
+            uploaded_before,
+            args.label_flow,
+        )
         if verbose:
             print(f"stored {stored} explicit face label(s)")
         if args.label_flow:

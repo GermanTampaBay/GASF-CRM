@@ -11,11 +11,12 @@ import subprocess
 import sys
 import threading
 from datetime import datetime
+from pathlib import Path
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 
-SCAN_PY = r"C:\Users\MichaelTressler\~\claude-plugins\copilot-worktrees\GASF-CRM\flinchbot-potential-journey\tools\face-scanner\scan.py"
+SCAN_PY = str(Path(__file__).resolve().with_name("scan.py"))
 
 
 class ScanGui(tk.Tk):
@@ -53,7 +54,7 @@ class ScanGui(tk.Tk):
 
         ttk.Label(
             wrap,
-            text="Hardcoded scanner target: " + SCAN_PY,
+            text="Scanner: " + SCAN_PY,
             foreground="#1f4d7a",
         ).pack(anchor="w", pady=(0, 8))
 
@@ -152,7 +153,7 @@ class ScanGui(tk.Tk):
 
         btns = ttk.Frame(wrap)
         btns.pack(fill="x", pady=(10, 6))
-        self.btn_run = ttk.Button(btns, text="Go", command=self._run)
+        self.btn_run = ttk.Button(btns, text="Start", command=self._run)
         self.btn_run.pack(side="left")
         self.btn_stop = ttk.Button(btns, text="Stop", command=self._stop, state="disabled")
         self.btn_stop.pack(side="left", padx=(8, 0))
@@ -244,13 +245,13 @@ class ScanGui(tk.Tk):
 
     def _build_cmd(self):
         if not os.path.isfile(SCAN_PY):
-            raise ValueError("scan.py not found at hardcoded path:\n" + SCAN_PY)
+            raise ValueError("scan.py was not found beside scan-gui.py:\n" + SCAN_PY)
 
         py = self._python_cmd()
         if not py:
             raise ValueError("Python launcher not found. Install Python or add 'py'/'python' to PATH.")
 
-        cmd = py + [SCAN_PY]
+        cmd = py + ["-u", SCAN_PY]
         if self.v_learn.get():
             cmd.append("--learn")
         if self.v_label.get():
