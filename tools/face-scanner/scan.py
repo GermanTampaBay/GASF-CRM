@@ -690,6 +690,39 @@ def _thumb_data_uri(image_bytes, max_px=240, quality=70):
         return ""
 
 
+class _HeartbeatTicker:
+    """Periodic "still alive" line while a long loop is running."""
+
+    def __init__(self, enabled, interval_s, line_fn):
+        self.enabled = bool(enabled)
+        self.interval = max(1, int(interval_s))
+        self.line_fn = line_fn
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if not self.enabled:
+            return
+
+        def run():
+            while not self._stop.wait(self.interval):
+                try:
+                    line = self.line_fn()
+                except Exception:
+                    line = ""
+                if line:
+                    print(line)
+
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=1.0)
+
+
 def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after="", uploaded_before=""):
     limit = max(1, min(1000, int(limit)))
     q = {"limit": limit}
@@ -722,73 +755,84 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
     refs = load_references(conn, backend.name)
     items = []
     total = len(photos)
-    for n, p in enumerate(photos, start=1):
-        photo_id = int(p["id"])
-        people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
-        try:
-            image_bytes = api.image(p["url"])
-            found = backend.embed(image_bytes)
-        except Exception as e:
-            print(f"#{photo_id}: skipped ({e})")
-            continue
-        if not found:
-            continue
-
-        boxes = [css_box_to_xywh(box_css) for (box_css, _) in found]
-        hints = []
-        for i, (_, vec) in enumerate(found):
-            name, conf = identify(vec, refs, backend, tolerance)
-            hints.append({"index": i, "name": name or "", "confidence": int(round(conf * 100)) if name else 0})
-
-        # Pre-fill from previously saved labels on matching rectangles.
-        prefill = {}
-        labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
-        used = set()
-        for lbl in labels:
-            name = str(lbl.get("name") or "").strip()
-            box = lbl.get("box") or []
-            if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
+    current = 0
+    beat = _HeartbeatTicker(
+        total > 0,
+        15,
+        lambda: f"label prep heartbeat: working on {current}/{total}, {len(items)} ready",
+    )
+    beat.start()
+    try:
+        for n, p in enumerate(photos, start=1):
+            current = n
+            photo_id = int(p["id"])
+            people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
+            try:
+                image_bytes = api.image(p["url"])
+                found = backend.embed(image_bytes)
+            except Exception as e:
+                print(f"#{photo_id}: skipped ({e})")
                 continue
-            target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
-            best_i, best_iou = -1, 0.0
-            for i, db in enumerate(boxes):
-                if i in used:
+            if not found:
+                continue
+
+            boxes = [css_box_to_xywh(box_css) for (box_css, _) in found]
+            hints = []
+            for i, (_, vec) in enumerate(found):
+                name, conf = identify(vec, refs, backend, tolerance)
+                hints.append({"index": i, "name": name or "", "confidence": int(round(conf * 100)) if name else 0})
+
+            # Pre-fill from previously saved labels on matching rectangles.
+            prefill = {}
+            labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
+            used = set()
+            for lbl in labels:
+                name = str(lbl.get("name") or "").strip()
+                box = lbl.get("box") or []
+                if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
                     continue
-                iou = box_iou_xywh(target, db)
-                if iou > best_iou:
-                    best_i, best_iou = i, iou
-            if best_i >= 0 and best_iou >= 0.15:
-                used.add(best_i)
-                prefill[str(best_i)] = name
+                target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                best_i, best_iou = -1, 0.0
+                for i, db in enumerate(boxes):
+                    if i in used:
+                        continue
+                    iou = box_iou_xywh(target, db)
+                    if iou > best_iou:
+                        best_i, best_iou = i, iou
+                if best_i >= 0 and best_iou >= 0.15:
+                    used.add(best_i)
+                    prefill[str(best_i)] = name
 
-        labeled = len(prefill)
-        # A one-face photo that already has exactly one person tag is already
-        # learnable without box labels; keep label mode focused on ambiguous work.
-        if labeled == 0 and len(boxes) == 1 and len(people) == 1:
-            continue
-        if labeled <= 0:
-            status = "untagged"
-        elif labeled < len(boxes):
-            status = "partial"
-        else:
-            status = "full"
+            labeled = len(prefill)
+            # A one-face photo that already has exactly one person tag is already
+            # learnable without box labels; keep label mode focused on ambiguous work.
+            if labeled == 0 and len(boxes) == 1 and len(people) == 1:
+                continue
+            if labeled <= 0:
+                status = "untagged"
+            elif labeled < len(boxes):
+                status = "partial"
+            else:
+                status = "full"
 
-        items.append(
-            {
-                "id": photo_id,
-                "url": p["url"],
-                "people": people,
-                "boxes": boxes,
-                "hints": hints,
-                "prefill": prefill,
-                "status": status,
-                # Lightweight preview only. Full image is loaded on demand per photo.
-                "thumb": _thumb_data_uri(image_bytes),
-            }
-        )
-        people_names.extend(people)
-        if n % 25 == 0 or n == total:
-            print(f"label prep: {n}/{total} photos checked, {len(items)} ready")
+            items.append(
+                {
+                    "id": photo_id,
+                    "url": p["url"],
+                    "people": people,
+                    "boxes": boxes,
+                    "hints": hints,
+                    "prefill": prefill,
+                    "status": status,
+                    # Lightweight preview only. Full image is loaded on demand per photo.
+                    "thumb": _thumb_data_uri(image_bytes),
+                }
+            )
+            people_names.extend(people)
+            if n % 25 == 0 or n == total:
+                print(f"label prep: {n}/{total} photos checked, {len(items)} ready")
+    finally:
+        beat.stop()
     dedup = []
     seen = set()
     for n in people_names:
@@ -1177,114 +1221,125 @@ def learn(api, conn, backend, verbose=True):
     since_id = int(state_get(conn, wk_id, "0") or 0)
     added = skipped = processed = 0
     learned_ids = set()
+    beat = _HeartbeatTicker(
+        verbose,
+        15,
+        lambda: (
+            f"learn heartbeat: {processed} photo(s) checked, "
+            f"{added} added, {skipped} skipped"
+        ),
+    )
+    beat.start()
+    try:
+        while True:
+            params = {"limit": 100}
+            if since_mod:
+                params.update({"after": since_mod, "after_id": since_id})
+            elif since_id > 0:
+                params.update({"since": since_id})
+            data = api.get("/confirmed", **params)
+            photos = data.get("photos", [])
+            if not photos:
+                break
 
-    while True:
-        params = {"limit": 100}
-        if since_mod:
-            params.update({"after": since_mod, "after_id": since_id})
-        elif since_id > 0:
-            params.update({"since": since_id})
-        data = api.get("/confirmed", **params)
-        photos = data.get("photos", [])
-        if not photos:
-            break
+            for p in photos:
+                photo_id = int(p["id"])
+                modified = str(p.get("modified") or "")
+                if modified:
+                    if modified > since_mod or (modified == since_mod and photo_id > since_id):
+                        since_mod, since_id = modified, photo_id
+                else:
+                    since_id = max(since_id, photo_id)
 
-        for p in photos:
-            photo_id = int(p["id"])
-            modified = str(p.get("modified") or "")
-            if modified:
-                if modified > since_mod or (modified == since_mod and photo_id > since_id):
-                    since_mod, since_id = modified, photo_id
-            else:
-                since_id = max(since_id, photo_id)
+                try:
+                    people = [n for n in p.get("people", []) if n.strip()]
+                    labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
+                    if labels:
+                        try:
+                            found = backend.embed(api.image(p["url"]))
+                        except Exception as e:  # a missing file must not stop the run
+                            if verbose:
+                                print(f"  #{p['id']}: {e}")
+                            continue
+                        if not found:
+                            skipped += 1
+                            continue
 
-            try:
-                people = [n for n in p.get("people", []) if n.strip()]
-                labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
-                if labels:
+                        det_boxes = [css_box_to_xywh(b) for (b, _) in found]
+                        used = set()
+                        matched = 0
+                        for li, lbl in enumerate(labels):
+                            name = str(lbl.get("name") or "").strip()
+                            box = lbl.get("box") or []
+                            if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
+                                continue
+                            target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
+                            best_i, best_iou = -1, 0.0
+                            for j, db in enumerate(det_boxes):
+                                if j in used:
+                                    continue
+                                iou = box_iou_xywh(target, db)
+                                if iou > best_iou:
+                                    best_i, best_iou = j, iou
+                            if best_i < 0 or best_iou < 0.15:
+                                continue
+                            used.add(best_i)
+                            _, vector = found[best_i]
+                            face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
+                            conn.execute(
+                                """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+                                   VALUES (?, ?, ?, ?, ?)
+                                   ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
+                                       person = excluded.person,
+                                       vector = excluded.vector""",
+                                (name, photo_id, backend.name, face_key, vector.astype(np.float32).tobytes()),
+                            )
+                            added += 1
+                            matched += 1
+                            learned_ids.add(photo_id)
+                        if matched == 0:
+                            skipped += 1
+                        continue
+
+                    if len(people) != 1:
+                        skipped += 1
+                        continue
                     try:
                         found = backend.embed(api.image(p["url"]))
                     except Exception as e:  # a missing file must not stop the run
                         if verbose:
                             print(f"  #{p['id']}: {e}")
                         continue
-                    if not found:
+                    if len(found) != 1:
                         skipped += 1
                         continue
 
-                    det_boxes = [css_box_to_xywh(b) for (b, _) in found]
-                    used = set()
-                    matched = 0
-                    for li, lbl in enumerate(labels):
-                        name = str(lbl.get("name") or "").strip()
-                        box = lbl.get("box") or []
-                        if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
-                            continue
-                        target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
-                        best_i, best_iou = -1, 0.0
-                        for j, db in enumerate(det_boxes):
-                            if j in used:
-                                continue
-                            iou = box_iou_xywh(target, db)
-                            if iou > best_iou:
-                                best_i, best_iou = j, iou
-                        if best_i < 0 or best_iou < 0.15:
-                            continue
-                        used.add(best_i)
-                        _, vector = found[best_i]
-                        face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
-                        conn.execute(
-                            """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-                               VALUES (?, ?, ?, ?, ?)
-                               ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
-                                   person = excluded.person,
-                                   vector = excluded.vector""",
-                            (name, photo_id, backend.name, face_key, vector.astype(np.float32).tobytes()),
-                        )
-                        added += 1
-                        matched += 1
-                        learned_ids.add(photo_id)
-                    if matched == 0:
-                        skipped += 1
-                    continue
-
-                if len(people) != 1:
-                    skipped += 1
-                    continue
-                try:
-                    found = backend.embed(api.image(p["url"]))
-                except Exception as e:  # a missing file must not stop the run
-                    if verbose:
-                        print(f"  #{p['id']}: {e}")
-                    continue
-                if len(found) != 1:
-                    skipped += 1
-                    continue
-
-                _, vector = found[0]
-                conn.execute(
-                    """INSERT INTO refs (person, photo_id, engine, face_key, vector)
-                       VALUES (?, ?, ?, ?, ?)
-                       ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
-                           person = excluded.person,
-                           vector = excluded.vector""",
-                    (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
-                )
-                added += 1
-                learned_ids.add(photo_id)
-            finally:
-                processed += 1
-                if verbose and processed % 20 == 0:
-                    print(
-                        f"learn progress: {processed} photo(s) checked, "
-                        f"{added} reference face(s) added, {skipped} skipped"
+                    _, vector = found[0]
+                    conn.execute(
+                        """INSERT INTO refs (person, photo_id, engine, face_key, vector)
+                           VALUES (?, ?, ?, ?, ?)
+                           ON CONFLICT(photo_id, engine, face_key) DO UPDATE SET
+                               person = excluded.person,
+                               vector = excluded.vector""",
+                        (people[0].strip(), photo_id, backend.name, "0", vector.astype(np.float32).tobytes()),
                     )
+                    added += 1
+                    learned_ids.add(photo_id)
+                finally:
+                    processed += 1
+                    if verbose and processed % 20 == 0:
+                        print(
+                            f"learn progress: {processed} photo(s) checked, "
+                            f"{added} reference face(s) added, {skipped} skipped"
+                        )
 
-        conn.commit()
-        if since_mod:
-            state_set(conn, wk_mod, since_mod)
-        state_set(conn, wk_id, since_id)
-        state_set(conn, state_key(backend.name, "learned_to"), since_id)
+            conn.commit()
+            if since_mod:
+                state_set(conn, wk_mod, since_mod)
+            state_set(conn, wk_id, since_id)
+            state_set(conn, state_key(backend.name, "learned_to"), since_id)
+    finally:
+        beat.stop()
 
     if verbose:
         print(f"learned: {added} new reference face(s); {skipped} photo(s) too ambiguous to learn from")
@@ -1330,76 +1385,91 @@ def scan(api, conn, backend, tolerance, cfg, verbose=True, uploaded_after="", up
             return total_seen
 
         results = []
-        for p in photos:
-            photo_id = int(p["id"])
-            found = None
-            image_bytes = None
-            err = None
-            for attempt in range(MAX_SCAN_RETRIES):
-                try:
-                    image_bytes = api.image(p["url"])
-                    found = backend.embed(image_bytes)
-                    err = None
-                    break
-                except Exception as e:
-                    err = e
-                    if not _is_retryable_error(e) or attempt == MAX_SCAN_RETRIES - 1:
+        batch_now = 0
+        batch_total = len(photos)
+        beat = _HeartbeatTicker(
+            verbose and batch_total > 0,
+            15,
+            lambda: (
+                f"scan heartbeat: working on {batch_now}/{batch_total} "
+                f"in this batch, {total_seen} sent, {total_kept} kept"
+            ),
+        )
+        beat.start()
+        try:
+            for idx, p in enumerate(photos, start=1):
+                batch_now = idx
+                photo_id = int(p["id"])
+                found = None
+                image_bytes = None
+                err = None
+                for attempt in range(MAX_SCAN_RETRIES):
+                    try:
+                        image_bytes = api.image(p["url"])
+                        found = backend.embed(image_bytes)
+                        err = None
                         break
-                    wait = 2 ** attempt
-                    if verbose:
-                        print(f"  #{photo_id}: temporary fetch error, retrying in {wait}s")
-                    time.sleep(wait)
-
-            if err is not None or found is None:
-                if _is_deterministic_error(err):
-                    n = _bump_failure(conn, backend.name, photo_id)
-                    if verbose:
-                        print(f"  #{photo_id}: deterministic failure ({n}/{QUARANTINE_FAILS}) — {err}")
-                    if n >= QUARANTINE_FAILS:
-                        results.append({"id": photo_id, "found": 0, "faces": []})
-                        _clear_failure(conn, backend.name, photo_id)
+                    except Exception as e:
+                        err = e
+                        if not _is_retryable_error(e) or attempt == MAX_SCAN_RETRIES - 1:
+                            break
+                        wait = 2 ** attempt
                         if verbose:
-                            print(f"  #{photo_id}: quarantined after repeated deterministic failures")
-                else:
-                    if verbose:
-                        print(f"  #{photo_id}: temporary failure left in queue — {err}")
-                continue
+                            print(f"  #{photo_id}: temporary fetch error, retrying in {wait}s")
+                        time.sleep(wait)
 
-            _clear_failure(conn, backend.name, photo_id)
-
-            already = {n.strip().lower() for n in p.get("people", [])}
-            faces = []
-            boxes = []
-            for (top, right, bottom, left), vector in found:
-                box = [int(left), int(top), int(right - left), int(bottom - top)]
-                boxes.append({"box": box})
-                name, conf = identify(vector, references, backend, tolerance)
-                if not name or name.lower() in already:
+                if err is not None or found is None:
+                    if _is_deterministic_error(err):
+                        n = _bump_failure(conn, backend.name, photo_id)
+                        if verbose:
+                            print(f"  #{photo_id}: deterministic failure ({n}/{QUARANTINE_FAILS}) — {err}")
+                        if n >= QUARANTINE_FAILS:
+                            results.append({"id": photo_id, "found": 0, "faces": []})
+                            _clear_failure(conn, backend.name, photo_id)
+                            if verbose:
+                                print(f"  #{photo_id}: quarantined after repeated deterministic failures")
+                    else:
+                        if verbose:
+                            print(f"  #{photo_id}: temporary failure left in queue — {err}")
                     continue
-                faces.append(
-                    {
-                        "name": name,
-                        "confidence": conf,
-                        "box": box,
-                    }
-                )
 
-            item = {"id": photo_id, "found": len(found), "faces": faces, "boxes": boxes}
-            item["engine"] = backend.name
-            try:
-                if image_bytes is not None:
-                    cap, model = local_caption(image_bytes, cfg)
-                    if cap:
-                        item["caption"] = cap
-                        item["caption_model"] = model
-            except Exception as e:
+                _clear_failure(conn, backend.name, photo_id)
+
+                already = {n.strip().lower() for n in p.get("people", [])}
+                faces = []
+                boxes = []
+                for (top, right, bottom, left), vector in found:
+                    box = [int(left), int(top), int(right - left), int(bottom - top)]
+                    boxes.append({"box": box})
+                    name, conf = identify(vector, references, backend, tolerance)
+                    if not name or name.lower() in already:
+                        continue
+                    faces.append(
+                        {
+                            "name": name,
+                            "confidence": conf,
+                            "box": box,
+                        }
+                    )
+
+                item = {"id": photo_id, "found": len(found), "faces": faces, "boxes": boxes}
+                item["engine"] = backend.name
+                try:
+                    if image_bytes is not None:
+                        cap, model = local_caption(image_bytes, cfg)
+                        if cap:
+                            item["caption"] = cap
+                            item["caption_model"] = model
+                except Exception as e:
+                    if verbose:
+                        print(f"  #{photo_id}: caption skipped — {e}")
+
+                results.append(item)
                 if verbose:
-                    print(f"  #{photo_id}: caption skipped — {e}")
-
-            results.append(item)
-            if verbose:
-                names = ", ".join(f["name"] for f in faces) or "no one recognised"
-                print(f"  #{photo_id}: {len(found)} face(s) — {names}")
+                    names = ", ".join(f["name"] for f in faces) or "no one recognised"
+                    print(f"  #{photo_id}: {len(found)} face(s) — {names}")
+        finally:
+            beat.stop()
 
         if not results:
             if verbose:
