@@ -158,6 +158,93 @@ function gasf_crm_faces_auto_accept_threshold() {
 	return min( 100, max( 0, (int) $raw ) );
 }
 
+/** Comparison keys shared by positive and negative face-name decisions. */
+function gasf_crm_face_name_keys( $name ) {
+	$clean = trim( sanitize_text_field( (string) $name ) );
+	if ( '' === $clean ) { return array(); }
+	$keys = function_exists( 'gasf_photo_person_keys' )
+		? gasf_photo_person_keys( $clean )
+		: array( strtolower( html_entity_decode( $clean, ENT_QUOTES ) ) );
+	return array_values( array_unique( array_filter( array_map( 'strval', (array) $keys ) ) ) );
+}
+
+function gasf_crm_face_name_same( $a, $b ) {
+	return (bool) array_intersect( gasf_crm_face_name_keys( $a ), gasf_crm_face_name_keys( $b ) );
+}
+
+/** Persistent per-photo names that volunteers have confirmed are not present. */
+function gasf_crm_face_rejections_for( $attachment_id ) {
+	$id  = (int) $attachment_id;
+	$raw = get_post_meta( $id, '_gasf_face_rejections', true );
+	if ( ! is_array( $raw ) ) { return array(); }
+	$out = array();
+	foreach ( $raw as $r ) {
+		$name = trim( sanitize_text_field( (string) ( is_array( $r ) ? ( $r['name'] ?? '' ) : $r ) ) );
+		if ( '' === $name ) { continue; }
+		$out[] = array(
+			'name' => $name,
+			'at'   => is_array( $r ) ? trim( sanitize_text_field( (string) ( $r['at'] ?? '' ) ) ) : '',
+			'by'   => is_array( $r ) ? max( 0, (int) ( $r['by'] ?? 0 ) ) : 0,
+		);
+	}
+	return $out;
+}
+
+function gasf_crm_face_is_rejected( $attachment_id, $name ) {
+	foreach ( gasf_crm_face_rejections_for( $attachment_id ) as $r ) {
+		if ( gasf_crm_face_name_same( $name, $r['name'] ) ) { return true; }
+	}
+	return false;
+}
+
+/**
+ * Remember one false person recommendation and remove only that recommendation.
+ *
+ * The negative decision is deliberately photo + person, not photo + box. If a
+ * later detector moves the rectangle, it must not resurrect the same person.
+ */
+function gasf_crm_face_reject( $attachment_id, $name ) {
+	$id   = (int) $attachment_id;
+	$name = trim( sanitize_text_field( (string) $name ) );
+	if ( ! $id || '' === $name ) {
+		return new WP_Error( 'gasf_crm_bad', 'A photo and suggested name are required.', array( 'status' => 400 ) );
+	}
+	$changed = ! gasf_crm_face_is_rejected( $id, $name );
+	if ( $changed ) {
+		$next = gasf_crm_face_rejections_for( $id );
+		$next[] = array(
+			'name' => $name,
+			'at'   => current_time( 'mysql', true ),
+			'by'   => get_current_user_id(),
+		);
+		if ( false === update_post_meta( $id, '_gasf_face_rejections', $next ) || ! gasf_crm_face_is_rejected( $id, $name ) ) {
+			return new WP_Error( 'gasf_crm_store', 'The rejected face match could not be saved.', array( 'status' => 500 ) );
+		}
+	}
+
+	$raw  = get_post_meta( $id, '_gasf_face_suggestions', true );
+	$keep = array();
+	foreach ( is_array( $raw ) ? $raw : array() as $s ) {
+		if ( gasf_crm_face_name_same( $name, (string) ( $s['name'] ?? '' ) ) ) { continue; }
+		$keep[] = $s;
+	}
+	if ( $keep ) { update_post_meta( $id, '_gasf_face_suggestions', $keep ); }
+	else { delete_post_meta( $id, '_gasf_face_suggestions' ); }
+
+	$labels = array();
+	foreach ( gasf_crm_face_labels_for( $id ) as $label ) {
+		if ( gasf_crm_face_name_same( $name, (string) ( $label['name'] ?? '' ) ) ) { continue; }
+		$labels[] = $label;
+	}
+	gasf_crm_face_labels_store( $id, $labels, true );
+	foreach ( gasf_crm_face_labels_for( $id ) as $label ) {
+		if ( gasf_crm_face_name_same( $name, (string) ( $label['name'] ?? '' ) ) ) {
+			return new WP_Error( 'gasf_crm_store', 'The incorrect training label could not be removed.', array( 'status' => 500 ) );
+		}
+	}
+	return $changed;
+}
+
 /** Promote very high-confidence suggestions into person tags and label hints. */
 function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
 	$id  = (int) $attachment_id;
@@ -171,6 +258,7 @@ function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
 		$name = trim( sanitize_text_field( (string) ( $s['name'] ?? '' ) ) );
 		$box  = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
 		if ( $pct < $min || '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
 		$labels[] = array( 'name' => $name, 'box' => array_values( $box ) );
 	}
 	if ( ! $labels ) { return $out; }
@@ -246,6 +334,7 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_name
 		$name = trim( sanitize_text_field( (string) ( $f['name'] ?? '' ) ) );
 		$conf = (float) ( $f['confidence'] ?? 0 );
 		if ( '' === $name || $conf < GASF_CRM_FACES_MIN_CONFIDENCE ) { continue; }
+		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
 
 		$box = array_map( 'intval', (array) ( $f['box'] ?? array() ) );
 		if ( 4 !== count( $box ) ) { $box = array( 0, 0, 0, 0 ); }
@@ -299,6 +388,7 @@ function gasf_crm_faces_for( $attachment_id ) {
 
 	$out = array();
 	foreach ( $raw as $s ) {
+		if ( gasf_crm_face_is_rejected( $id, (string) ( $s['name'] ?? '' ) ) ) { continue; }
 		$keys = function_exists( 'gasf_photo_person_keys' )
 			? gasf_photo_person_keys( (string) ( $s['name'] ?? '' ) )
 			: array( strtolower( html_entity_decode( (string) ( $s['name'] ?? '' ), ENT_QUOTES ) ) );
@@ -361,6 +451,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		$name = trim( sanitize_text_field( (string) ( $l['name'] ?? '' ) ) );
 		$box  = array_map( 'intval', (array) ( $l['box'] ?? array() ) );
 		if ( '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		if ( function_exists( 'gasf_crm_face_is_rejected' ) && gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
 		$key = implode( ',', $box );
 		$next[ $key ] = array(
 			'name' => $name,
@@ -476,23 +567,37 @@ function gasf_crm_face_labels_record( $attachment_id, array $map ) {
 	$id = (int) $attachment_id;
 	if ( ! $id || ! $map ) { return 0; }
 
-	$src = function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array();
-	if ( ! $src ) { return 0; }
-
-	$next = array();
-	foreach ( $map as $m ) {
-		$i    = isset( $m['i'] ) ? (int) $m['i'] : -1;
-		$name = trim( sanitize_text_field( (string) ( $m['name'] ?? '' ) ) );
-		if ( $i < 0 || '' === $name || ! isset( $src[ $i ] ) || ! is_array( $src[ $i ] ) ) { continue; }
-
-		$box = array_map( 'intval', (array) ( $src[ $i ]['box'] ?? array() ) );
-		if ( 4 !== count( $box ) ) { continue; }
-		$next[] = array(
-			'name' => $name,
-			'box'  => array_values( $box ),
-		);
+	$lock = '';
+	for ( $attempt = 0; $attempt < 10 && '' === $lock; $attempt++ ) {
+		if ( $attempt > 0 ) { usleep( 50000 ); }
+		$lock = gasf_crm_faces_try_lock( $id, 'label', 30 );
 	}
-	return gasf_crm_face_labels_store( $id, $next );
+	if ( '' === $lock ) {
+		gasf_crm_log( 'CRM faces: could not record face labels for photo #' . $id . ' because its face state stayed busy' );
+		return 0;
+	}
+
+	try {
+		$src = function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array();
+		if ( ! $src ) { return 0; }
+
+		$next = array();
+		foreach ( $map as $m ) {
+			$i    = isset( $m['i'] ) ? (int) $m['i'] : -1;
+			$name = trim( sanitize_text_field( (string) ( $m['name'] ?? '' ) ) );
+			if ( $i < 0 || '' === $name || ! isset( $src[ $i ] ) || ! is_array( $src[ $i ] ) ) { continue; }
+
+			$box = array_map( 'intval', (array) ( $src[ $i ]['box'] ?? array() ) );
+			if ( 4 !== count( $box ) ) { continue; }
+			$next[] = array(
+				'name' => $name,
+				'box'  => array_values( $box ),
+			);
+		}
+		return gasf_crm_face_labels_store( $id, $next );
+	} finally {
+		gasf_crm_faces_unlock( $id, 'label', $lock );
+	}
 }
 
 /** Sanitized face labels kept for scanner learning. */
@@ -597,6 +702,7 @@ function gasf_crm_faces_try_lock( $attachment_id, $kind, $ttl = 300 ) {
 	$id   = (int) $attachment_id;
 	$kind = preg_replace( '/[^a-z0-9_-]/i', '', (string) $kind );
 	if ( ! $id || '' === $kind ) { return ''; }
+	if ( in_array( $kind, array( 'scan', 'label', 'reject' ), true ) ) { $kind = 'write'; }
 
 	$key   = '_gasf_face_lock_' . $kind;
 	$token = wp_generate_uuid4();
@@ -617,6 +723,7 @@ function gasf_crm_faces_unlock( $attachment_id, $kind, $token ) {
 	$id   = (int) $attachment_id;
 	$kind = preg_replace( '/[^a-z0-9_-]/i', '', (string) $kind );
 	if ( ! $id || '' === $kind || '' === (string) $token ) { return; }
+	if ( in_array( $kind, array( 'scan', 'label', 'reject' ), true ) ) { $kind = 'write'; }
 	$key  = '_gasf_face_lock_' . $kind;
 	$have = json_decode( (string) get_post_meta( $id, $key, true ), true );
 	if ( ! is_array( $have ) || (string) ( $have['token'] ?? '' ) !== (string) $token ) { return; }
@@ -745,6 +852,11 @@ function gasf_crm_faces_metrics( $sample_limit = 150 ) {
 add_action( 'rest_api_init', function () {
 
 	$guard = 'gasf_crm_faces_guard';
+	$volunteer_guard = function () {
+		$sess = gasf_crm_rest_guard();
+		if ( is_wp_error( $sess ) || ! $sess ) { return $sess ?: false; }
+		return gasf_crm_user_can_stream( 'photos' );
+	};
 
 	/**
 	 * What needs looking at.
@@ -1077,6 +1189,61 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/reject', array(
+		'methods'             => 'POST',
+		'permission_callback' => $volunteer_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$id   = (int) $req->get_param( 'photo' );
+			$name = trim( sanitize_text_field( (string) $req->get_param( 'name' ) ) );
+			if ( ! $id || ! gasf_crm_photo_in_library( $id ) || get_post_meta( $id, '_gasf_photo_flyer', true ) ) {
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
+			if ( '' === $name ) {
+				return new WP_Error( 'gasf_crm_bad', 'A suggested name is required.', array( 'status' => 400 ) );
+			}
+
+			$lock = gasf_crm_faces_try_lock( $id, 'reject' );
+			if ( '' === $lock ) {
+				return new WP_Error( 'gasf_crm_busy', 'That photo is being updated by the scanner. Try again in a moment.', array( 'status' => 409 ) );
+			}
+			try {
+				$already = gasf_crm_face_is_rejected( $id, $name );
+				$pending = false;
+				foreach ( gasf_crm_faces_for( $id ) as $s ) {
+					if ( gasf_crm_face_name_same( $name, (string) ( $s['name'] ?? '' ) ) ) {
+						$pending = true;
+						break;
+					}
+				}
+				if ( ! $already && ! $pending ) {
+					return new WP_Error( 'gasf_crm_conflict', 'That face suggestion is no longer pending.', array( 'status' => 409 ) );
+				}
+				$changed = gasf_crm_face_reject( $id, $name );
+			} finally {
+				gasf_crm_faces_unlock( $id, 'reject', $lock );
+			}
+			if ( is_wp_error( $changed ) ) { return $changed; }
+			if ( ! gasf_crm_face_is_rejected( $id, $name ) ) {
+				return new WP_Error( 'gasf_crm_store', 'The rejected face match was not saved.', array( 'status' => 500 ) );
+			}
+			if ( $changed ) {
+				gasf_crm_log( sprintf(
+					'CRM faces: rejected “%s” for photo #%d — user %d',
+					$name,
+					$id,
+					get_current_user_id()
+				) );
+			}
+			return array(
+				'ok'        => true,
+				'photo'     => $id,
+				'name'      => $name,
+				'changed'   => (bool) $changed,
+				'remaining' => count( gasf_crm_faces_for( $id ) ),
+			);
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/faces/learned', array(
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
@@ -1142,6 +1309,7 @@ add_action( 'rest_api_init', function () {
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
 					'people' => array_map( 'html_entity_decode', $people ),
 					'labels' => gasf_crm_face_labels_for( $id ),
+					'rejected' => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
 					'pipeline' => gasf_crm_faces_photo_state( $id ),
 				);
 			}

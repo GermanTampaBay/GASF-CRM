@@ -73,10 +73,12 @@ import argparse
 import base64
 from collections import OrderedDict
 import hashlib
+import html
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -85,6 +87,7 @@ import sysconfig
 import tempfile
 import threading
 import time
+import unicodedata
 from urllib.parse import parse_qs, urlparse
 import webbrowser
 from pathlib import Path
@@ -1007,8 +1010,11 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
             if not found:
                 continue
             hints = []
+            rejected = p.get("rejected") or []
             for i, (_, vec) in enumerate(found):
                 name, conf = identify(vec, refs, backend, tolerance)
+                if _face_name_rejected(name, rejected):
+                    name, conf = None, 0
                 hints.append({"index": i, "name": name or "", "confidence": int(round(conf * 100)) if name else 0})
 
             # Pre-fill from previously saved labels on matching rectangles.
@@ -1019,6 +1025,8 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                 name = str(lbl.get("name") or "").strip()
                 box = lbl.get("box") or []
                 if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
+                    continue
+                if _face_name_rejected(name, rejected):
                     continue
                 target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
                 best_i, best_iou = -1, 0.0
@@ -1090,6 +1098,30 @@ def _label_item_status(face_count, prefill, hints, known_threshold):
     if len(resolved) < max(0, int(face_count)):
         return "partial"
     return "full"
+
+
+def _face_name_rejected(name, rejected_names):
+    """Match the server's per-photo negative names without weakening other hints."""
+    keys = _face_name_keys(name)
+    return bool(keys) and any(keys.intersection(_face_name_keys(rejected)) for rejected in (rejected_names or []))
+
+
+def _face_name_keys(name):
+    """Mirror WordPress's expanded and plain German person-name keys."""
+    clean = " ".join(html.unescape(str(name or "")).split())
+    if not clean:
+        return set()
+    expanded = clean.translate(str.maketrans({
+        "ä": "ae", "ö": "oe", "ü": "ue", "ß": "ss",
+        "Ä": "ae", "Ö": "oe", "Ü": "ue",
+    }))
+    keys = set()
+    for value in (expanded, clean):
+        ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower()
+        key = " ".join(re.sub(r"[^a-z0-9 ]+", " ", ascii_value).split())
+        if key:
+            keys.add(key)
+    return keys
 
 
 def clamp_box_xywh(box, image_width, image_height):
@@ -2612,6 +2644,12 @@ def selftest():
         _label_item_status(2, {}, known_hints[:1], 95) == "partial"
         and _label_item_status(2, {}, known_hints, 0) == "untagged",
         "label queue: unresolved faces remain visible and disabled auto-accept resolves nothing",
+    )
+    check_that(
+        _face_name_rejected("Debbie Example", ["debbie example"])
+        and _face_name_rejected("Jürgen Example", ["Juergen Example"])
+        and not _face_name_rejected("Other Candidate", ["Debbie Example"]),
+        "label queue: one rejected person is hidden without suppressing other candidates",
     )
     check_that(
         clamp_box_xywh([95, 75, 20, 20], 100, 80) == [95, 75, 5, 5]

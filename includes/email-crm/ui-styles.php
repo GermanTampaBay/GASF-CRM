@@ -330,9 +330,15 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .fchips{margin:0 0 7px;display:flex;flex-wrap:wrap;gap:5px;align-items:center}
 .fchips-lead{font:12px/1.5 var(--slug);letter-spacing:.04em;text-transform:uppercase;opacity:.7}
 .fchips-note{font-size:11px;color:var(--gasf-muted)}
+.fchipset{display:inline-flex;align-items:stretch}
 .fchip,.fchip-all{font:inherit;font-size:12px;line-height:1.5;padding:3px 9px;cursor:pointer;
 	background:var(--card);border:1px solid var(--s-accent);color:var(--s-accent);border-radius:11px}
 .fchip:hover,.fchip-all:hover{background:var(--s-accent);color:var(--card)}
+.fchipset .fchip{border-radius:11px 0 0 11px}
+.fchip-reject{font:inherit;font-size:11px;line-height:1.5;padding:3px 8px;cursor:pointer;
+	background:var(--card);border:1px solid var(--gasf-border);border-left:0;color:var(--gasf-muted);border-radius:0 11px 11px 0}
+.fchip-reject:hover{background:#fff0f0;color:#8a2424}
+.fchip-reject:disabled{opacity:.55;cursor:wait}
 .fchip.used{opacity:.45}
 .fchip .fmeta{opacity:.65;font-size:11px}
 .fchip-all{border-style:dashed}

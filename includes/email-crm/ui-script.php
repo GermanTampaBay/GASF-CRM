@@ -858,9 +858,9 @@ function gasf_crm_render_inbox_script() {
 	 * and hiding the number would be pretending the machine is surer than it
 	 * is.
 	 */
-	function faceChips(faces){
+	function faceChips(faces, photoId){
 		if (!faces || !faces.length) { return ''; }
-		var note = 'Click a face to fill one name box. Use "Add all" to fill every visible suggestion at once.';
+		var note = 'Choose a name, or mark a wrong person so that match stays hidden for this photo.';
 		return '<div class="fchips">' +
 			'<span class="fchips-lead">Suggested names</span>' +
 			'<button type="button" class="fchip-all" data-action="apply-all" ' +
@@ -869,9 +869,11 @@ function gasf_crm_render_inbox_script() {
 			faces.map(function(f){
 				var pct = f.confidence || 0;   // already a whole percent
 				var tier = pct >= 90 ? 'High confidence' : (pct >= 75 ? 'Likely' : 'Possible');
-				return '<button type="button" class="fchip" data-name="' + esc(f.name) + '" ' +
+				return '<span class="fchipset"><button type="button" class="fchip" data-name="' + esc(f.name) + '" ' +
 					'title="Click to put this name in a box. Nothing is saved until you press the save button.">' +
-					esc(f.name) + ' <span class="fmeta">' + esc(tier) + '</span></button>';
+					esc(f.name) + ' <span class="fmeta">' + esc(tier) + '</span></button>' +
+					'<button type="button" class="fchip-reject" data-photo="' + parseInt(photoId || 0, 10) +
+					'" data-name="' + esc(f.name) + '" title="Remember that this person is not in this photo.">Not in photo</button></span>';
 			}).join('') +
 			'</div>';
 	}
@@ -1064,6 +1066,72 @@ function gasf_crm_render_inbox_script() {
 				cap.dispatchEvent(new Event('input', { bubbles: true }));
 				sum.classList.add('used');
 				cap.focus();
+				return;
+			}
+
+			var wrong = ev.target.closest ? ev.target.closest('.fchip-reject') : null;
+			if (wrong && root.contains(wrong)) {
+				ev.preventDefault();
+				var photo = parseInt(wrong.dataset.photo || 0, 10);
+				var name = (wrong.dataset.name || '').trim();
+				if (!photo || !name) { return; }
+				if (!confirm('Remember that ' + name + ' is not in this photo?\\n\\nFuture scans will hide only this person for this photo. Other possible matches will remain.')) { return; }
+				var group = wrong.closest('.fchipset');
+				var chips = wrong.closest('.fchips');
+				var oldText = wrong.textContent;
+				var scope = wrong.closest('.pcard') || root;
+				var saveStates = [];
+				Array.prototype.forEach.call(scope.querySelectorAll('.p-ok'), function(button){
+					saveStates.push([button, button.disabled]);
+					button.disabled = true;
+				});
+				var inputStates = [];
+				Array.prototype.forEach.call(scope.querySelectorAll('.p-person'), function(input){
+					if (input.value.trim().toLocaleLowerCase() !== name.toLocaleLowerCase()) { return; }
+					inputStates.push([input, input.value]);
+					input.value = '';
+					input.dispatchEvent(new Event('input', { bubbles: true }));
+				});
+				var restoreButtons = function(){
+					saveStates.forEach(function(state){ state[0].disabled = state[1]; });
+				};
+				wrong.disabled = true;
+				wrong.textContent = 'Saving...';
+				api('/photos/faces/reject', {
+					method:'POST',
+					body:JSON.stringify({photo:photo,name:name})
+				}).then(function(){
+					var match = name.toLocaleLowerCase();
+					if (chips) {
+						Array.prototype.forEach.call(chips.querySelectorAll('.fchip-reject'), function(button){
+							if ((button.dataset.name || '').trim().toLocaleLowerCase() === match) {
+								var set = button.closest('.fchipset');
+								if (set) { set.remove(); }
+							}
+						});
+					} else if (group) {
+						group.remove();
+					}
+					if (chips && !chips.querySelector('.fchip')) { chips.remove(); }
+					var cached = window._crmPhotoCards && window._crmPhotoCards[photo];
+					if (cached && cached.faces) {
+						cached.faces = cached.faces.filter(function(f){ return String(f.name || '') !== name; });
+					}
+					if (typeof lgrid !== 'undefined' && lgrid && lgrid._photos && lgrid._photos[photo] && lgrid._photos[photo].faces) {
+						lgrid._photos[photo].faces = lgrid._photos[photo].faces.filter(function(f){ return String(f.name || '') !== name; });
+					}
+					restoreButtons();
+				}).catch(function(e){
+					inputStates.forEach(function(state){
+						state[0].value = state[1];
+						state[0].dispatchEvent(new Event('input', { bubbles: true }));
+					});
+					restoreButtons();
+					wrong.disabled = false;
+					wrong.textContent = oldText;
+					var note = chips && chips.querySelector('.fchips-note');
+					if (note) { note.textContent = e.message; }
+				});
 				return;
 			}
 
@@ -1297,7 +1365,7 @@ function gasf_crm_render_inbox_script() {
 			: '<input type="text" class="p-caption" maxlength="150" value="' + esc(q.caption||'') + '">';
 		var sum = summaryChip(p.summary, q.caption || p.caption || '');
 
-		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces) + peopleField(q.people || []) + '</div>' +
+		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces, p.id) + peopleField(q.people || []) + '</div>' +
 			'<div class="pf"><span>Group</span>' + groupsField(q.groups || []) + '</div>' +
 			'<label class="pf"><span>' + (opts.big ? 'Notes — what is happening, anything worth remembering' : 'What is happening') + '</span>' +
 			sum +

@@ -177,6 +177,7 @@ python scan-gui.py
 - In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
 - The labeler has live outline/opacity settings plus zoom, fit, center, and pan controls. You can also drag the image to pan, double-click to fit, and use Ctrl+wheel to zoom.
+- In the WordPress photo editor, **Not in photo** removes one wrong person suggestion and remembers that photo/person rejection. Later scans may suggest other people, but cannot resurrect that rejected person or auto-accept them on that photo.
 - The launcher finds `scan.py` beside itself, so the folder can move without editing code.
 
 Optional single-file EXE (Windows):

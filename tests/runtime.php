@@ -485,6 +485,74 @@ final class GASF_CRM_Selftest {
 		$at = get_term_by( 'name', 'Selftest Auto', 'gasf_photo_person' );
 		if ( $at ) { wp_delete_term( (int) $at->term_id, 'gasf_photo_person' ); }
 
+		// A volunteer can permanently reject one person without suppressing other candidates.
+		$reject = $this->library_photo( 'st-faces-reject' );
+		gasf_crm_faces_store( $reject, array(
+			array( 'box' => array( 8, 8, 32, 32 ), 'name' => 'Debbie Example', 'confidence' => 0.80 ),
+			array( 'box' => array( 48, 8, 32, 32 ), 'name' => 'Other Candidate', 'confidence' => 0.81 ),
+		), 2 );
+		$scan_lock = gasf_crm_faces_try_lock( $reject, 'scan' );
+		$reject_while_scanning = gasf_crm_faces_try_lock( $reject, 'reject' );
+		gasf_crm_faces_unlock( $reject, 'scan', $scan_lock );
+		$this->ok(
+			'' !== $scan_lock && '' === $reject_while_scanning,
+			'faces: scans, labels, and rejections share one per-photo write lock'
+		);
+		update_post_meta( $reject, '_gasf_face_labels', array(
+			array( 'name' => 'Debbie Example', 'box' => array( 8, 8, 32, 32 ) ),
+			array( 'name' => 'Other Candidate', 'box' => array( 48, 8, 32, 32 ) ),
+		) );
+		$rejected = $this->rest_post( '/gasf/v1/crm/photos/faces/reject', array(
+			'photo' => $reject,
+			'name'  => 'Debbie Example',
+		) );
+		$after_reject = gasf_crm_faces_for( $reject );
+		$labels_after_reject = gasf_crm_face_labels_for( $reject );
+		$this->ok(
+			! empty( $rejected['ok'] )
+			&& gasf_crm_face_is_rejected( $reject, 'Debbie Example' )
+			&& 1 === count( $after_reject )
+			&& 'Other Candidate' === (string) ( $after_reject[0]['name'] ?? '' ),
+			'faces: rejecting one person removes only that pending recommendation'
+		);
+		$this->ok(
+			1 === count( $labels_after_reject )
+			&& 'Other Candidate' === (string) ( $labels_after_reject[0]['name'] ?? '' ),
+			'faces: rejection removes only that person from stored training labels'
+		);
+		gasf_crm_face_labels_store( $reject, array(
+			array( 'name' => 'Debbie Example', 'box' => array( 8, 8, 32, 32 ) ),
+			array( 'name' => 'Other Candidate', 'box' => array( 48, 8, 32, 32 ) ),
+		), true );
+		$labels_after_stale_save = gasf_crm_face_labels_for( $reject );
+		$this->ok(
+			1 === count( $labels_after_stale_save )
+			&& 'Other Candidate' === (string) ( $labels_after_stale_save[0]['name'] ?? '' ),
+			'faces: a stale label submission cannot restore a rejected training name'
+		);
+		gasf_crm_faces_store( $reject, array(
+			array( 'box' => array( 8, 8, 32, 32 ), 'name' => 'Debbie Example', 'confidence' => 0.99 ),
+			array( 'box' => array( 48, 8, 32, 32 ), 'name' => 'New Candidate', 'confidence' => 0.82 ),
+		), 2 );
+		$after_rescan = gasf_crm_faces_for( $reject );
+		$reject_queue = $this->rest_get( '/gasf/v1/crm/photos/faces/label-queue', array( 'limit' => 200 ) );
+		$reject_item = array();
+		foreach ( (array) ( $reject_queue['photos'] ?? array() ) as $photo ) {
+			if ( $reject === (int) ( $photo['id'] ?? 0 ) ) { $reject_item = $photo; break; }
+		}
+		$this->ok(
+			1 === count( $after_rescan )
+			&& 'New Candidate' === (string) ( $after_rescan[0]['name'] ?? '' )
+			&& ! in_array( 'Debbie Example', (array) gasf_crm_photo_term_names( $reject, 'gasf_photo_person' ), true ),
+			'faces: a rejected person stays suppressed across rescans and cannot auto-accept'
+		);
+		$this->ok(
+			in_array( 'Debbie Example', (array) ( $reject_item['rejected'] ?? array() ), true ),
+			'faces: the label queue carries negative names so the local labeler hides them too'
+		);
+		$other_term = get_term_by( 'name', 'Other Candidate', 'gasf_photo_person' );
+		if ( $other_term ) { wp_delete_term( (int) $other_term->term_id, 'gasf_photo_person' ); }
+
 		// A photo with no faces is still marked looked-at, or the queue loops.
 		$blank = $this->library_photo( 'st-faces-none' );
 		gasf_crm_faces_store( $blank, array(), 0 );
