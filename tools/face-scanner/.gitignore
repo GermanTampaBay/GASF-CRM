@@ -9,3 +9,6 @@ scan.log
 # Python build artifacts.
 __pycache__/
 *.pyc
+
+# Locally built transfer bundles. Rebuild from committed scripts as needed.
+dist/

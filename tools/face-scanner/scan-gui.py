@@ -176,6 +176,10 @@ class ScanGui(tk.Tk):
         return " ".join(py_cmd) if py_cmd else "(no Python found in PATH)"
 
     def _python_cmd(self):
+        # The laptop installer launches this GUI from its private virtual
+        # environment. Keep child scanner runs in that same environment.
+        if sys.prefix != sys.base_prefix and Path(sys.executable).is_file():
+            return [sys.executable]
         py = shutil.which("py")
         if py:
             return [py, "-3"]

@@ -22,10 +22,16 @@ $ErrorActionPreference = "Stop"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
 
-# Prefer the py launcher pinned to 3, fall back to whatever "python" resolves to.
-$py = "py"
-$pyArgs = @("-3", "scan.py")
-if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
+# Prefer the private environment made by the laptop installer. Developer
+# checkouts retain the existing py/python fallbacks.
+$venvPython = Join-Path $here ".venv\Scripts\python.exe"
+if (Test-Path $venvPython) {
+    $py = $venvPython
+    $pyArgs = @("scan.py")
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+    $py = "py"
+    $pyArgs = @("-3", "scan.py")
+} else {
     $py = "python"
     $pyArgs = @("scan.py")
 }

@@ -21,6 +21,36 @@ network opens no inbound port because this script only ever reaches *out*.
 
 ## Setup (Windows, Python 3.13/3.14)
 
+### Install on another PC (recommended)
+
+Build the source-free transfer ZIP once from this folder:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build-installer.ps1
+```
+
+Copy the resulting `dist\GASF-Face-Scanner-<version>.zip` to the laptop,
+extract it, and double-click `Install-GASFFaceScanner.cmd`. The installer:
+
+1. Installs 64-bit Python 3.13 and Ollama through `winget` when missing.
+2. Copies only the runtime scripts to `%LOCALAPPDATA%\GASF Face Scanner`.
+3. Creates a private `.venv` and installs InsightFace, ONNX Runtime, and the
+   scanner's core packages.
+4. Downloads `qwen3-vl:8b`, writes `config.json` after a hidden scanner-key
+   prompt, and runs the full preflight.
+5. Adds **GASF Face Scanner** to the Desktop and Start Menu.
+
+The laptop does not need Git or this repository. Re-running a newer installer
+updates scripts and dependencies while preserving its scanner key,
+engine/tolerance tuning, and local `faces.db`. Use
+`-InstallScheduledTask -TaskIntervalMinutes 30` when unattended polling is
+wanted; it is deliberately not enabled by default.
+
+The ZIP excludes credentials, face vectors, logs, caches, and Git metadata.
+See `INSTALL-LAPTOP.txt` inside it for the short transfer instructions.
+
+### Manual/developer setup
+
 ```powershell
 # 1. core libraries
 pip install -r requirements.txt
@@ -226,6 +256,7 @@ batch of `--status` and the chips in the library before loosening it.
 |---|---|
 | `scan.py` | The scanner. Committed. |
 | `run.ps1`, `install-task.ps1` | Scheduled-task helpers. Committed. ASCII-only on purpose (PS 5.1). |
+| `build-installer.ps1`, `Install-GASFFaceScanner.ps1` | Build and run the source-free Windows laptop installer. |
 | `requirements.txt`, `config.example.json` | Committed. |
 | `config.json` | Your URL + key. **Gitignored** — never commit it. |
 | `faces.db` | The biometric vectors. **Gitignored** — never commit it, never copy it off this machine. |

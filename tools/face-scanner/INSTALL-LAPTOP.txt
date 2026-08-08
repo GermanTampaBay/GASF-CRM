@@ -1,0 +1,30 @@
+GASF FACE SCANNER - LAPTOP INSTALL
+==================================
+
+1. Copy this ZIP to the laptop and extract all files.
+2. Double-click Install-GASFFaceScanner.cmd.
+3. Paste the scanner key when prompted. The key entry is hidden.
+4. Leave the window open while Python packages, Ollama, qwen3-vl:8b, and the
+   InsightFace model are downloaded. This can take a while.
+5. Launch "GASF Face Scanner" from the Desktop or Start Menu.
+
+The installer does not need Git or a source checkout. It installs the runtime
+under:
+
+  %LOCALAPPDATA%\GASF Face Scanner
+
+It preserves the scanner key, engine/tolerance tuning, and faces.db when rerun,
+so the same ZIP also repairs or updates an existing installation without
+deleting learned faces.
+
+The scanner key comes from:
+
+  wp-admin -> Email CRM -> Photos -> Face suggestions -> Issue a scanner key
+
+Advanced PowerShell example:
+
+  powershell -ExecutionPolicy Bypass -File .\Install-GASFFaceScanner.ps1 `
+    -InstallScheduledTask -TaskIntervalMinutes 30
+
+The scheduled task is optional. It runs only while the current user is logged
+in and stores no Windows password.
