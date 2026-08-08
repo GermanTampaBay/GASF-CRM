@@ -872,6 +872,11 @@ body{font-family:Segoe UI,Arial,sans-serif;background:#0f172a;color:#e2e8f0;marg
 box-shadow:0 0 0 1px rgba(15,23,42,.75),0 0 0 1px rgba(15,23,42,.75) inset}
 .fb span{position:absolute;left:0;top:0;padding:2px 7px;background:#1d4ed8;border:1px solid #93c5fd;
 border-radius:0 0 7px 0;font-weight:800;font-size:clamp(14px,1.15vw,18px);line-height:1.15;min-width:1.5em;text-align:center}
+.fb-ext span{border-radius:999px;padding:1px 6px;font-size:12px;line-height:1.2;min-width:1.2em}
+.fb-ext-right-up span{left:100%;top:0;transform:translate(6px,-100%)}
+.fb-ext-right-down span{left:100%;top:0;transform:translate(6px,6px)}
+.fb-ext-left-up span{left:auto;right:100%;top:0;transform:translate(-6px,-100%)}
+.fb-ext-left-down span{left:auto;right:100%;top:0;transform:translate(-6px,6px)}
 .side{border:1px solid #2d3748;border-radius:8px;padding:12px;background:#111827}
 .muted{color:#94a3b8}
 .people{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
@@ -964,7 +969,12 @@ function drawBoxes(p){
     const top=Math.max(0,Math.min(100,b[1]*100/h));
     const ww=Math.max(minW,Math.min(100-left,b[2]*100/w));
     const hh=Math.max(minH,Math.min(100-top,b[3]*100/h));
-    const d=document.createElement('div'); d.className='fb';
+    const pxW=(ww*ow)/100, pxH=(hh*oh)/100;
+    const tiny = pxW < 52 || pxH < 52;
+    const side = (left + ww > 84) ? 'left' : 'right';
+    const vert = top < 8 ? 'down' : 'up';
+    const d=document.createElement('div');
+    d.className = tiny ? `fb fb-ext fb-ext-${side}-${vert}` : 'fb';
     d.style.cssText=`left:${left}%;top:${top}%;width:${ww}%;height:${hh}%`;
     d.innerHTML=`<span>${i+1}</span>`; ov.appendChild(d);
   });
