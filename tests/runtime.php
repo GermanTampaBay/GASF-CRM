@@ -430,14 +430,16 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
-	 * Face suggestions are suggestions: stored, offered, never tagged.
+	 * Face suggestions stay suggestions unless auto-accept says otherwise.
 	 *
-	 * The promise worth pinning is the negative one. Everything else about
-	 * this feature is a convenience; the thing that must never drift is that
-	 * a machine's guess cannot become a name on a member's photo without a
-	 * volunteer clicking.
+	 * The safety line is explicit configuration. Normal-confidence guesses
+	 * stay as chips, while very high-confidence matches may be promoted when
+	 * the admin threshold is enabled.
 	 */
 	public function test_face_suggestions() {
+		$this->snapshot_option( 'gasf_crm_faces_auto_accept_threshold' );
+		update_option( 'gasf_crm_faces_auto_accept_threshold', 95, false );
+
 		$id = $this->library_photo( 'st-faces' );
 
 		gasf_crm_faces_store( $id, array(
@@ -461,6 +463,22 @@ final class GASF_CRM_Selftest {
 		$this->ok( ! gasf_crm_faces_for( $id ), 'faces: a suggestion disappears once the name is really applied' );
 		$t = get_term_by( 'name', 'Selftest Face', 'gasf_photo_person' );
 		if ( $t ) { wp_delete_term( (int) $t->term_id, 'gasf_photo_person' ); }
+
+		// High-confidence suggestions can be auto-accepted when enabled.
+		$auto = $this->library_photo( 'st-faces-auto' );
+		gasf_crm_faces_store( $auto, array(
+			array( 'box' => array( 8, 8, 32, 32 ), 'name' => 'Selftest Auto', 'confidence' => 0.99 ),
+		), 1 );
+		$auto_people = (array) gasf_crm_photo_term_names( $auto, 'gasf_photo_person' );
+		$this->ok( in_array( 'Selftest Auto', $auto_people, true ),
+			'faces: high-confidence suggestions can auto-accept onto the photo' );
+		$this->ok( ! gasf_crm_faces_for( $auto ),
+			'faces: once auto-accepted, that suggestion no longer appears as pending' );
+		$auto_labels = (array) get_post_meta( $auto, '_gasf_face_labels', true );
+		$this->ok( 1 === count( $auto_labels ),
+			'faces: auto-accepted matches are stored as label hints for learning' );
+		$at = get_term_by( 'name', 'Selftest Auto', 'gasf_photo_person' );
+		if ( $at ) { wp_delete_term( (int) $at->term_id, 'gasf_photo_person' ); }
 
 		// A photo with no faces is still marked looked-at, or the queue loops.
 		$blank = $this->library_photo( 'st-faces-none' );

@@ -21,10 +21,11 @@
  *   - What crosses the wire back is a photo id, a rectangle, a name string and
  *     a confidence. All of it is data the CRM already holds or a volunteer
  *     could have typed.
- *   - A suggestion is NEVER a tag. It is stored apart from the taxonomy, shown
- *     as a chip a volunteer clicks, and only their click writes a name. The
- *     system proposes; a person disposes. No photo is ever labelled with
- *     somebody's name because a computer was fairly confident.
+ *   - Suggestions are stored apart from the taxonomy and shown as chips a
+ *     volunteer can click. Optionally, the admin may enable strict
+ *     auto-accept at a high confidence threshold for routine photos. The
+ *     system still records the confidence and box, so every machine-made
+ *     decision stays inspectable and reversible.
  *
  * The consent question is not settled by any of that, and this file cannot
  * settle it: whether the club wants a face matcher pointed at its members —
@@ -38,6 +39,8 @@ define( 'GASF_CRM_FACES_BATCH', 25 );
 
 /** Below this, a suggestion is noise and is not stored. */
 define( 'GASF_CRM_FACES_MIN_CONFIDENCE', 0.45 );
+/** Default percent threshold for WP-side auto-accept; 0 disables. */
+define( 'GASF_CRM_FACES_AUTO_ACCEPT_DEFAULT', 95 );
 
 /* =====================================================================
  * The machine credential
@@ -105,6 +108,75 @@ function gasf_crm_faces_guard() {
 		: new WP_Error( 'gasf_crm_403', 'The scanner key is missing or wrong.', array( 'status' => 403 ) );
 }
 
+/** Percent threshold for auto-accepting scanner matches onto photo tags. */
+function gasf_crm_faces_auto_accept_threshold() {
+	$raw = get_option( 'gasf_crm_faces_auto_accept_threshold', GASF_CRM_FACES_AUTO_ACCEPT_DEFAULT );
+	return min( 100, max( 0, (int) $raw ) );
+}
+
+/** Promote very high-confidence suggestions into person tags and label hints. */
+function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
+	$id  = (int) $attachment_id;
+	$out = array( 'names' => 0, 'labels' => 0 );
+	$min = gasf_crm_faces_auto_accept_threshold();
+	if ( ! $id || $min < 1 || ! $suggestions ) { return $out; }
+
+	$labels = array();
+	foreach ( $suggestions as $s ) {
+		$pct  = (int) ( $s['confidence'] ?? 0 );
+		$name = trim( sanitize_text_field( (string) ( $s['name'] ?? '' ) ) );
+		$box  = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
+		if ( $pct < $min || '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		$labels[] = array( 'name' => $name, 'box' => array_values( $box ) );
+	}
+	if ( ! $labels ) { return $out; }
+
+	if ( function_exists( 'gasf_crm_face_person_terms_ensure' ) ) {
+		gasf_crm_face_person_terms_ensure( wp_list_pluck( $labels, 'name' ) );
+	}
+
+	$have = array();
+	$raw_have = wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) );
+	if ( ! is_wp_error( $raw_have ) ) {
+		foreach ( (array) $raw_have as $n ) {
+			$keys = function_exists( 'gasf_photo_person_keys' )
+				? gasf_photo_person_keys( (string) $n )
+				: array( strtolower( html_entity_decode( (string) $n, ENT_QUOTES ) ) );
+			foreach ( $keys as $k ) {
+				if ( '' !== $k ) { $have[ $k ] = true; }
+			}
+		}
+	}
+
+	$add = array();
+	foreach ( $labels as $l ) {
+		$keys = function_exists( 'gasf_photo_person_keys' )
+			? gasf_photo_person_keys( (string) $l['name'] )
+			: array( strtolower( html_entity_decode( (string) $l['name'], ENT_QUOTES ) ) );
+		$seen = false;
+		foreach ( $keys as $k ) {
+			if ( '' !== $k && isset( $have[ $k ] ) ) { $seen = true; break; }
+		}
+		if ( $seen ) { continue; }
+		$add[] = (string) $l['name'];
+		foreach ( $keys as $k ) {
+			if ( '' !== $k ) { $have[ $k ] = true; }
+		}
+	}
+	if ( $add ) {
+		$r = wp_set_object_terms( $id, $add, 'gasf_photo_person', true );
+		if ( ! is_wp_error( $r ) ) {
+			$out['names'] = count( $add );
+			if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $id ); }
+		}
+	}
+
+	if ( function_exists( 'gasf_crm_face_labels_store' ) ) {
+		$out['labels'] = (int) gasf_crm_face_labels_store( $id, $labels );
+	}
+	return $out;
+}
+
 /* =====================================================================
  * Suggestions, stored apart from the truth
  * ================================================================== */
@@ -120,9 +192,11 @@ function gasf_crm_faces_guard() {
  *
  * @param array $faces [ ['box'=>[x,y,w,h], 'name'=>'', 'confidence'=>0.0], ... ]
  */
-function gasf_crm_faces_store( $attachment_id, array $faces, $found ) {
+function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_names = 0, &$auto_labels = 0 ) {
 	$id   = (int) $attachment_id;
 	$keep = array();
+	$auto_names  = 0;
+	$auto_labels = 0;
 
 	foreach ( $faces as $f ) {
 		$name = trim( sanitize_text_field( (string) ( $f['name'] ?? '' ) ) );
@@ -155,6 +229,9 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found ) {
 
 	if ( $keep ) { update_post_meta( $id, '_gasf_face_suggestions', $keep ); }
 	else { delete_post_meta( $id, '_gasf_face_suggestions' ); }
+	$auto = gasf_crm_faces_auto_accept( $id, $keep );
+	$auto_names  = (int) ( $auto['names'] ?? 0 );
+	$auto_labels = (int) ( $auto['labels'] ?? 0 );
 
 	return count( $keep );
 }
@@ -688,6 +765,8 @@ add_action( 'rest_api_init', function () {
 			$caps   = 0;
 			$same   = 0;
 			$busy   = 0;
+			$auto_names  = 0;
+			$auto_labels = 0;
 			$uniq   = array();
 			foreach ( array_slice( $items, 0, GASF_CRM_FACES_BATCH ) as $item ) {
 				$pid = (int) ( $item['id'] ?? 0 );
@@ -709,8 +788,12 @@ add_action( 'rest_api_init', function () {
 					}
 					$faces = (array) ( $item['faces'] ?? array() );
 					$found = (int) ( $item['found'] ?? 0 );
-					$kept = gasf_crm_faces_store( $id, $faces, $found );
+					$accepted_names = 0;
+					$accepted_labels = 0;
+					$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels );
 					$stored += $kept;
+					$auto_names += (int) $accepted_names;
+					$auto_labels += (int) $accepted_labels;
 					update_post_meta( $id, '_gasf_face_detected_at', $found > 0 ? current_time( 'mysql', true ) : '' );
 					$boxes = array();
 					if ( array_key_exists( 'boxes', $item ) && is_array( $item['boxes'] ) ) {
@@ -740,10 +823,12 @@ add_action( 'rest_api_init', function () {
 			}
 
 			gasf_crm_log( sprintf(
-				'CRM faces: scanner returned %d photo(s), %d face suggestion(s) kept, %d caption suggestion(s) kept',
+				'CRM faces: scanner returned %d photo(s), %d face suggestion(s) kept, %d caption suggestion(s) kept, %d name(s) auto-accepted, and %d label hint(s) auto-stored',
 				$seen,
 				$stored,
-				$caps
+				$caps,
+				$auto_names,
+				$auto_labels
 			) );
 
 			return array(
@@ -751,6 +836,8 @@ add_action( 'rest_api_init', function () {
 				'photos'      => $seen,
 				'suggestions' => $stored,
 				'captions'    => $caps,
+				'auto_names'  => $auto_names,
+				'auto_labels' => $auto_labels,
 				'unchanged'   => $same,
 				'busy'        => $busy,
 			);
@@ -1038,6 +1125,21 @@ function gasf_crm_faces_unscanned_count( $after = '', $before = '' ) {
 function gasf_crm_faces_admin_handle( $act ) {
 	if ( ! current_user_can( 'manage_options' ) ) { return ''; }
 
+	if ( 'faces_auto_accept_save' === $act ) {
+		$raw = isset( $_POST['faces_auto_accept_threshold'] ) // phpcs:ignore WordPress.Security.NonceVerification.Missing
+			? wp_unslash( $_POST['faces_auto_accept_threshold'] ) // phpcs:ignore WordPress.Security.NonceVerification.Missing
+			: '';
+		$n = min( 100, max( 0, (int) $raw ) );
+		update_option( 'gasf_crm_faces_auto_accept_threshold', $n, false );
+		gasf_crm_log( sprintf(
+			'CRM faces: auto-accept threshold set to %d%% by %s',
+			$n,
+			gasf_crm_display_name( get_current_user_id() )
+		) );
+		return '<div class="notice notice-success"><p>Auto-accept threshold saved: '
+			. ( $n > 0 ? (int) $n . '% and above' : 'disabled' ) . '.</p></div>';
+	}
+
 	if ( 'faces_key_make' === $act ) {
 		$key = gasf_crm_faces_key_make();
 		// Shown once, in the redirect notice, and never recoverable after.
@@ -1067,6 +1169,8 @@ function gasf_crm_faces_admin_section() {
 	$has  = '' !== gasf_crm_faces_key_hash();
 	$made = (string) get_option( 'gasf_crm_faces_key_made', '' );
 	$metrics = gasf_crm_faces_metrics( 25 );
+	$auto_threshold = gasf_crm_faces_auto_accept_threshold();
+	$auto_label = $auto_threshold > 0 ? ( $auto_threshold . '% and above' ) : 'disabled';
 
 	global $wpdb;
 	$scanned = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
@@ -1075,12 +1179,13 @@ function gasf_crm_faces_admin_section() {
 	echo '<h3>Face suggestions</h3>';
 	echo '<p class="description" style="max-width:820px">A machine at home scans library photos and suggests who is in them. '
 		. 'It reaches in over this API; nothing is opened on the home network, and no face data is ever stored here &mdash; '
-		. 'only a name, a rectangle, and a confidence. <strong>A suggestion is never a tag:</strong> it appears as a chip a volunteer clicks, '
-		. 'and only that click writes a name onto a photo.</p>';
+		. 'only a name, a rectangle, and a confidence. Suggestions still appear as chips, and you can also enable strict '
+		. 'auto-accept below so only very high-confidence matches are written onto photos automatically.</p>';
 
 	printf(
 		'<table class="widefat striped" style="max-width:820px;margin:12px 0"><tbody>'
 		. '<tr><td style="width:40%%">Scanner key</td><td>%s</td></tr>'
+		. '<tr><td>Auto-accept threshold</td><td>%s</td></tr>'
 		. '<tr><td>Photos scanned</td><td>%d</td></tr>'
 		. '<tr><td>Photos carrying suggestions</td><td>%d</td></tr>'
 		. '<tr><td>Waiting to be scanned</td><td>%d</td></tr>'
@@ -1090,10 +1195,20 @@ function gasf_crm_faces_admin_section() {
 		$has
 			? '<span style="color:#2c7a3f">&#10003; issued</span>' . ( $made ? ' <span class="description">' . esc_html( $made ) . ' UTC</span>' : '' )
 			: '<span style="color:#996800">not issued &mdash; the scanner cannot poll</span>',
+		esc_html( $auto_label ),
 		$scanned, $sugg, gasf_crm_faces_unscanned_count(),
 		(int) ( $metrics['eligible'] ?? 0 ),
 		(int) ( $metrics['learned'] ?? 0 )
 	);
+
+	echo '<form method="post" style="max-width:820px;margin:0 0 12px;padding:10px;border:1px solid #dcdcde;background:#fff">'
+		. '<strong>Auto-accept high-confidence face matches</strong><br>'
+		. '<label for="faces_auto_accept_threshold">Confidence percent (0 disables): </label>'
+		. '<input type="number" id="faces_auto_accept_threshold" name="faces_auto_accept_threshold" min="0" max="100" step="1" value="' . esc_attr( (string) $auto_threshold ) . '" style="width:96px">'
+		. ' <button class="button button-primary">Save</button>'
+		. '<p class="description" style="margin:6px 0 0">Enable this to accept suggestions at or above this confidence automatically. Matching label hints are also stored for learning.</p>';
+	wp_nonce_field( 'gasf_crm' );
+	echo '<input type="hidden" name="gasf_crm_action" value="faces_auto_accept_save"></form>';
 
 	$state_rows = '';
 	foreach ( (array) ( $metrics['states'] ?? array() ) as $state => $n ) {
