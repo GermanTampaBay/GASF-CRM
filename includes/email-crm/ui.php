@@ -670,8 +670,13 @@ function gasf_crm_render_inbox() {
 	<div class="card pad">
 		<div class="dropzone" id="updrop" tabindex="0" role="button" aria-label="Choose photos, or drag them here">
 			<strong>Drag photos here</strong>
-			<span class="muted">or click to choose them &mdash; JPEG, PNG, GIF, WebP, and MP4 or MOV up to 96&nbsp;MB</span>
-			<input type="file" id="upinput" accept="image/jpeg,image/png,image/gif,image/webp,video/mp4,video/quicktime" multiple hidden>
+			<span class="muted">or click to choose them &mdash; JPEG, PNG, GIF, WebP, HEIC, and MP4 or MOV up to 96&nbsp;MB</span>
+			<?php /* The bare extensions sit alongside the MIME types on purpose: a
+			         desktop browser that has never heard of image/heic greys the
+			         file out on a MIME-only accept, which is how a format the
+			         server converts happily was still unpickable from the folder
+			         the phone had just dumped it into. */ ?>
+			<input type="file" id="upinput" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/avif,.heic,.heif,.avif,video/mp4,video/quicktime" multiple hidden>
 		</div>
 		<div id="uplist" class="uplist"></div>
 		<div class="actions" style="margin-top:14px">

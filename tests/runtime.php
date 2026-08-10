@@ -439,6 +439,59 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * A HEIC becomes a JPEG, and brings its EXIF with it.
+	 *
+	 * The date assertion is the one that earns its place. HEIF stores EXIF as a
+	 * bare TIFF block while a JPEG's APP1 segment must begin with "Exif\0\0", so
+	 * the conversion used to emit a profile that no reader would parse. Nothing
+	 * failed when that happened — the photo still arrived, only its date was
+	 * gone — which is exactly why it went unnoticed, and exactly what a test is
+	 * for. Skipped rather than failed on a host without libheif, where the code
+	 * path under test cannot run at all.
+	 */
+	public function test_heic_conversion() {
+		if ( ! function_exists( 'gasf_crm_photo_can_convert' ) || ! gasf_crm_photo_can_convert() ) {
+			return;
+		}
+
+		/*
+		 * A valid minimal EXIF, built by hand: TIFF header, an IFD0 whose single
+		 * entry points at an Exif IFD, and one DateTimeOriginal. Hand-built so
+		 * the fixture carries a date this test chose, rather than whatever some
+		 * camera left behind — and so the assertion below can name it exactly.
+		 */
+		$ifd0  = pack( 'v', 1 ) . pack( 'v', 0x8769 ) . pack( 'v', 4 ) . pack( 'V', 1 ) . pack( 'V', 26 ) . pack( 'V', 0 );
+		$exifd = pack( 'v', 1 ) . pack( 'v', 0x9003 ) . pack( 'v', 2 ) . pack( 'V', 20 ) . pack( 'V', 44 ) . pack( 'V', 0 );
+		$blob  = "Exif\0\0" . 'II' . pack( 'v', 42 ) . pack( 'V', 8 ) . $ifd0 . $exifd . "2019:05:04 11:22:33\0";
+
+		$heic = wp_tempnam( 'st-conv.heic' );
+		$im   = new Imagick();
+		$im->newImage( 120, 90, 'gray' );
+		$im->setImageFormat( 'heic' );
+		$im->setImageProfile( 'exif', $blob );
+		$im->writeImage( $heic );
+		$im->destroy();
+
+		$out = gasf_crm_photo_to_jpeg( $heic, 'st-conv.heic' );
+		$this->ok( is_string( $out ) && is_file( $out ), 'heic: converts to a file' );
+
+		if ( is_string( $out ) && is_file( $out ) ) {
+			$dim = @getimagesize( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$this->ok( $dim && IMAGETYPE_JPEG === $dim[2], 'heic: the result is a JPEG getimagesize can read' );
+			$ex = @exif_read_data( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$this->ok(
+				$ex && isset( $ex['DateTimeOriginal'] ) && '2019:05:04 11:22:33' === $ex['DateTimeOriginal'],
+				'heic: the EXIF date survives the conversion'
+			);
+			@unlink( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+		@unlink( $heic ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		// The formats the plugin claims to convert, and the one that matters.
+		$this->ok( in_array( 'heic', gasf_crm_photo_convert_types(), true ), 'heic: named in the convertible formats' );
+	}
+
 	/** Two volunteers, one photo, one winner. */
 	public function test_concurrent_decisions() {
 		$id = $this->held_photo( 'st-race' );

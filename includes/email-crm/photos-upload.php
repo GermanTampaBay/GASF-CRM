@@ -51,24 +51,18 @@ function gasf_crm_upload_video_types() {
 /**
  * Formats we do not keep but CAN read: converted to JPEG on the way in.
  *
- * HEIC is what every iPhone saves by default, which made it the single most
- * common real-world intake failure — answered until now by a rejection message
- * explaining a phone setting. AVIF is its Android cousin. This host's Imagick
- * reads both (checked live, not assumed), so the right answer is to take the
- * file and quietly hand the volunteer a JPEG-shaped photo.
+ * Both of these now answer from photos.php, which owns the conversion for every
+ * route into the collection. They are kept as names because this file's own
+ * reader expects them, and because "what the uploader accepts" and "what the
+ * plugin can convert" are questions that could plausibly diverge later.
  */
 function gasf_crm_upload_convert_types() {
-	return array( 'heic', 'heif', 'avif' );
+	return gasf_crm_photo_convert_types();
 }
 
 /** Can this Imagick actually read them? Cached for the request. */
 function gasf_crm_upload_convert_ok() {
-	static $ok = null;
-	if ( null !== $ok ) { return $ok; }
-	if ( ! class_exists( 'Imagick' ) ) { return $ok = false; }
-	try { $ok = count( ( new Imagick() )->queryFormats( 'HEIC' ) ) > 0; }
-	catch ( Exception $e ) { $ok = false; }
-	return $ok;
+	return gasf_crm_photo_can_convert();
 }
 
 /**
@@ -193,58 +187,27 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 	/*
 	 * HEIC/HEIF/AVIF become JPEG here, before anything downstream has to know
-	 * they existed. Profiles are carried across best-effort so the EXIF date
-	 * and GPS survive to be read at intake (and scrubbed at publish, exactly
-	 * like any JPEG's); if a profile does not survive, the cost is an empty
-	 * date box the batch fields already cover — not a lost photo.
+	 * they existed.
+	 *
+	 * This comment used to claim the EXIF was "carried across best-effort". It
+	 * was not carried at all: HEIF keeps EXIF as a bare TIFF block and a JPEG
+	 * needs the "Exif\0\0" header in front of it, so every converted photo came
+	 * out with a profile no reader would touch, and the date silently went
+	 * missing. The converter repairs that header now — the comment is left long
+	 * because a claim that reads as verified, and never was, is worse than no
+	 * comment at all.
 	 */
 	if ( $isConvert ) {
 		/*
-		 * Limits BEFORE the decode, because the decode is the expensive part.
-		 *
-		 * The byte cap and the megapixel guard both used to sit downstream of
-		 * this block — measured against the converted JPEG, which meant a
-		 * hostile HEIC got a full Imagick decode before anything had asked how
-		 * big it claimed to be. Public CPU on request is exactly what the
-		 * commodity abuse of an open form spends. So, in cost order: the source
-		 * file's bytes (free), a ping for dimensions — which reads the header
-		 * without decoding pixels — and hard resource ceilings on Imagick
-		 * itself for the case where the header lies. The downstream guards
-		 * still run against the JPEG; these are the same fences, moved to the
-		 * gate.
+		 * The limits that used to sit here — the byte cap, the megapixel ping,
+		 * and the Imagick resource ceilings — moved into the converter with the
+		 * rest of it, so the email route gets the same fences rather than a
+		 * second set that drifts. The downstream guards below still run against
+		 * the JPEG that comes back.
 		 */
-		$src_bytes = (int) filesize( $f['tmp_name'] );
-		if ( defined( 'GASF_CRM_PHOTO_MAX_BYTES' ) && $src_bytes > GASF_CRM_PHOTO_MAX_BYTES ) {
-			return new WP_Error( 'gasf_crm_big', sprintf( '%s is %s, over the %s limit for one photo.',
-				$name, size_format( $src_bytes ), size_format( GASF_CRM_PHOTO_MAX_BYTES ) ), array( 'status' => 413 ) );
-		}
-		try {
-			Imagick::setResourceLimit( Imagick::RESOURCETYPE_MEMORY, 256 * MB_IN_BYTES );
-			Imagick::setResourceLimit( Imagick::RESOURCETYPE_MAP, 256 * MB_IN_BYTES );
+		$jtmp = gasf_crm_photo_to_jpeg( $f['tmp_name'], $name );
+		if ( is_wp_error( $jtmp ) ) { return $jtmp; }
 
-			$probe = new Imagick();
-			$probe->pingImage( $f['tmp_name'] );
-			$px = $probe->getImageWidth() * $probe->getImageHeight();
-			$probe->clear();
-			$probe->destroy();
-			if ( defined( 'GASF_CRM_PHOTO_MAX_PIXELS' ) && $px > GASF_CRM_PHOTO_MAX_PIXELS ) {
-				return new WP_Error( 'gasf_crm_big', sprintf(
-					'%s is %s megapixels — over the limit for one photo.',
-					$name, number_format_i18n( $px / 1000000, 1 ) ), array( 'status' => 413 ) );
-			}
-
-			$im = new Imagick( $f['tmp_name'] );
-			$im->setImageFormat( 'jpeg' );
-			$im->setImageCompressionQuality( 90 );
-			$jtmp = wp_tempnam( 'gasf-convert.jpg' );
-			$im->writeImage( $jtmp );
-			$im->clear();
-			$im->destroy();
-		} catch ( Exception $e ) {
-			return new WP_Error( 'gasf_crm_type', sprintf(
-				'%s could not be converted from %s: %s', $name, strtoupper( $ext ), $e->getMessage()
-			), array( 'status' => 415 ) );
-		}
 		@unlink( $f['tmp_name'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		$f['tmp_name'] = $jtmp;
 		$f['size']     = (int) filesize( $jtmp );

@@ -545,6 +545,140 @@ define( 'GASF_CRM_PHOTO_MAX_PIXELS', 120000000 );
 define( 'GASF_CRM_PHOTO_MIN_FREE_BYTES', 512 * MB_IN_BYTES );
 
 /**
+ * Formats a phone sends that this server can read but must not keep.
+ *
+ * HEIC is what every iPhone saves by default, and AVIF is its Android cousin.
+ * Neither survives contact with the rest of this plugin: WordPress cannot
+ * generate sizes from them, and getimagesize() — the gate every intake path
+ * leans on — returns false for both. A photo in one of these formats is
+ * therefore refused by machinery that never says why, which is how the club's
+ * most common submission became its most common failure.
+ *
+ * The answer is to take the file and hand back a JPEG, so that nothing
+ * downstream ever has to learn a second format.
+ */
+function gasf_crm_photo_convert_types() {
+	return array( 'heic', 'heif', 'avif' );
+}
+
+/**
+ * Can this host's Imagick actually decode them? Asked once per request.
+ *
+ * Checked rather than assumed: the same plugin runs on hosts whose ImageMagick
+ * was built without libheif, and there the honest answer is a message naming
+ * the phone setting that avoids the problem — not a conversion that throws.
+ */
+function gasf_crm_photo_can_convert() {
+	static $ok = null;
+	if ( null !== $ok ) { return $ok; }
+	if ( ! class_exists( 'Imagick' ) ) { return $ok = false; }
+	try { $ok = count( ( new Imagick() )->queryFormats( 'HEIC' ) ) > 0; }
+	catch ( Exception $e ) { $ok = false; }
+	return $ok;
+}
+
+/**
+ * Turn one HEIC/HEIF/AVIF into a JPEG, carrying its EXIF across.
+ *
+ * Shared by both intake routes deliberately. The bulk uploader grew this first
+ * and the email path did not have it, so the same iPhone photo was accepted
+ * when dragged in and refused when mailed in — the same file, two answers,
+ * depending on which door it used.
+ *
+ * @param string $src   Path to the file on disk. Not modified, and not removed.
+ * @param string $label Filename to name in any message a volunteer will read.
+ * @return string|WP_Error Path to a new temp JPEG, which the caller then owns.
+ */
+function gasf_crm_photo_to_jpeg( $src, $label ) {
+	if ( ! gasf_crm_photo_can_convert() ) {
+		return new WP_Error( 'gasf_crm_type', sprintf(
+			'%s is in a format this server cannot read.', $label
+		), array( 'status' => 415 ) );
+	}
+	if ( ! function_exists( 'wp_tempnam' ) ) { require_once ABSPATH . 'wp-admin/includes/file.php'; }
+
+	/*
+	 * Limits BEFORE the decode, because the decode is the expensive part.
+	 *
+	 * In cost order: the source file's bytes (free), a ping for dimensions —
+	 * which reads the header without decoding pixels — and hard resource
+	 * ceilings on Imagick itself for the case where the header lies. Public CPU
+	 * on request is exactly what the commodity abuse of an open form spends, so
+	 * a hostile file must not earn a full decode merely by being named .heic.
+	 */
+	$bytes = (int) @filesize( $src ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( $bytes > GASF_CRM_PHOTO_MAX_BYTES ) {
+		return new WP_Error( 'gasf_crm_big', sprintf( '%s is %s, over the %s limit for one photo.',
+			$label, size_format( $bytes ), size_format( GASF_CRM_PHOTO_MAX_BYTES ) ), array( 'status' => 413 ) );
+	}
+
+	$jpeg = '';
+	try {
+		Imagick::setResourceLimit( Imagick::RESOURCETYPE_MEMORY, 256 * MB_IN_BYTES );
+		Imagick::setResourceLimit( Imagick::RESOURCETYPE_MAP, 256 * MB_IN_BYTES );
+
+		$probe = new Imagick();
+		$probe->pingImage( $src );
+		$px = $probe->getImageWidth() * $probe->getImageHeight();
+		$probe->clear();
+		$probe->destroy();
+		if ( $px > GASF_CRM_PHOTO_MAX_PIXELS ) {
+			return new WP_Error( 'gasf_crm_big', sprintf(
+				'%s is %s megapixels — over the limit for one photo.',
+				$label, number_format_i18n( $px / 1000000, 1 ) ), array( 'status' => 413 ) );
+		}
+
+		$im = new Imagick( $src );
+
+		/*
+		 * EXIF, carried over by hand, because nothing carries it for us.
+		 *
+		 * HEIF stores EXIF as a bare TIFF block, while a JPEG's APP1 segment
+		 * must begin with the six bytes "Exif\0\0" before anything will parse
+		 * it. Imagick hands the block straight across on a format change, so
+		 * the converted JPEG came out carrying an EXIF profile that every
+		 * reader — including exif_read_data(), which is what this plugin uses —
+		 * silently declined to read. Measured on this host, not assumed: the
+		 * date went missing on every converted photo, and the six bytes below
+		 * bring it back.
+		 *
+		 * It matters more than a tidy date field. The catalogue's bargain is
+		 * that GPS is captured at intake and scrubbed at publish; EXIF that
+		 * arrives unreadable is not scrubbed, it is merely unread, and the
+		 * difference shows up the first time somebody exports the archive.
+		 */
+		$profiles = array();
+		try { $profiles = $im->getImageProfiles( '*', true ); } catch ( Exception $e ) { $profiles = array(); }
+
+		$im->setImageFormat( 'jpeg' );
+		$im->setImageCompressionQuality( 90 );
+
+		if ( ! empty( $profiles['exif'] ) ) {
+			$exif = (string) $profiles['exif'];
+			if ( 0 !== strncmp( $exif, "Exif\0\0", 6 )
+				&& ( 0 === strncmp( $exif, 'II', 2 ) || 0 === strncmp( $exif, 'MM', 2 ) ) ) {
+				$exif = "Exif\0\0" . $exif;
+			}
+			// Best effort by design: a photo with an unusable profile is still a
+			// photo, and losing the date costs a volunteer one typed field.
+			try { $im->setImageProfile( 'exif', $exif ); } catch ( Exception $e ) { $profiles = array(); }
+		}
+
+		$jpeg = wp_tempnam( 'gasf-convert.jpg' );
+		$im->writeImage( $jpeg );
+		$im->clear();
+		$im->destroy();
+	} catch ( Exception $e ) {
+		if ( $jpeg ) { @unlink( $jpeg ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return new WP_Error( 'gasf_crm_type', sprintf(
+			'%s could not be converted: %s', $label, $e->getMessage()
+		), array( 'status' => 415 ) );
+	}
+
+	return $jpeg;
+}
+
+/**
  * How long one intake run may keep STARTING new photos.
  *
  * Not a kill switch — whatever is in flight finishes, because abandoning a
@@ -1430,6 +1564,42 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 	}
 	gasf_crm_photo_trace( sprintf( 'downloaded %s: %s in %.1fs',
 		$name, size_format( (int) filesize( $tmp ) ), microtime( true ) - $dl0 ) );
+
+	/*
+	 * An iPhone photo becomes a JPEG here, before anything downstream sees it.
+	 *
+	 * This has to happen ahead of the getimagesize() gate below rather than
+	 * after it, because that gate is precisely what a HEIC fails: the function
+	 * returns false for the format, so the photo was reported as "does not read
+	 * as an image" and dropped — the club's single most common submission,
+	 * refused by a check that was only ever asking how big it was.
+	 *
+	 * The extension is not trusted on its own. Mail clients label these
+	 * inconsistently, so the name is what selects the path and Imagick is what
+	 * settles it; a file that turns out not to be one is caught by the same
+	 * gate that catches every other kind of rubbish, one screen down.
+	 */
+	$src_ext = strtolower( (string) pathinfo( $name, PATHINFO_EXTENSION ) );
+	if ( in_array( $src_ext, gasf_crm_photo_convert_types(), true ) ) {
+		if ( ! gasf_crm_photo_can_convert() ) {
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return new WP_Error( 'gasf_crm_notimage', sprintf(
+				'%s is a .%s, and this server cannot convert that format. Ask the sender to set Settings → Camera → Formats to "Most Compatible", or to share the photos rather than sending the originals.',
+				$name, $src_ext
+			) );
+		}
+		$conv = gasf_crm_photo_to_jpeg( $tmp, $name );
+		if ( is_wp_error( $conv ) ) {
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return $conv;
+		}
+		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		$tmp  = $conv;
+		$name = preg_replace( '~\.[a-z0-9]+$~i', '', $name ) . '.jpg';
+		gasf_crm_photo_trace( sprintf( 'converted %s from %s to JPEG (%s)',
+			$name, strtoupper( $src_ext ), size_format( (int) filesize( $tmp ) ) ) );
+		gasf_crm_log( sprintf( 'CRM photos: converted an inbound %s to JPEG as %s', strtoupper( $src_ext ), $name ) );
+	}
 
 	/*
 	 * What it costs to OPEN, which the file size does not tell you.
