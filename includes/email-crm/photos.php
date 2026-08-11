@@ -4236,23 +4236,57 @@ function gasf_crm_photo_revision( $attachment_id ) {
  * because a single-threaded test cannot stage the race.
  *
  * Done in SQL, where 0 is an ordinary value: one UPDATE guarded on the current
- * meta_value, and the affected-row count says whether we moved it. The row must
- * already exist — intake seeds it at zero — so a genuine first decision matches
- * and wins, while a rival who already bumped it, or a photo that was never
- * seeded, matches nothing and loses. Callers read false as "too late, reload".
+ * meta_value, and the affected-row count says whether we moved it.
+ *
+ * The missing-row case is NOT a loss. Intake seeds the row, but 1,335 of the
+ * 3,654 photos already in this library predate that seed, and an earlier version
+ * of this function read "no row" as "somebody else won" — which quietly made
+ * every one of those photos impossible to approve, edit, tag, or delete. That
+ * shipped, and the runtime suite caught it on the next run. So a caller that
+ * expects revision 0 (what gasf_crm_photo_revision() reports for an absent row)
+ * is allowed to CREATE it, and the insert itself is the race guard: two racers
+ * both find no row, both try to insert, and the unique index on (post_id,
+ * meta_key) lets exactly one succeed — the same "exactly one winner" the UPDATE
+ * gives, by a different mechanism. A caller expecting anything else is stale by
+ * definition and still loses. Callers read false as "too late, reload".
  */
 function gasf_crm_photo_rev_bump( $attachment_id, $have ) {
 	global $wpdb;
-	$id = (int) $attachment_id;
+	$id   = (int) $attachment_id;
+	$have = (int) $have;
 	if ( ! $id ) { return false; }
+
 	$moved = $wpdb->update(
 		$wpdb->postmeta,
-		array( 'meta_value' => (string) ( (int) $have + 1 ) ),
-		array( 'post_id' => $id, 'meta_key' => '_gasf_photo_rev', 'meta_value' => (string) (int) $have ),
+		array( 'meta_value' => (string) ( $have + 1 ) ),
+		array( 'post_id' => $id, 'meta_key' => '_gasf_photo_rev', 'meta_value' => (string) $have ),
 		array( '%s' ),
 		array( '%d', '%s', '%s' )
 	);
 	if ( 1 === (int) $moved ) {
+		wp_cache_delete( $id, 'post_meta' );
+		return true;
+	}
+
+	/*
+	 * No row moved. Either the photo predates seeding, or a rival got there
+	 * first. Only the caller holding the revision an absent row reports — 0 —
+	 * may create it, and only while it is still absent: the INSERT is written so
+	 * that a row appearing in the meantime makes it affect nothing.
+	 */
+	if ( 0 !== $have ) { return false; }
+
+	$made = $wpdb->query( $wpdb->prepare(
+		"INSERT INTO {$wpdb->postmeta} ( post_id, meta_key, meta_value )
+		 SELECT %d, '_gasf_photo_rev', %s FROM DUAL
+		 WHERE NOT EXISTS (
+			 SELECT 1 FROM {$wpdb->postmeta} WHERE post_id = %d AND meta_key = '_gasf_photo_rev'
+		 )",
+		$id,
+		(string) ( $have + 1 ),
+		$id
+	) );
+	if ( 1 === (int) $made ) {
 		wp_cache_delete( $id, 'post_meta' );
 		return true;
 	}

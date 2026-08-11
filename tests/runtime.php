@@ -580,13 +580,32 @@ final class GASF_CRM_Selftest {
 			'revision: a decision holding the wrong revision is refused'
 		);
 
-		// An unseeded photo has no row to move, so the bump fails closed — which
-		// is why intake seeding the row at zero is load-bearing, not decoration.
+		// A photo with NO revision row at all — which most of this library's older
+		// photos are, from before intake seeded one. gasf_crm_photo_revision()
+		// reports 0 for them, so a caller holding 0 is current and must win: the
+		// first version of this function treated the missing row as a loss and
+		// made every such photo impossible to approve, edit, or delete.
 		$bare = $this->library_photo( 'st-rev-bare' );
 		delete_post_meta( $bare, '_gasf_photo_rev' );
 		$this->ok(
-			! gasf_crm_photo_rev_bump( $bare, 0 ),
-			'revision: an unseeded photo cannot be bumped, so intake must seed the row'
+			0 === gasf_crm_photo_revision( $bare ),
+			'revision: a photo with no row reads as revision 0'
+		);
+		$this->ok(
+			gasf_crm_photo_rev_bump( $bare, 0 ) && 1 === gasf_crm_photo_revision( $bare ),
+			'revision: an unseeded photo can still be decided — the row is created, not refused'
+		);
+		// And having created it, a rival still holding 0 loses as usual.
+		$this->ok(
+			! gasf_crm_photo_rev_bump( $bare, 0 ) && 1 === gasf_crm_photo_revision( $bare ),
+			'revision: once created, a stale rival on an unseeded photo is refused'
+		);
+		// A stale caller on an unseeded photo never creates a row out of nowhere.
+		$bare2 = $this->library_photo( 'st-rev-bare2' );
+		delete_post_meta( $bare2, '_gasf_photo_rev' );
+		$this->ok(
+			! gasf_crm_photo_rev_bump( $bare2, 3 ) && 0 === gasf_crm_photo_revision( $bare2 ),
+			'revision: a stale caller on an unseeded photo is refused and creates nothing'
 		);
 
 		// The trap itself, demonstrated: the primitive rev_bump replaced writes
