@@ -124,12 +124,24 @@ function gasf_crm_door_closed_because( array $d ) {
 
 /** A rough id for one phone, so budgets work without accounts. */
 function gasf_crm_door_device_key( $token ) {
-	// IP plus user agent. Not an identity and not trying to be one: it exists
-	// to stop one phone flooding, and a guest who switches browsers to send
-	// forty more pictures of the Biergarten is not the threat model.
+	// REMOTE_ADDR, the actual TCP peer — deliberately NOT gasf_crm_client_ip(),
+	// which reports the first X-Forwarded-For hop for forensic honesty. That hop
+	// is set by the client, so a script rotating it mints a fresh budget on every
+	// request, and the 40-per-phone limit — the party door's ONLY per-phone brake,
+	// since that door is exempt from the honeypot, speed floor, and Turnstile —
+	// evaporates. A header cannot rotate REMOTE_ADDR. On this host it is the real
+	// client address (the access log shows real, diverse IPs, not a proxy edge);
+	// if the site is ever placed behind a connection-terminating proxy such as
+	// Cloudflare orange-cloud, this becomes the proxy's IP and must move to a
+	// proxy-set header validated against that proxy's ranges.
+	$ip = isset( $_SERVER['REMOTE_ADDR'] )
+		? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
+	// Not an identity and not trying to be one: this exists to stop one phone
+	// flooding, and a guest who switches browsers to send forty more pictures of
+	// the Biergarten is not the threat model.
 	$ua = isset( $_SERVER['HTTP_USER_AGENT'] )
 		? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 120 ) : '';
-	return 'gasf_door_' . md5( $token . '|' . gasf_crm_client_ip() . '|' . $ua );
+	return 'gasf_door_' . md5( $token . '|' . $ip . '|' . $ua );
 }
 
 function gasf_crm_door_device_count( $token ) {
@@ -210,8 +222,16 @@ function gasf_crm_door_reserve_slot( $token ) {
 			array( 'status' => 429 ) );
 	}
 
+	// The lifetime total is a runaway fuse for a PARTY, whose window closes on its
+	// own anyway. The permanent year-round door never closes and holds every photo
+	// for review, so a fixed lifetime cap there is a slow brick: after the 600th
+	// photo ever — years of ordinary use — the club's own advertised link would
+	// refuse forever, cured only by editing an option by hand. Its real limits are
+	// the per-phone budget above and the volunteer queue behind it, so the total
+	// does not apply to it. A party count can be cleared from the admin, below.
+	$door  = gasf_crm_door_by_token( $token );
 	$total = gasf_crm_door_total( $token );
-	if ( $total >= GASF_CRM_DOOR_MAX_TOTAL ) {
+	if ( empty( $door['permanent'] ) && $total >= GASF_CRM_DOOR_MAX_TOTAL ) {
 		gasf_crm_door_lock_release( $token );
 		return new WP_Error( 'gasf_crm_quota_total',
 			'The club has taken in all the photos it can hold through this link. Thank you!',
@@ -551,6 +571,22 @@ function gasf_crm_door_receive( array $door ) {
 	if ( empty( $_FILES['file'] ) ) {
 		return $fail( 'No photo arrived.' );
 	}
+
+	// The doors are for photos, not video. The guest page only offers images and
+	// drops the rest in JavaScript, but a crafted POST reaches this handler
+	// directly, and gasf_crm_photo_upload_one() accepts MP4/MOV — so on a party
+	// door a 96 MB clip would auto-publish to the library and the kiosk with no
+	// review. Enforce the image-only contract here, on the extension, before a
+	// slot is spent; a video wearing a .jpg name still fails upload_one's own
+	// content checks further in.
+	$door_ext = strtolower( (string) pathinfo( (string) ( $_FILES['file']['name'] ?? '' ), PATHINFO_EXTENSION ) );
+	$door_image_ok = function_exists( 'gasf_crm_upload_types' )
+		&& ( in_array( $door_ext, gasf_crm_upload_types(), true )
+			|| ( function_exists( 'gasf_crm_photo_convert_types' ) && in_array( $door_ext, gasf_crm_photo_convert_types(), true ) ) );
+	if ( ! $door_image_ok ) {
+		return $fail( 'That does not look like a photo. JPEG, PNG, GIF, WebP, and iPhone HEIC photos work here — video does not.', 415 );
+	}
+
 	$reserve = gasf_crm_door_reserve_slot( $door['token'] );
 	if ( is_wp_error( $reserve ) ) {
 		$code = (int) ( $reserve->get_error_data()['status'] ?? 503 );
@@ -1369,7 +1405,7 @@ add_action( 'rest_api_init', function () {
 			 * update_post_meta with the previous value is the codebase's atomic
 			 * claim — exactly one caller wins it, the other is told.
 			 */
-			if ( ! update_post_meta( $id, '_gasf_photo_rev', $have + 1, $have ) ) {
+			if ( ! gasf_crm_photo_rev_bump( $id, $have ) ) {
 				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_stale',
 					'Somebody else was deciding this at the same moment. Reload to see where it got to.',
@@ -1524,9 +1560,17 @@ function gasf_crm_admin_doors_handle( $act ) {
 	$all = gasf_crm_doors();
 	$who = gasf_crm_display_name( get_current_user_id() );
 
-	if ( 'door_toggle' === $act || 'door_cycle' === $act || 'door_delete' === $act ) {
+	if ( 'door_toggle' === $act || 'door_cycle' === $act || 'door_delete' === $act || 'door_reset' === $act ) {
 		$token = preg_replace( '~[^a-f0-9]~', '', (string) wp_unslash( $_POST['token'] ?? '' ) );
 		if ( ! isset( $all[ $token ] ) ) { return ''; }
+
+		if ( 'door_reset' === $act ) {
+			$was = (int) ( $all[ $token ]['count'] ?? 0 );
+			$all[ $token ]['count'] = 0;
+			gasf_crm_doors_save( $all );
+			gasf_crm_log( sprintf( 'CRM doors: "%s" photo count reset from %d to zero by %s', $all[ $token ]['label'], $was, $who ) );
+			return '<div class="notice notice-success"><p>Counter reset — this link will take photos again. The photos already received are untouched.</p></div>';
+		}
 
 		if ( 'door_toggle' === $act ) {
 			$all[ $token ]['active'] = empty( $all[ $token ]['active'] );
@@ -1659,6 +1703,17 @@ function gasf_crm_admin_doors_section() {
 		echo '<input type="hidden" name="gasf_crm_action" value="door_cycle">';
 		printf( '<input type="hidden" name="token" value="%s">', esc_attr( $token ) );
 		echo '<button class="button button-small">New address</button></form>';
+
+		// Clear the running count. On a party that hit its lifetime limit this
+		// reopens the link; on the year-round door — which no longer has a limit —
+		// it just zeroes the tally. Either way the photos received are untouched.
+		if ( (int) ( $d['count'] ?? 0 ) > 0 ) {
+			echo '<form method="post" style="display:inline-block;margin:0 4px 4px 0" onsubmit="return confirm(\'Reset this link\\\'s photo count to zero? The photos already received are kept.\')">';
+			wp_nonce_field( 'gasf_crm' );
+			echo '<input type="hidden" name="gasf_crm_action" value="door_reset">';
+			printf( '<input type="hidden" name="token" value="%s">', esc_attr( $token ) );
+			echo '<button class="button button-small">Reset count</button></form>';
+		}
 
 		if ( ! $perm ) {
 			echo '<form method="post" style="display:inline-block" onsubmit="return confirm(\'Delete this party link? Photos already sent through it are kept.\')">';

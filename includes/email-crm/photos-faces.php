@@ -131,10 +131,15 @@ function gasf_crm_faces_key_revoke() {
 /**
  * Does this request carry the scanner's key?
  *
- * Bearer header first, then a query parameter, because some HTTP clients make
- * headers awkward and the alternative is somebody pasting the key somewhere
- * worse. Compared with wp_check_password, which is constant-time enough for a
- * secret of this length and is what the rest of the plugin uses.
+ * Two header transports, and deliberately NOT a query parameter. The standard
+ * `Authorization: Bearer` is tried first, but shared hosting frequently drops or
+ * rewrites Authorization before it reaches PHP — the reason a `?key=` fallback
+ * once existed. That fallback is gone: a key in the URL is written verbatim into
+ * an Apache access log every cPanel user on the box can read. Its replacement is
+ * a custom `X-GASF-Faces-Key` header, which arrives intact as
+ * HTTP_X_GASF_FACES_KEY and is not logged. Compared with wp_check_password,
+ * constant-time enough for a secret of this length and what the plugin uses
+ * everywhere else.
  */
 function gasf_crm_faces_authed() {
 	$hash = gasf_crm_faces_key_hash();
@@ -145,9 +150,8 @@ function gasf_crm_faces_authed() {
 	if ( $hdr && 0 === stripos( $hdr, 'bearer ' ) ) {
 		$sent = trim( substr( $hdr, 7 ) );
 	}
-	// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- the key IS the credential.
-	if ( '' === $sent && isset( $_GET['key'] ) ) {
-		$sent = sanitize_text_field( wp_unslash( $_GET['key'] ) );
+	if ( '' === $sent && isset( $_SERVER['HTTP_X_GASF_FACES_KEY'] ) ) {
+		$sent = sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_GASF_FACES_KEY'] ) );
 	}
 	if ( '' === $sent ) { return false; }
 

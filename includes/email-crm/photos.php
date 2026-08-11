@@ -4223,6 +4223,42 @@ function gasf_crm_photo_revision( $attachment_id ) {
 	return (int) get_post_meta( (int) $attachment_id, '_gasf_photo_rev', true );
 }
 
+/**
+ * Move the revision from $have to $have + 1, and report whether THIS caller did.
+ *
+ * The compare-and-swap the whole review workflow leans on so that exactly one of
+ * two volunteers deciding the same photo wins. It cannot be update_post_meta's
+ * own previous-value guard: PHP's empty() is true for 0, and update_post_meta
+ * only adds the previous value to its WHERE clause when it is non-empty — so
+ * update_post_meta( id, 1, 0 ), which is EVERY first decision, drops the
+ * comparison and writes unconditionally, and both racers succeed. Seeding the
+ * row made the row exist but did not make the compare compare; the gap hid
+ * because a single-threaded test cannot stage the race.
+ *
+ * Done in SQL, where 0 is an ordinary value: one UPDATE guarded on the current
+ * meta_value, and the affected-row count says whether we moved it. The row must
+ * already exist — intake seeds it at zero — so a genuine first decision matches
+ * and wins, while a rival who already bumped it, or a photo that was never
+ * seeded, matches nothing and loses. Callers read false as "too late, reload".
+ */
+function gasf_crm_photo_rev_bump( $attachment_id, $have ) {
+	global $wpdb;
+	$id = (int) $attachment_id;
+	if ( ! $id ) { return false; }
+	$moved = $wpdb->update(
+		$wpdb->postmeta,
+		array( 'meta_value' => (string) ( (int) $have + 1 ) ),
+		array( 'post_id' => $id, 'meta_key' => '_gasf_photo_rev', 'meta_value' => (string) (int) $have ),
+		array( '%s' ),
+		array( '%d', '%s', '%s' )
+	);
+	if ( 1 === (int) $moved ) {
+		wp_cache_delete( $id, 'post_meta' );
+		return true;
+	}
+	return false;
+}
+
 function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 	$id = (int) $attachment_id;
 	if ( ! $id || 'attachment' !== get_post_type( $id ) ) { return new WP_Error( 'gasf_crm_404', 'No such photo.' ); }
@@ -4264,7 +4300,7 @@ function gasf_crm_photo_confirm( $attachment_id, array $keep ) {
 			);
 		}
 	}
-	if ( ! update_post_meta( $id, '_gasf_photo_rev', $have + 1, $have ) ) {
+	if ( ! gasf_crm_photo_rev_bump( $id, $have ) ) {
 		// Lost between the read above and here.
 		return new WP_Error(
 			'gasf_crm_stale',
@@ -4598,7 +4634,7 @@ add_action( 'rest_api_init', function () {
 					array( 'status' => 409 )
 				);
 			}
-			if ( ! update_post_meta( $aid, '_gasf_photo_rev', $have + 1, $have ) ) {
+			if ( ! gasf_crm_photo_rev_bump( $aid, $have ) ) {
 				gasf_crm_op_finish( $op, false );
 				return new WP_Error(
 					'gasf_crm_stale',

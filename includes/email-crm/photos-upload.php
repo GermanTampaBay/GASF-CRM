@@ -252,6 +252,20 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			$name, size_format( $size ), size_format( $cap ), $isVideo ? 'video' : 'photo' ), array( 'status' => 413 ) );
 	}
 
+	// Room for the original AND everything WordPress generates from it — the same
+	// floor the email intake holds, which this path never did. On the public doors
+	// that gap left the theoretical worst case (hundreds of guests × the per-file
+	// cap) landing on a shared host with no fuse but the host's own. Three times
+	// the incoming size is a working estimate, not a measurement; the point is to
+	// refuse while refusing is still possible, not halfway through a thumbnail set.
+	$free = @disk_free_space( dirname( untrailingslashit( ABSPATH ) ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( $free && defined( 'GASF_CRM_PHOTO_MIN_FREE_BYTES' ) && ( $free - ( $size * 3 ) ) < GASF_CRM_PHOTO_MIN_FREE_BYTES ) {
+		return new WP_Error( 'gasf_crm_disk', sprintf(
+			'There is not enough room to take in %s safely right now — %s free. Please tell a volunteer.',
+			$name, size_format( $free )
+		), array( 'status' => 507 ) );
+	}
+
 	if ( $isVideo ) {
 		/*
 		 * Checked BEFORE the file is taken in, not after.

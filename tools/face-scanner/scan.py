@@ -367,18 +367,18 @@ class Api:
         self.base = base + "/wp-json/gasf/v1/crm/photos/faces"
         self.key = key
         self.s = requests.Session()
+        # The key rides in headers only, never the query string — a key in the URL
+        # is written into the server's access log. Two headers because shared
+        # hosting often strips Authorization before PHP sees it; X-GASF-Faces-Key
+        # is the reliable one and Authorization is kept for standard tooling. The
+        # server accepts either (gasf_crm_faces_authed).
         self.s.headers["Authorization"] = "Bearer " + key
+        self.s.headers["X-GASF-Faces-Key"] = key
         self.s.headers["User-Agent"] = USER_AGENT
         self.s.headers["Accept"] = "application/json"
-    def _needs_key_fallback(self, response):
-        return response.status_code in (401, 403, 406)
 
     def get(self, path, **params):
         r = self.s.get(self.base + path, params=params, timeout=60)
-        if self._needs_key_fallback(r):
-            p2 = dict(params)
-            p2["key"] = self.key
-            r = self.s.get(self.base + path, params=p2, timeout=60)
         if r.status_code == 403:
             sys.exit("The server refused the key. Issue a new one in wp-admin and update the config.")
         r.raise_for_status()
@@ -386,8 +386,6 @@ class Api:
 
     def post(self, path, payload):
         r = self.s.post(self.base + path, json=payload, timeout=120)
-        if self._needs_key_fallback(r):
-            r = self.s.post(self.base + path, params={"key": self.key}, json=payload, timeout=120)
         if r.status_code == 403:
             sys.exit("The server refused the key.")
         r.raise_for_status()
@@ -404,8 +402,6 @@ class Api:
         for attempt in range(1, attempts + 1):
             try:
                 r = self.s.get(url, timeout=120)
-                if self._needs_key_fallback(r):
-                    r = self.s.get(url, params={"key": self.key}, timeout=120)
                 if r.status_code == 403:
                     sys.exit("The server refused the key.")
                 if r.status_code in RETRYABLE_HTTP:

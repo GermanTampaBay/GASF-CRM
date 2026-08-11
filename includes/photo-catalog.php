@@ -1305,8 +1305,9 @@ JS;
 	}
 
 	/**
-	 * A filename that says what the photo is. '' when we know nothing worth
-	 * saying, so the caller keeps the real one rather than inventing a name.
+	 * A filename that says what the photo is — from its date, event, and place,
+	 * but NEVER the people in it. '' when we know nothing worth saying, so the
+	 * caller keeps the real filename rather than inventing one.
 	 *
 	 * Date first: a folder of these sorts chronologically, which is exactly what
 	 * somebody who has just downloaded forty photos wants from it.
@@ -1322,9 +1323,11 @@ JS;
 		$place = gasf_photo_deepest_place( $id );
 		if ( $place ) { $bits[] = $place->name; }
 
-		// Three names is enough to identify a photo; a group shot would
-		// otherwise produce something no filesystem wants.
-		foreach ( array_slice( (array) $info['people'], 0, 3 ) as $p ) { $bits[] = $p; }
+		// People are deliberately NOT in the filename. A name here is a second
+		// copy of an identity that the public-name opt-out cannot reach without
+		// renaming files on disk, and the filename is the one surface where it
+		// earns nothing the title, alt text, and tags do not already carry. So
+		// the name stays in the metadata, where opting out is a flag not a rename.
 
 		if ( ! $bits ) { return ''; }
 

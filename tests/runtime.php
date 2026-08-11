@@ -400,6 +400,44 @@ final class GASF_CRM_Selftest {
 		@unlink( trailingslashit( gasf_crm_photo_zip_dir() ) . $zip['token'] . '.zip' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
 
+	/**
+	 * A tagged person's name never reaches a download filename.
+	 *
+	 * Filenames are built from date, event, and place — deliberately never the
+	 * people — so the public-name opt-out is a flag rather than a promise to
+	 * rename files, and a downloaded folder gives nothing away. The name still
+	 * lives in the title, alt text, and tags, which is where opting out reaches
+	 * it. This is the negative that keeps that guarantee from quietly eroding.
+	 */
+	public function test_filename_omits_people() {
+		if ( ! function_exists( 'gasf_photo_filename' ) ) { return; }
+		$id = $this->library_photo( 'st-fname' );
+
+		$term = wp_insert_term( 'Wilhelmina Testperson ' . wp_rand(), 'gasf_photo_person' );
+		if ( is_wp_error( $term ) ) { return; }
+		$this->made_people[] = (int) $term['term_id'];
+		wp_set_object_terms( $id, (int) $term['term_id'], 'gasf_photo_person' );
+
+		// A photo whose only catalogued fact is a person yields no filename at
+		// all: the person contributes nothing, so there is nothing to name it by.
+		$this->ok(
+			'' === gasf_photo_filename( $id ),
+			'filename: a person alone produces no filename — a name never seeds one'
+		);
+
+		// Give it a real fact to build on. The date shapes the name; the person,
+		// still tagged, does not appear in it.
+		update_post_meta( $id, '_gasf_photo_taken', '2024-05-01' );
+		clean_post_cache( $id );
+		$name = gasf_photo_filename( $id );
+		$this->ok(
+			'' !== $name
+				&& false === stripos( $name, 'wilhelmina' )
+				&& false === stripos( $name, 'testperson' ),
+			'filename: the date shapes the filename but the tagged person never appears in it'
+		);
+	}
+
 	/** Upload validation: the refusals that guard the front door. */
 	public function test_upload_validation() {
 		// Wrong type.
@@ -506,41 +544,60 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
-	 * The revision seed the upload path now writes, and why it is not optional.
+	 * The revision compare-and-swap, and the empty(0) trap it exists to avoid.
 	 *
-	 * Every decide/edit/delete guard is update_post_meta( id, have + 1, have ) —
-	 * a compare-and-swap. WordPress only honours the expected value when a row is
-	 * already there; with none, it adds the row and returns success regardless.
-	 * So a photo that reaches the review queue WITHOUT a seeded revision has a
-	 * guard that passes for everyone at once — the approve-vs-delete race. The
-	 * upload stamp seeds it at zero the instant the attachment exists, exactly as
-	 * the email intake does; this pins the primitive that makes the seed matter,
-	 * since the single-threaded harness cannot stage the real concurrent race.
+	 * Every decide/edit/delete guard calls gasf_crm_photo_rev_bump( id, have ).
+	 * Its whole reason to exist is that at have == 0 — every FIRST decision — it
+	 * still discriminates, where the update_post_meta( id, 1, 0 ) it replaced did
+	 * not: PHP's empty(0) made WordPress drop the compare and write regardless, so
+	 * two volunteers deciding a fresh photo both won. The single-threaded harness
+	 * cannot stage the real concurrent race, so this pins the primitive instead —
+	 * including a live demonstration of the trap, so a future "simplify this back
+	 * to update_post_meta" cannot pass unnoticed.
 	 */
-	public function test_revision_seed() {
-		$seeded = $this->library_photo( 'st-rev-seeded' );
-		update_post_meta( $seeded, '_gasf_photo_rev', 0 ); // what the upload stamp now does
+	public function test_revision_bump() {
+		$id = $this->library_photo( 'st-rev' );
+		update_post_meta( $id, '_gasf_photo_rev', 0 ); // seeded exactly as intake seeds it
 
+		// The first decision, at 0, is the exact case update_post_meta got wrong.
 		$this->ok(
-			metadata_exists( 'post', $seeded, '_gasf_photo_rev' ),
-			'revision: the seed leaves a row, not merely a zero read'
+			gasf_crm_photo_rev_bump( $id, 0 ) && 1 === gasf_crm_photo_revision( $id ),
+			'revision: a first decision at 0 wins and advances to 1'
 		);
+		// A rival still holding revision 0 loses — the photo has already moved.
 		$this->ok(
-			update_post_meta( $seeded, '_gasf_photo_rev', 1, 0 ) && 1 === gasf_crm_photo_revision( $seeded ),
-			'revision: a seeded row advances 0 → 1 under compare-and-swap'
+			! gasf_crm_photo_rev_bump( $id, 0 ) && 1 === gasf_crm_photo_revision( $id ),
+			'revision: a rival holding the same old revision is refused'
 		);
+		// The next genuine decision, now holding 1, wins.
 		$this->ok(
-			! update_post_meta( $seeded, '_gasf_photo_rev', 9, 0 ) && 1 === gasf_crm_photo_revision( $seeded ),
-			'revision: a stale compare-and-swap is refused once the row exists'
+			gasf_crm_photo_rev_bump( $id, 1 ) && 2 === gasf_crm_photo_revision( $id ),
+			'revision: the next decision at the current revision advances to 2'
+		);
+		// A decision holding the wrong revision never wins.
+		$this->ok(
+			! gasf_crm_photo_rev_bump( $id, 99 ) && 2 === gasf_crm_photo_revision( $id ),
+			'revision: a decision holding the wrong revision is refused'
 		);
 
-		// The failure the seed closes: with no row, the same guarded write wins
-		// anyway, ignoring the expected value — two first decisions would both pass.
+		// An unseeded photo has no row to move, so the bump fails closed — which
+		// is why intake seeding the row at zero is load-bearing, not decoration.
 		$bare = $this->library_photo( 'st-rev-bare' );
 		delete_post_meta( $bare, '_gasf_photo_rev' );
 		$this->ok(
-			update_post_meta( $bare, '_gasf_photo_rev', 7, 0 ) && 7 === gasf_crm_photo_revision( $bare ),
-			'revision: without a seeded row the guard is void — the case the upload stamp closes'
+			! gasf_crm_photo_rev_bump( $bare, 0 ),
+			'revision: an unseeded photo cannot be bumped, so intake must seed the row'
+		);
+
+		// The trap itself, demonstrated: the primitive rev_bump replaced writes
+		// unconditionally when the expected value is 0. If this ever stops being
+		// true — a WordPress change, or a naive revert — this assertion flips and
+		// says so, rather than the race returning silently.
+		update_post_meta( $bare, '_gasf_photo_rev', 0 );
+		update_post_meta( $bare, '_gasf_photo_rev', 5, 0 ); // expected 0, but empty(0) drops the compare
+		$this->ok(
+			5 === gasf_crm_photo_revision( $bare ),
+			'revision: update_post_meta ignores an expected value of 0 — the bug rev_bump fixes'
 		);
 	}
 

@@ -210,7 +210,7 @@ add_action( 'rest_api_init', function () {
 		if ( null !== $want && '' !== $want && (int) $want !== $have ) {
 			return new WP_Error( 'gasf_crm_stale', 'Somebody else has changed this photo since you opened it. Reload to see their version.', array( 'status' => 409 ) );
 		}
-		if ( ! update_post_meta( $id, '_gasf_photo_rev', $have + 1, $have ) ) {
+		if ( ! gasf_crm_photo_rev_bump( $id, $have ) ) {
 			return new WP_Error( 'gasf_crm_stale', 'Somebody else was editing this at the same moment. Reload to see where it got to.', array( 'status' => 409 ) );
 		}
 		return $id;
