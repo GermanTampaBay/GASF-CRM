@@ -51,7 +51,7 @@ git push origin --delete lint-check
 # 4. on the server
 cd /home4/germanta/gasf-crm && git pull --ff-only origin main
 
-# 5. prove it still works
+# 5. prove it still works — NOT OPTIONAL, every single deploy
 cd /home4/germanta/public_html && wp eval-file /home4/germanta/gasf-crm/tests/runtime.php
 ```
 
@@ -59,15 +59,45 @@ Step 2 exists because a PHP parse error in this plugin white-screens the club's
 whole website — the shim `require`s it on every page load. `php -l` on a scratch
 ref costs ten seconds and has caught real breakage.
 
+**Step 5 is not optional, and is not a formality.** Run it after every deploy,
+including the ones that are "obviously safe", and read the number. Two hours of
+this project's history are the argument:
+
+- **v2.21.0** shipped a revision helper that read "no `_gasf_photo_rev` row" as
+  "somebody else won". 1,335 of 3,654 photos predate that meta, so approve,
+  edit, tag and delete broke for all of them in production. `runtime.php` caught
+  it on the run immediately after the deploy.
+- **v2.20.1** shipped a fix that was *wrong*, and its own new test failed on the
+  first server run and said so. The fix was incomplete; the test refused it.
+- **v2.26.1** — a misfiled-email bug that no test covered ran for four inbound
+  messages without anybody noticing, because an empty thread looks exactly like
+  a thread nobody has replied to yet. Nothing failed. That is the failure mode
+  this suite exists to convert into a number that goes down.
+
+The run takes about two and a half minutes. It has never once been the slow part
+of anything, and it has repeatedly been the only thing standing between a bad
+deploy and a volunteer discovering it.
+
+The suite is single-threaded and runs against live WordPress, so it cannot stage
+a real race — where a bug is concurrent, pin the PRIMITIVE the fix relies on
+instead (see `test_revision_bump`) rather than a scenario that passes either way.
+
 ---
 
 ## Tests
 
-- **`tests/runtime.php`** — ~135 assertions, run on the server against live
-  WordPress (there is no second environment). Safe by construction: synthetic
-  fixtures only, a shutdown reaper that survives fatals, options snapshotted,
-  mail disabled. **Never point a test at a real photo** — a drill once did, died
-  before its restore line, and left drill data in a member's consent record.
+- **`tests/runtime.php`** — 181 assertions, run on the server against live
+  WordPress (there is no second environment) after **every** deploy, no
+  exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
+  that survives fatals, options snapshotted, mail disabled. **Never point a test
+  at a real photo** — a drill once did, died before its restore line, and left
+  drill data in a member's consent record.
+  - Add an assertion with every behavioural change. A fix with no test is a fix
+    that will be "simplified" back out in six months by somebody reasonable.
+  - Prefer pinning the primitive over the scenario when the bug is a race, a
+    default, or a silent omission — those are exactly the ones a passing test
+    can otherwise sail straight past.
+  - The count going UP is part of the evidence a change landed. Note it.
 - **`tools/check-js.js`** — parses inline JS, balances inline CSS.
 - **`tools/static-checks.js`** — patch-script residue, the serial-comma house
   rule, REST routes without permission callbacks, unprepared SQL.
@@ -93,7 +123,7 @@ ref costs ten seconds and has caught real breakage.
 
 ---
 
-## What exists (v2.21.x)
+## What exists (v2.26.x)
 
 **Email CRM** — Microsoft Graph app-only against a shared mailbox, volunteers
 sign in at `/email` with Google or Microsoft, Claude-drafted replies.
@@ -189,47 +219,65 @@ architecture keeps that answer cheap to reverse. Board call.
 
 ## Open items, roughly ranked
 
-1. **Limited-scope photos: mostly closed, two paths remain.** Consent is now
-   enforced by STORAGE — `gasf_crm_photo_enforce_web_boundary()` physically
-   moves a not-for-web photo back to the private root at 0600, and a version
-   upgrade backfills the whole library. But two callers still publish without
-   asking: the held quick-lane (`photos-public.php`, `held/decide`) and the
-   party/bulk branch in `gasf_crm_photo_upload_one()`. Both should do what
-   `gasf_crm_photo_confirm()` does — `may('web') ? publish : unpublish`. Until
-   they do, a guest who unticks the box can still be published to the open web.
-   **This is the top open item.** (Separately, anything already public stays
-   fetchable by direct URL: true enforcement for those means gated delivery.)
+1. **Anything already public stays fetchable by direct URL.** Consent is now
+   enforced by STORAGE on every write path — `gasf_crm_photo_enforce_web_boundary()`
+   physically moves a not-for-web photo back to the private root at 0600 — but a
+   file that was public before being restricted is still reachable at its old
+   uploads path, and published photos are ordinary files with no per-request
+   check. True enforcement means gated delivery for everything, which is a real
+   piece of work rather than a guard.
 2. **Party mode has no panic switch** — "disable this door and hide everything
    from the last N minutes" as one admin button.
-3. **The held quick-lane duplicates publish logic** rather than routing through
-   `gasf_crm_photo_confirm()`. Predicted to drift; it has — see item 1, and the
-   `_gasf_photo_confirmed` shape split (array from confirm, bare string here).
-4. **Eight public videos still carry GPS** — the blanker is proven and wired
+3. **Eight public videos still carry GPS** — the blanker is proven and wired
    into publish/upload, but nothing walks already-published files. Needs a
    one-off backfill and a go-ahead.
-5. **The club calendar starts 15 July 2023.** Nothing older survived the
-   MEC→GASF Events migration, so date-based event suggestions find nothing for
-   older photos. Not a bug; missing data.
-6. **No QR generator** — party links are copy-paste into any QR tool.
-7. **An edited photo's `-gasf-original` sidecar outlives its photo.** It is in
+4. **Face auto-accept has no bulk undo.** Revoking the scanner key stops new
+   writes but leaves every machine-written tag; there is no "purge what the
+   matcher wrote" action, and machine-written names are not marked as such.
+   Auto-accept is ON by default at 95 — the club's accepted trade, recorded
+   deliberately rather than left implicit.
+5. **An edited photo's `-gasf-original` sidecar outlives its photo.** It is in
    no attachment metadata, so neither delete nor unpublish removes it: the
    full-quality pre-edit copy stays in public uploads after a photo is deleted
    or withdrawn.
-8. **Face auto-accept has no bulk undo.** Revoking the scanner key stops new
-   writes but leaves every machine-written tag; there is no "purge what the
-   matcher wrote" action, and machine-written names are not marked as such.
+6. **The `_gasf_photo_confirmed` shape is split** — an array `{from,by,at}` from
+   `confirm()`, a bare timestamp string from the quick lanes. Existence checks
+   work; anything reading `['by']` silently gets nothing for quick-lane photos.
+7. **The club calendar starts 15 July 2023.** Nothing older survived the
+   MEC→GASF Events migration, so date-based event suggestions find nothing for
+   older photos. Not a bug; missing data.
+8. **No QR generator** — party links are copy-paste into any QR tool.
+9. **Two people cannot share a name.** Identity is a term to the photo library
+   but a NAME STRING to everything face-related, and WordPress refuses duplicate
+   term names — so a second "Bob Schmidt" needs a disambiguator in the name.
+   `(II)` works on both sides (verified: it normalises to `bob schmidt ii`), but
+   a real-world one — middle initial, genuine Sr./Jr. — reads better now that
+   names appear in public titles. The principled fix is re-keying refs, labels,
+   and rejections off term ids; not worth it at 127 people and zero collisions.
+10. **No near-duplicate detection** — dedup is exact-bytes only, so the same
+    photo re-encoded by WhatsApp arrives as new. And **no trash/undo**: every
+    delete is a force-delete.
 
-**Closed since this list was written** (v2.20.0–2.21.1): HEIC on every intake
-route plus the EXIF-date loss during conversion; door counters made atomic
-under `GET_LOCK`; the revision compare-and-swap, which was never comparing (see
-below); the scanner key out of URLs; the door device budget off a spoofable
-header; the permanent door's 600-photo brick; video-by-crafted-POST on the
-doors; the missing disk-free floor on upload; and people's names out of
-download filenames.
+**Closed since this list was written** (v2.20.0–2.26.1): HEIC on every intake
+route plus the EXIF-date loss during conversion; door counters made atomic under
+`GET_LOCK`; the revision compare-and-swap, which was never comparing; the scanner
+key out of URLs and out of query strings entirely; the door device budget off a
+spoofable header; the permanent door's 600-photo brick, now with an admin reset;
+video-by-crafted-POST on the doors; the missing disk-free floor on upload;
+people's names out of download filenames; **the held quick-lane and party/bulk
+branch now gating publication on `may('web')`**; the public-name opt-out reaching
+every surface outside the club and rewriting what is already published;
+`YYYY-MM` dates and partial dates in range filters; face records following a
+rename or merge; "not a person" ending a face for good; and **inbound email
+being filed under a thread id that belonged to another table**.
 
 ---
 
-## Two traps worth remembering
+## Four traps worth remembering
+
+All four are the same shape: **state that is correct when you read it and wrong
+by the time you use it**, failing silently, looking exactly like the normal
+empty case. None produced an error. Three reached production.
 
 **`update_post_meta`'s previous-value guard is void at 0.** It only adds the
 expected value to its WHERE clause `if ( ! empty( $prev_value ) )`, and PHP's
@@ -247,11 +295,32 @@ caller holding 0 is current and must be allowed to create it. Both the bug and
 the fix were caught by `tests/runtime.php` on the run right after deploy, which
 is the argument for running it every time.
 
+**`$wpdb->insert_id` is whatever the LAST insert did, not yours.**
+`gasf_crm_upsert_thread()` inserted the thread, then created a case and logged a
+case event — both inserts — and only then returned
+`array( 'id' => (int) $wpdb->insert_id )`. By then it held the case EVENT's id.
+Every inbound email since the case workflow shipped was filed under a thread
+number belonging to another table: the row landed, nothing errored, and the mail
+was simply never seen again. Four messages went that way before anybody noticed,
+because **an empty thread looks exactly like a thread nobody has replied to
+yet**. Capture the id into a local the instant the insert returns, before
+anything else can insert. The other three `insert_id` reads in the plugin were
+audited and each reads immediately after its own insert.
+
+**Rejecting a face NAME made the face permanently unresolved.** The scanner
+counts a face as resolved only if it has an explicit label, is the lone face on
+a single-named photo, or matches a reference whose name is not rejected. So
+rejecting the name flipped that last condition false and the face returned for
+review on every later scan — a volunteer doing the right thing made the prompt
+permanent. "Wrong person" and "not a person to tag" are different answers and
+need different verbs: `_gasf_face_ignored` is the second one. Watch for this
+shape generally — a negative signal wired into a positive test can invert it.
+
 ---
 
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.21.1** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.26.1** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
