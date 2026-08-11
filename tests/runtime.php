@@ -524,6 +524,51 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * A face can be put down for good, and stays down at a different size.
+	 *
+	 * Rejecting a NAME does not end the question — the scanner treats a face as
+	 * resolved only when it matches a reference whose name is not rejected, so
+	 * rejecting the name pushed the face back into the unknown pile and it
+	 * returned on every later scan. This is the answer that ends it, and it is
+	 * stored as a rectangle because the embedding that would make it sturdier
+	 * must never reach this server.
+	 */
+	public function test_face_ignore() {
+		$id = $this->library_photo( 'st-face-ignore' );
+
+		$box = array( 100, 120, 80, 80 );   // measured on a 1000x800 image
+		$this->ok( ! gasf_crm_face_is_ignored( $id, $box, 1000, 800 ), 'face ignore: nothing is ignored to begin with' );
+
+		$r = gasf_crm_face_ignore( $id, $box, 1000, 800 );
+		$this->ok( true === $r && gasf_crm_face_is_ignored( $id, $box, 1000, 800 ), 'face ignore: the face is put down' );
+
+		// The same face on a half-size rescan: different numbers, same face.
+		$this->ok(
+			gasf_crm_face_is_ignored( $id, array( 50, 60, 40, 40 ), 500, 400 ),
+			'face ignore: it stays down when the photo is rescanned at another size'
+		);
+		// A different face on the same photo is untouched.
+		$this->ok(
+			! gasf_crm_face_is_ignored( $id, array( 700, 100, 80, 80 ), 1000, 800 ),
+			'face ignore: another face on the same photo is still offered'
+		);
+		// Asking twice is a double-click, not an error.
+		$this->ok( true === gasf_crm_face_ignore( $id, $box, 1000, 800 ), 'face ignore: putting it down twice is not an error' );
+		$this->ok( 1 === count( gasf_crm_face_ignored_for( $id ) ), 'face ignore: and does not record it twice' );
+
+		// A rubbish rectangle is refused rather than stored.
+		$bad = gasf_crm_face_ignore( $id, array( 0, 0, 0, 0 ), 1000, 800 );
+		$this->ok( is_wp_error( $bad ), 'face ignore: a zero-sized rectangle is refused' );
+
+		// Undo, for the mis-click.
+		gasf_crm_face_unignore( $id, $box, 1000, 800 );
+		$this->ok(
+			! gasf_crm_face_is_ignored( $id, $box, 1000, 800 ) && ! gasf_crm_face_ignored_for( $id ),
+			'face ignore: it can be put back in the queue'
+		);
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );

@@ -360,6 +360,155 @@ function gasf_crm_face_is_rejected( $attachment_id, $name ) {
 	return false;
 }
 
+/* ---------------------------------------------------------------------------
+ * Faces that are not people to tag
+ *
+ * Rejecting a NAME says "that is the wrong person". It does not say "stop
+ * asking about this face", and for a while it accidentally said the opposite:
+ * the scanner treats a face as resolved only when it matches a reference whose
+ * name is not rejected, so rejecting the name pushed the face back into the
+ * unknown pile and it returned for review on every later scan. A volunteer
+ * doing the right thing made the prompt permanent.
+ *
+ * Some faces are never going to be tagged: a poster on the wall, a face in a
+ * photograph within the photograph, a reflection, a stranger three tables away,
+ * or a detector false positive that is not a face at all. This is how they are
+ * put down for good.
+ *
+ * Stored as a RECTANGLE and nothing else. The embedding that would make this
+ * robust to a moved box lives only on the scanning machine and must stay there,
+ * so the server keeps the one non-biometric fact it is allowed to hold — where
+ * the box was, and how big the image was when it was measured — and the client
+ * matches on overlap. That is weaker than the local discovery board's
+ * embedding check, and it is the version that survives a rebuilt faces.db, a
+ * reinstall, or a different machine entirely, which is what "permanently" has
+ * to mean here.
+ * ------------------------------------------------------------------------ */
+
+/** Every face on this photo a volunteer has said is not a person to tag. */
+function gasf_crm_face_ignored_for( $attachment_id ) {
+	$raw = get_post_meta( (int) $attachment_id, '_gasf_face_ignored', true );
+	$out = array();
+	foreach ( is_array( $raw ) ? $raw : array() as $row ) {
+		$box = array_map( 'intval', (array) ( $row['box'] ?? array() ) );
+		if ( 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		$out[] = array(
+			'box' => array_values( $box ),
+			'iw'  => max( 0, (int) ( $row['iw'] ?? 0 ) ),
+			'ih'  => max( 0, (int) ( $row['ih'] ?? 0 ) ),
+			'at'  => (string) ( $row['at'] ?? '' ),
+			'by'  => (int) ( $row['by'] ?? 0 ),
+		);
+	}
+	return $out;
+}
+
+/**
+ * Overlap of two boxes, each given with the image size it was measured against.
+ *
+ * Normalised before comparing, because the same face measured on a 4000px
+ * original and a 1200px working copy is the same face with different numbers,
+ * and an ignore recorded at one size has to survive a rescan at the other.
+ *
+ * @return float 0..1
+ */
+function gasf_crm_face_box_overlap( array $a, $aw, $ah, array $b, $bw, $bh ) {
+	if ( 4 !== count( $a ) || 4 !== count( $b ) ) { return 0.0; }
+	$aw = (float) $aw; $ah = (float) $ah; $bw = (float) $bw; $bh = (float) $bh;
+	if ( $aw <= 0 || $ah <= 0 || $bw <= 0 || $bh <= 0 ) { return 0.0; }
+
+	$n = function ( array $box, $w, $h ) {
+		return array( $box[0] / $w, $box[1] / $h, $box[2] / $w, $box[3] / $h );
+	};
+	list( $ax, $ay, $awd, $ahd ) = $n( $a, $aw, $ah );
+	list( $bx, $by, $bwd, $bhd ) = $n( $b, $bw, $bh );
+
+	$ix = max( 0.0, min( $ax + $awd, $bx + $bwd ) - max( $ax, $bx ) );
+	$iy = max( 0.0, min( $ay + $ahd, $by + $bhd ) - max( $ay, $by ) );
+	$inter = $ix * $iy;
+	$union = ( $awd * $ahd ) + ( $bwd * $bhd ) - $inter;
+	return $union > 0 ? (float) ( $inter / $union ) : 0.0;
+}
+
+/** How much two rectangles must overlap to count as the same face. */
+define( 'GASF_CRM_FACE_IGNORE_IOU', 0.35 );
+
+/** Has this rectangle already been put down on this photo? */
+function gasf_crm_face_is_ignored( $attachment_id, array $box, $iw, $ih ) {
+	foreach ( gasf_crm_face_ignored_for( $attachment_id ) as $row ) {
+		$o = gasf_crm_face_box_overlap( $row['box'], $row['iw'], $row['ih'], $box, $iw, $ih );
+		if ( $o >= GASF_CRM_FACE_IGNORE_IOU ) { return true; }
+	}
+	return false;
+}
+
+/**
+ * Put one face down for good, and clear anything it was still being offered as.
+ *
+ * @return true|WP_Error True whether or not this was already recorded — asking
+ *                       twice is not an error, it is a volunteer double-clicking.
+ */
+function gasf_crm_face_ignore( $attachment_id, array $box, $iw, $ih ) {
+	$id  = (int) $attachment_id;
+	$box = array_map( 'intval', array_values( $box ) );
+	$iw  = (int) $iw;
+	$ih  = (int) $ih;
+
+	if ( ! $id || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 || $iw <= 0 || $ih <= 0 ) {
+		return new WP_Error( 'gasf_crm_bad', 'A photo and a face rectangle are required.', array( 'status' => 400 ) );
+	}
+
+	if ( ! gasf_crm_face_is_ignored( $id, $box, $iw, $ih ) ) {
+		$next   = gasf_crm_face_ignored_for( $id );
+		$next[] = array(
+			'box' => $box,
+			'iw'  => $iw,
+			'ih'  => $ih,
+			'at'  => current_time( 'mysql', true ),
+			'by'  => get_current_user_id(),
+		);
+		update_post_meta( $id, '_gasf_face_ignored', $next );
+		if ( ! gasf_crm_face_is_ignored( $id, $box, $iw, $ih ) ) {
+			return new WP_Error( 'gasf_crm_store', 'That face could not be put down.', array( 'status' => 500 ) );
+		}
+	}
+
+	// Anything still offered for that rectangle goes with it, so the chip does
+	// not sit there naming a face nobody will ever tag.
+	$raw  = get_post_meta( $id, '_gasf_face_suggestions', true );
+	$keep = array();
+	foreach ( is_array( $raw ) ? $raw : array() as $s ) {
+		$sbox = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
+		$siw  = (int) ( $s['iw'] ?? $iw );
+		$sih  = (int) ( $s['ih'] ?? $ih );
+		if ( 4 === count( $sbox ) && $sbox[2] > 0 && $sbox[3] > 0
+			&& gasf_crm_face_box_overlap( $sbox, $siw ?: $iw, $sih ?: $ih, $box, $iw, $ih ) >= GASF_CRM_FACE_IGNORE_IOU ) {
+			continue;
+		}
+		$keep[] = $s;
+	}
+	if ( $keep ) { update_post_meta( $id, '_gasf_face_suggestions', $keep ); }
+	else { delete_post_meta( $id, '_gasf_face_suggestions' ); }
+
+	return true;
+}
+
+/** Let a face back into the queue — the undo for a mis-click. */
+function gasf_crm_face_unignore( $attachment_id, array $box, $iw, $ih ) {
+	$id   = (int) $attachment_id;
+	$box  = array_map( 'intval', array_values( $box ) );
+	$keep = array();
+	foreach ( gasf_crm_face_ignored_for( $id ) as $row ) {
+		if ( gasf_crm_face_box_overlap( $row['box'], $row['iw'], $row['ih'], $box, (int) $iw, (int) $ih ) >= GASF_CRM_FACE_IGNORE_IOU ) {
+			continue;
+		}
+		$keep[] = $row;
+	}
+	if ( $keep ) { update_post_meta( $id, '_gasf_face_ignored', $keep ); }
+	else { delete_post_meta( $id, '_gasf_face_ignored' ); }
+	return true;
+}
+
 /**
  * Remember one false person recommendation and remove only that recommendation.
  *
@@ -1244,6 +1393,21 @@ add_action( 'rest_api_init', function () {
 		return gasf_crm_user_can_stream( 'photos' );
 	};
 
+	/*
+	 * A volunteer decision that may arrive from either seat.
+	 *
+	 * Some choices are made in the CRM, signed in, and some are made in the
+	 * labelling board on the scanning machine, which authenticates with the
+	 * machine key — the same arrangement /label and /discover-label already
+	 * live with, because a person sitting at that board IS the volunteer. A
+	 * decision reachable from only one of the two seats is a decision half the
+	 * work cannot make.
+	 */
+	$either_guard = function () use ( $volunteer_guard ) {
+		if ( gasf_crm_faces_authed() ) { return true; }
+		return $volunteer_guard();
+	};
+
 	/**
 	 * What needs looking at.
 	 *
@@ -1314,6 +1478,10 @@ add_action( 'rest_api_init', function () {
 					'people'        => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
 					'labels'        => gasf_crm_face_labels_for( $id ),
 					'rejected'      => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
+					// Rectangles a volunteer has said are not people to tag. The
+					// scanner skips any face that lands on one of these, so a
+					// poster on the wall stops being offered on every rescan.
+					'ignored'       => gasf_crm_face_ignored_for( $id ),
 					'uploaded_at'   => (string) get_post_field( 'post_date_gmt', $id ),
 					'caption_context' => gasf_crm_caption_context( $id ),
 					'needs_faces'   => $needs_faces,
@@ -1598,6 +1766,60 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	/*
+	 * "This is not a person to tag" — the end of the road for one face.
+	 *
+	 * Reachable from the CRM and from the labelling board on the scanning
+	 * machine, because that board is where these faces are actually looked at.
+	 * Undo is the same route with clear=1: the button sits next to a face and
+	 * will be mis-clicked.
+	 */
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/ignore', array(
+		'methods'             => 'POST',
+		'permission_callback' => $either_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$id  = (int) $req->get_param( 'photo' );
+			$box = array_map( 'intval', (array) $req->get_param( 'box' ) );
+			$iw  = (int) $req->get_param( 'iw' );
+			$ih  = (int) $req->get_param( 'ih' );
+			$clear = (bool) $req->get_param( 'clear' );
+
+			if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) {
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
+			if ( 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 || $iw <= 0 || $ih <= 0 ) {
+				return new WP_Error( 'gasf_crm_bad', 'A face rectangle and the size it was measured on are required.', array( 'status' => 400 ) );
+			}
+
+			$lock = gasf_crm_faces_try_lock( $id, 'ignore' );
+			if ( '' === $lock ) {
+				return new WP_Error( 'gasf_crm_busy', 'That photo is being updated by the scanner. Try again in a moment.', array( 'status' => 409 ) );
+			}
+			try {
+				$done = $clear
+					? gasf_crm_face_unignore( $id, $box, $iw, $ih )
+					: gasf_crm_face_ignore( $id, $box, $iw, $ih );
+			} finally {
+				gasf_crm_faces_unlock( $id, 'ignore', $lock );
+			}
+			if ( is_wp_error( $done ) ) { return $done; }
+
+			gasf_crm_log( sprintf(
+				'CRM faces: face at [%s] on photo #%d %s — user %d',
+				implode( ',', $box ),
+				$id,
+				$clear ? 'put back in the queue' : 'marked not a person to tag',
+				get_current_user_id()
+			) );
+
+			return array(
+				'ok'      => true,
+				'photo'   => $id,
+				'ignored' => gasf_crm_face_ignored_for( $id ),
+			);
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/faces/reject', array(
 		'methods'             => 'POST',
 		'permission_callback' => $volunteer_guard,
@@ -1719,6 +1941,7 @@ add_action( 'rest_api_init', function () {
 					'people' => array_map( 'html_entity_decode', $people ),
 					'labels' => gasf_crm_face_labels_for( $id ),
 					'rejected' => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
+					'ignored'  => gasf_crm_face_ignored_for( $id ),
 					'uploaded_at' => (string) get_post_field( 'post_date_gmt', $id ),
 					'caption_context' => gasf_crm_caption_context( $id ),
 					'pipeline' => gasf_crm_faces_photo_state( $id ),

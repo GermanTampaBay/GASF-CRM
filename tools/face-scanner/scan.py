@@ -1404,8 +1404,16 @@ def unresolved_observations(photo, found, references, backend, tolerance, image_
         [name for name in (photo.get("people") or []) if str(name).strip()]
     ) == 1
     rejected = photo.get("rejected") or []
+    ignored = photo.get("ignored") or []
     unknown = []
     for index, (box, vector) in enumerate(zip(boxes, vectors)):
+        # Put down for good by a volunteer: a poster, a reflection, a stranger
+        # in the background, or something that was never a face. Checked before
+        # anything else, because this is the one answer that ends the question -
+        # and note that rejecting a NAME does the opposite, sending the face
+        # back into this pile every scan, which is why this exists.
+        if _face_box_ignored(box, image_width, image_height, ignored):
+            continue
         resolved = index in explicit or (index == 0 and one_face_truth)
         if not resolved:
             name, _ = identify(vector, references, backend, tolerance)
@@ -2402,9 +2410,14 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
             image_height, image_width = display_pixels.shape[:2]
             boxes = []
             kept_found = []
+            ignored_boxes = p.get("ignored") or []
             for box_css, vector in found:
                 box = clamp_box_xywh(css_box_to_xywh(box_css), image_width, image_height)
                 if box is None:
+                    continue
+                # Faces a volunteer has put down are not offered for labelling
+                # again - that is the whole point of putting them down.
+                if _face_box_ignored(box, image_width, image_height, ignored_boxes):
                     continue
                 boxes.append(box)
                 kept_found.append((box_css, vector))
@@ -2648,6 +2661,50 @@ def _face_name_rejected(name, rejected_names):
     return bool(keys) and any(keys.intersection(_face_name_keys(rejected)) for rejected in (rejected_names or []))
 
 
+# How much two rectangles must overlap to be the same face. Mirrors
+# GASF_CRM_FACE_IGNORE_IOU on the server; both sides must agree or a face put
+# down in the CRM would come back here.
+FACE_IGNORE_IOU = 0.35
+
+
+def _face_box_ignored(box, image_width, image_height, ignored):
+    """
+    Has a volunteer said this rectangle is not a person to tag?
+
+    Normalised before comparing, because the same face measured on the original
+    and on a smaller working copy is the same face with different numbers, and
+    an ignore recorded at one size has to survive a rescan at another. Matched
+    on overlap alone: the embedding that would make this sturdier never leaves
+    this machine, so it cannot be part of an instruction the server sends back.
+    """
+    if not ignored or not box or len(box) != 4:
+        return False
+    iw, ih = float(image_width or 0), float(image_height or 0)
+    if iw <= 0 or ih <= 0:
+        return False
+    bx, by, bw, bh = [float(v) for v in box]
+    b = (bx / iw, by / ih, bw / iw, bh / ih)
+
+    for row in ignored:
+        if not isinstance(row, dict):
+            continue
+        rbox = row.get("box") or []
+        rw = float(row.get("iw") or 0)
+        rh = float(row.get("ih") or 0)
+        if len(rbox) != 4 or rw <= 0 or rh <= 0:
+            continue
+        rx, ry, rww, rhh = [float(v) for v in rbox]
+        a = (rx / rw, ry / rh, rww / rw, rhh / rh)
+
+        ix = max(0.0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+        iy = max(0.0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+        inter = ix * iy
+        union = (a[2] * a[3]) + (b[2] * b[3]) - inter
+        if union > 0 and (inter / union) >= FACE_IGNORE_IOU:
+            return True
+    return False
+
+
 def _face_name_keys(name):
     """Mirror WordPress's expanded and plain German person-name keys."""
     clean = " ".join(html.unescape(str(name or "")).split())
@@ -2738,7 +2795,9 @@ border:1px solid #26324a;border-radius:6px;background:#0b1220}
 .viewprefs button:hover{border-color:#60a5fa}
 .viewprefs .zoomread{grid-column:1/-1;text-align:center;font-size:12px;color:#94a3b8}
 .rows{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto}
-.row{display:grid;grid-template-columns:64px 1fr auto;gap:6px;align-items:center}
+.row{display:grid;grid-template-columns:64px 1fr auto auto;gap:6px;align-items:center}
+.notaperson{border:1px solid #475569;background:#0b1220;color:#94a3b8;border-radius:6px;padding:5px 9px;cursor:pointer;white-space:nowrap}
+.notaperson:hover{border-color:#f87171;color:#fca5a5}
 .row label{font-size:12px;color:#cbd5e1}
 .row input{background:#0b1220;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:6px 8px}
 .row button{background:#1d4ed8;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer}
@@ -2985,9 +3044,33 @@ function render(p){
     const val=(p.prefill && p.prefill[String(i)]) || '';
     const row=document.createElement('div'); row.className='row';
     const listId = localNames.length ? "peopleListLocal" : "peopleListGlobal";
-    row.innerHTML=`<label>Face ${i+1}</label><input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`;
+    row.innerHTML=`<label>Face ${i+1}</label><input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`
+      + `<button class="notaperson" data-ignore="${i}" title="This is not a person to tag - a poster, a reflection, or somebody in the background. It will not be offered again.">Not a person</button>`;
     rows.appendChild(row);
     if(val){ addName(val); }
+  });
+  rows.querySelectorAll('button[data-ignore]').forEach(b=>b.onclick=async()=>{
+    const i=parseInt(b.getAttribute('data-ignore'),10);
+    const box=(p.boxes||[])[i];
+    if(!box){ return; }
+    b.disabled=true; b.textContent='...';
+    try{
+      const r=await fetch('/api/ignore',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','X-GASF-Label-Token':sessionToken},
+        body:JSON.stringify({photo:p.id, box:box, iw:p.image_width||0, ih:p.image_height||0})
+      });
+      if(!r.ok){ throw new Error(await r.text()||r.statusText); }
+      // Gone for good: drop the row so the remaining faces are what is left to
+      // do, and clear any name typed into it so a save cannot re-add it.
+      const inp=rows.querySelector(`input[data-i="${i}"]`);
+      if(inp){ inp.value=''; }
+      b.closest('.row').remove();
+      setText('msg','That face will not be offered again.');
+    }catch(e){
+      b.disabled=false; b.textContent='Not a person';
+      setText('msg','Could not save that: '+e.message);
+    }
   });
   rows.querySelectorAll('button[data-fill]').forEach(b=>b.onclick=()=>{
     const i=b.getAttribute('data-fill');
@@ -3412,6 +3495,36 @@ def local_label(
                     state["saved"] += kept
                     saved_total = state["saved"]
                 return self._write(200, json.dumps({"ok": True, "stored": kept, "saved_total": saved_total}))
+
+            if u.path == "/api/ignore":
+                # "Not a person" - put one face down for good. Sent straight to
+                # WordPress rather than kept locally, so it survives this
+                # machine: a rebuilt faces.db, a reinstall, or a different PC
+                # entirely still knows not to ask about this face again.
+                try:
+                    photo = int(data.get("photo") or 0)
+                except (TypeError, ValueError):
+                    return self._write(400, json.dumps({"error": "Invalid photo id"}))
+                box = data.get("box") or []
+                try:
+                    box = [int(v) for v in box]
+                except (TypeError, ValueError):
+                    box = []
+                iw = int(data.get("iw") or 0)
+                ih = int(data.get("ih") or 0)
+                if photo < 1 or len(box) != 4 or iw < 1 or ih < 1:
+                    return self._write(400, json.dumps({"error": "A photo and a face rectangle are required"}))
+                try:
+                    api.post("/ignore", {
+                        "photo": photo,
+                        "box": box,
+                        "iw": iw,
+                        "ih": ih,
+                        "clear": bool(data.get("clear")),
+                    })
+                except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
+                    return self._write(502, json.dumps({"error": f"Could not save that: {e}"}))
+                return self._write(200, json.dumps({"ok": True}))
 
             if u.path == "/api/finish":
                 try:
@@ -4293,6 +4406,17 @@ def selftest():
         and _face_name_rejected("Jürgen Example", ["Juergen Example"])
         and not _face_name_rejected("Other Candidate", ["Debbie Example"]),
         "label queue: one rejected person is hidden without suppressing other candidates",
+    )
+    _ignored_fixture = [{"box": [100, 120, 80, 80], "iw": 1000, "ih": 800}]
+    check_that(
+        _face_box_ignored([100, 120, 80, 80], 1000, 800, _ignored_fixture)
+        # the same face on a half-size rescan: different numbers, same face
+        and _face_box_ignored([50, 60, 40, 40], 500, 400, _ignored_fixture)
+        # a different face on the same photo is still offered
+        and not _face_box_ignored([700, 100, 80, 80], 1000, 800, _ignored_fixture)
+        # and nothing is ignored when the server sent no list at all
+        and not _face_box_ignored([100, 120, 80, 80], 1000, 800, []),
+        "label queue: a face put down stays down across a rescan at another size",
     )
     check_that(
         clamp_box_xywh([95, 75, 20, 20], 100, 80) == [95, 75, 5, 5]
