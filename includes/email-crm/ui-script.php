@@ -233,8 +233,16 @@ function gasf_crm_render_inbox_script() {
 					(note ? '<br><span class="muted">' + esc(note) + '</span>' : '') + '</li>';
 			}).join('') + '</ul></div>' : '';
 
-		return '<div class="casebox">' +
-			'<h3>Case workflow</h3>' +
+		/* Folded shut unless something needs attention.
+		   This is machinery, not correspondence: a volunteer opens a thread to
+		   read what somebody wrote, and an audit trail unrolled above it was
+		   answering a question almost nobody was asking. It opens by itself when
+		   there is an exception, which is the one time it is the point. */
+		var needed = parseInt(c.exception_count || 0, 10) > 0;
+		return '<details class="casebox"' + (needed ? ' open' : '') + '>' +
+			'<summary><h3>Case workflow</h3>' +
+			(needed ? '<span class="casewarn">' + parseInt(c.exception_count, 10) + ' open exception(s)</span>' : '') +
+			'</summary>' +
 			'<div class="casemeta"><span><strong>State:</strong> ' + esc(caseStateLabel(c.state)) + '</span>' +
 				'<span><strong>Owner:</strong> ' + esc(ownerLine) + '</span>' +
 				'<span><strong>Open exceptions:</strong> ' + parseInt(c.exception_count || 0, 10) + '</span></div>' +
@@ -245,7 +253,7 @@ function gasf_crm_render_inbox_script() {
 					'</div><div class="casestate">' + stateButtons + '</div>'
 				: '<p class="muted" style="margin:8px 0 0">Case controls unlock when this thread is in Open.</p>') +
 			'<div class="casetasks">' + taskRows + '</div>' + eventRows +
-			'</div>';
+			'</details>';
 	}
 
 	function queueTag(t){
@@ -434,7 +442,10 @@ function gasf_crm_render_inbox_script() {
 				html += '<div class="note warn">' + esc(t.locked_by) + ' is replying to this. You can read it, but not send.' +
 					'<div class="actions"><button type="button" class="btn sec" id="threadtakeover">Take over reply lock</button></div></div>';
 			}
-			html += caseBlock(t);
+			// The case workflow panel used to sit HERE, above the email, which put
+			// a machine-generated audit trail between a volunteer and the thing
+			// they opened the page to read. It is now at the very bottom: it
+			// matters when something has gone wrong and never before then.
 
 			// On a submission thread the photos ARE the job, so they go above the
 			// message and the reply box goes under it. The email on these is
@@ -567,7 +578,10 @@ function gasf_crm_render_inbox_script() {
 			}
 
 			if (!photosFirst) { html += pb; }
+			// Both audit trails last, in the order somebody troubleshooting would
+			// want them: what happened to the thread, then the case machinery.
 			html += history(t.events);
+			html += caseBlock(t);
 			pane.innerHTML = html;
 
 			/* Links out of a stranger's email open a NEW tab, carrying nothing.

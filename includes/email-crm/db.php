@@ -395,15 +395,30 @@ function gasf_crm_upsert_thread( $conversation_id, $subject, $from_name, $from_a
 		) );
 
 		if ( false !== $inserted ) {
+			/*
+			 * Captured ONCE, immediately, into a local.
+			 *
+			 * $wpdb->insert_id is global mutable state: it is whatever the last
+			 * INSERT on this connection produced, and both calls below insert.
+			 * Read again at the end it returns the case EVENT's id, and this
+			 * function's whole job is to answer "which thread". The caller then
+			 * files the message under a thread number that belongs to another
+			 * table entirely — so the row lands, nothing errors, and the email
+			 * is simply never seen again. Four threads' worth of inbound mail
+			 * went that way before anybody noticed, because an empty thread
+			 * looks exactly like a thread nobody has replied to yet.
+			 */
+			$new_id = (int) $wpdb->insert_id;
+
 			$case_id = gasf_crm_case_ensure_for_thread(
-				(int) $wpdb->insert_id,
+				$new_id,
 				'email:' . $stream . ':' . $conversation_id,
 				'new'
 			);
 			if ( $case_id ) {
-				gasf_crm_case_log_event( $case_id, 'case.created', array( 'thread_id' => (int) $wpdb->insert_id ) );
+				gasf_crm_case_log_event( $case_id, 'case.created', array( 'thread_id' => $new_id ) );
 			}
-			return array( 'id' => (int) $wpdb->insert_id, 'reopened' => false, 'created' => true );
+			return array( 'id' => $new_id, 'reopened' => false, 'created' => true );
 		}
 
 		// INSERT failed. The usual cause is two syncs racing the same brand-new

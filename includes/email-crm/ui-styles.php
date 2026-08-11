@@ -218,7 +218,13 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
    a stream colour rather than a status one. */
 .note.ok{background:#f0f6ec;border-left:4px solid var(--ok)}
 .casebox{margin:12px 0;padding:10px 12px;border:1px solid var(--gasf-border);border-radius:5px;background:var(--s-wash)}
-.casebox h3{margin:0 0 8px;font-size:13px}
+.casebox h3{margin:0;font-size:13px;display:inline}
+/* Folded shut by default and out of the way at the bottom — the summary is the
+   whole of it until somebody wants the machinery. */
+.casebox>summary{cursor:pointer;list-style:revert;color:var(--gasf-muted);
+	display:flex;align-items:baseline;gap:8px}
+.casebox[open]>summary{margin:0 0 8px}
+.casebox .casewarn{color:#9e2b25;font-size:12px;font-weight:600}
 .casemeta{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--gasf-muted)}
 .casestate{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
 .casestate .btn{padding:5px 10px;font-size:12px}
