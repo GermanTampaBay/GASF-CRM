@@ -1403,7 +1403,7 @@ function gasf_crm_render_inbox_script() {
 			// corrected because a human can know better than a camera about the
 			// day, but the time is evidence, and its only value is that nobody
 			// has touched it.
-			'<label class="pf"><span>Date or year</span><input type="text" class="p-taken" inputmode="numeric" placeholder="YYYY or YYYY-MM-DD" value="' + esc(q.taken||p.taken||'') + '">' +
+			'<label class="pf"><span>Date or year</span><input type="text" class="p-taken" inputmode="numeric" placeholder="YYYY, YYYY-MM, or YYYY-MM-DD" value="' + esc(q.taken||p.taken||'') + '">' +
 				(timeOf(p, q) ? '<em class="ptime">Camera clock <b>' + esc(timeOf(p, q)) + '</b></em>' : '') +
 			'</label>' +
 			'</div>' +

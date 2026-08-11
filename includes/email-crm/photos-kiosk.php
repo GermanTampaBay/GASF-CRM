@@ -131,15 +131,34 @@ add_action( 'rest_api_init', function () {
             );
             $ids = gasf_kiosk_photo_ids( $f );
 
-            // from/to date slice - the only logic not already in the plugin.
+            /*
+             * from/to date slice, compared as SPANS rather than as strings.
+             *
+             * A photo date can be a year, a month, or a day, and the bounds may
+             * be too. Comparing the raw strings got partial dates exactly wrong:
+             * strcmp( '1974', '1974-01-01' ) is negative, so a photo dated just
+             * "1974" sorted before the first day of its own year and dropped out
+             * of every range that should have contained it. Each side is widened
+             * to the days it could mean and the test is overlap, so a 1974 photo
+             * appears in any window touching 1974 - which is the only answer that
+             * is true of what the club actually knows about that photo.
+             */
             $from = preg_replace( '~[^0-9-]~', '', (string) $req->get_param( 'from' ) );
             $to   = preg_replace( '~[^0-9-]~', '', (string) $req->get_param( 'to' ) );
             if ( '' !== $from || '' !== $to ) {
-                $ids = array_values( array_filter( $ids, function ( $id ) use ( $from, $to ) {
+                $from_span = function_exists( 'gasf_crm_photo_taken_span' ) ? gasf_crm_photo_taken_span( $from ) : array( $from, $from );
+                $to_span   = function_exists( 'gasf_crm_photo_taken_span' ) ? gasf_crm_photo_taken_span( $to )   : array( $to, $to );
+                $lo = (string) ( $from_span[0] ?: $from );   // window opens on the first day "from" could mean
+                $hi = (string) ( $to_span[1]   ?: $to );     // and closes on the last day "to" could mean
+
+                $ids = array_values( array_filter( $ids, function ( $id ) use ( $lo, $hi ) {
                     $d = (string) ( get_post_meta( $id, '_gasf_photo_taken', true )
                         ?: substr( get_post_field( 'post_date', $id ), 0, 10 ) );
-                    if ( '' !== $from && strcmp( $d, $from ) < 0 ) { return false; }
-                    if ( '' !== $to   && strcmp( $d, $to )   > 0 ) { return false; }
+                    $span  = function_exists( 'gasf_crm_photo_taken_span' ) ? gasf_crm_photo_taken_span( $d ) : array( $d, $d );
+                    $first = (string) ( $span[0] ?: $d );
+                    $last  = (string) ( $span[1] ?: $d );
+                    if ( '' !== $lo && strcmp( $last,  $lo ) < 0 ) { return false; } // ended before the window opened
+                    if ( '' !== $hi && strcmp( $first, $hi ) > 0 ) { return false; } // started after it closed
                     return true;
                 } ) );
             }

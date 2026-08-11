@@ -483,6 +483,47 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * Three precisions of photo date, and ranges that understand all of them.
+	 *
+	 * YYYY-MM used to be the one shape that was silently dropped — it matched
+	 * neither branch, so the field came back empty and the volunteer who typed
+	 * "1982-03" got no date and no error. The span helper exists because a plain
+	 * string comparison gets partial dates backwards: '1974' sorts before
+	 * '1974-01-01', so a year-only photo fell out of a range covering its own
+	 * year.
+	 */
+	public function test_taken_precisions() {
+		$this->ok( '1974' === gasf_crm_photo_clean_taken( '1974' ), 'taken: a bare year is kept' );
+		$this->ok( '1982-03' === gasf_crm_photo_clean_taken( '1982-03' ), 'taken: a year and month is kept' );
+		$this->ok( '2024-05-01' === gasf_crm_photo_clean_taken( '2024-05-01' ), 'taken: a full date is kept' );
+		$this->ok( '' === gasf_crm_photo_clean_taken( '1982-13' ), 'taken: a thirteenth month is refused' );
+		$this->ok( '' === gasf_crm_photo_clean_taken( '2026-02-31' ), 'taken: an impossible day is still refused' );
+		$this->ok( '' === gasf_crm_photo_clean_taken( 'last summer' ), 'taken: prose is refused' );
+
+		// Spans: what each precision could actually mean.
+		$this->ok( array( '1974-01-01', '1974-12-31' ) === gasf_crm_photo_taken_span( '1974' ),
+			'taken span: a year covers the whole year' );
+		$this->ok( array( '1982-03-01', '1982-03-31' ) === gasf_crm_photo_taken_span( '1982-03' ),
+			'taken span: a month covers that month, to its real last day' );
+		$this->ok( array( '2024-02-01', '2024-02-29' ) === gasf_crm_photo_taken_span( '2024-02' ),
+			'taken span: February in a leap year runs to the 29th' );
+		$this->ok( array( '2024-05-01', '2024-05-01' ) === gasf_crm_photo_taken_span( '2024-05-01' ),
+			'taken span: a full date is a single day' );
+
+		// The comparison the kiosk range makes: a year-only photo overlaps a
+		// window inside its own year, which raw string compare got wrong.
+		list( $first, $last ) = gasf_crm_photo_taken_span( '1974' );
+		$this->ok(
+			strcmp( $last, '1974-06-01' ) >= 0 && strcmp( $first, '1974-06-30' ) <= 0,
+			'taken span: a 1974 photo overlaps a window inside 1974'
+		);
+		$this->ok(
+			strcmp( $last, '1975-01-01' ) < 0,
+			'taken span: and does not reach into the next year'
+		);
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );

@@ -3925,12 +3925,54 @@ function gasf_crm_photo_clean_date( $raw ) {
 	return $d;
 }
 
-/** Photo date as YYYY-MM-DD, YYYY, or ''. */
+/**
+ * Photo date as YYYY-MM-DD, YYYY-MM, YYYY, or ''.
+ *
+ * Three precisions, because that is how much people actually know about an old
+ * photo. A scan from a shoebox is "1974"; a print with a lab stamp is "March
+ * 1982"; a digital file knows the day. YYYY-MM used to be the one shape that
+ * was silently dropped — it matched neither branch, the field came back empty,
+ * and the volunteer who typed it got no error and no date.
+ */
 function gasf_crm_photo_clean_taken( $raw ) {
 	$d = trim( sanitize_text_field( (string) $raw ) );
 	if ( '' === $d ) { return ''; }
 	if ( preg_match( '~^\d{4}$~', $d ) ) { return $d; }
+	if ( preg_match( '~^(\d{4})-(\d{2})$~', $d, $m ) ) {
+		$mm = (int) $m[2];
+		return ( $mm >= 1 && $mm <= 12 ) ? $d : '';
+	}
 	return gasf_crm_photo_clean_date( $d );
+}
+
+/**
+ * A stored photo date as the inclusive span of days it could mean.
+ *
+ * "1974" means any day in 1974, and "1982-03" any day that March. Anything
+ * comparing a photo date against a range has to know that, because a plain
+ * string comparison gets it exactly wrong: strcmp( '1974', '1974-01-01' ) is
+ * negative, so a year-only photo sorted BEFORE the first day of its own year
+ * and fell out of every range that should have contained it.
+ *
+ * @return array{0:string,1:string} First and last possible day, or two empty
+ *                                  strings when the value is not a date at all.
+ */
+function gasf_crm_photo_taken_span( $taken ) {
+	$d = trim( (string) $taken );
+
+	if ( preg_match( '~^(\d{4})$~', $d ) ) {
+		return array( $d . '-01-01', $d . '-12-31' );
+	}
+	if ( preg_match( '~^(\d{4})-(\d{2})$~', $d, $m ) ) {
+		$mm = (int) $m[2];
+		if ( $mm < 1 || $mm > 12 ) { return array( '', '' ); }
+		$last = (int) gmdate( 't', gmmktime( 0, 0, 0, $mm, 1, (int) $m[1] ) );
+		return array( $d . '-01', $d . '-' . str_pad( (string) $last, 2, '0', STR_PAD_LEFT ) );
+	}
+	if ( preg_match( '~^\d{4}-\d{2}-\d{2}$~', $d ) ) {
+		return array( $d, $d );
+	}
+	return array( '', '' );
 }
 
 /** HH:MM in 24h or ''. */
