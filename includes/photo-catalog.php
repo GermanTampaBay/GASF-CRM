@@ -524,6 +524,70 @@ JS;
 	}
 
 	/**
+	 * The people on a photo whose names may be shown to somebody outside the club.
+	 *
+	 * The one list every non-curator surface builds from: the public title and
+	 * alt text, the kiosk wall, and the archive sidecars. A volunteer tagging
+	 * photos still sees everybody — they need the name to do the work, and the
+	 * tag itself is untouched, so face matching, search, and the grid carry on
+	 * exactly as before. Opting out hides a name from display; it does not
+	 * un-tag a person or erase them from the club's own records.
+	 *
+	 * Filtered by TERM, never by comparing name strings. Everything downstream of
+	 * gasf_photo_info() has been through gasf_photo_label(), which decodes HTML
+	 * entities — so "Müller &amp; Sohn" arrives decoded and would not match the
+	 * stored term name, and a string-matching filter would quietly fail open on
+	 * exactly the names most likely to be unusual. The term object cannot drift.
+	 *
+	 * @return string[] Display-ready names, in the taxonomy's own order.
+	 */
+	function gasf_photo_public_people_names( $attachment_id ) {
+		$terms = get_the_terms( (int) $attachment_id, 'gasf_photo_person' );
+		if ( ! $terms || is_wp_error( $terms ) ) { return array(); }
+
+		$out = array();
+		foreach ( $terms as $t ) {
+			// opted_out(), not may_show_public_name(): these are real terms from
+			// the taxonomy, and the question is the person's own preference. The
+			// stricter helper fails closed on anything it cannot identify, which
+			// is right for a name typed into a public form and wrong here, where
+			// failing closed would silently hide people nobody opted out.
+			if ( gasf_photo_person_public_name_opted_out( $t ) ) { continue; }
+			$out[] = gasf_photo_label( $t->name );
+		}
+		return $out;
+	}
+
+	/**
+	 * The stored term names of everybody who has opted out, in one query.
+	 *
+	 * For the surfaces that hold a list of raw term names rather than a photo —
+	 * the kiosk's filter bar is the one that matters — where asking per name
+	 * would mean a taxonomy scan each time. Returns the STORED names, because
+	 * that is what those lists carry as their filter value; the decoded label
+	 * sits beside it and is not what identifies the term.
+	 *
+	 * Deliberately not cached in a static: the opt-out toggle re-reads this in
+	 * the same request it writes, and a stale answer there would be a preference
+	 * that appears not to have taken.
+	 */
+	function gasf_photo_opted_out_person_names() {
+		$terms = get_terms( array(
+			'taxonomy'   => 'gasf_photo_person',
+			'hide_empty' => false,
+			'meta_query' => array( // phpcs:ignore WordPress.DB.SlowDBQuery -- one query beats a scan per name.
+				array(
+					'key'     => GASF_PHOTO_PERSON_PUBLIC_NAME_OPT_OUT_META,
+					'value'   => '1',
+					'compare' => '=',
+				),
+			),
+		) );
+		if ( is_wp_error( $terms ) || ! $terms ) { return array(); }
+		return array_map( 'strval', wp_list_pluck( $terms, 'name' ) );
+	}
+
+	/**
 	 * Names it is safe to suggest on the PUBLIC tagging page.
 	 *
 	 * Only people who already appear on a photo the public can see — where the
@@ -533,7 +597,11 @@ JS;
 	 * club members, which is the same mistake the place picker made.
 	 *
 	 * An explicit public-name opt-out also removes the person from this list.
-	 * The preference does not rewrite photo tags, titles, or private metadata.
+	 * The preference never touches photo TAGS — the person stays tagged, and
+	 * volunteers, search, and face matching all carry on seeing them — but it
+	 * does now govern every place a name is shown to somebody outside the club:
+	 * the public title and alt text, the kiosk wall, and the archive sidecars.
+	 * See gasf_photo_public_people_names().
 	 *
 	 * Names found only on photos awaiting review remain held back as well.
 	 */
@@ -1358,7 +1426,11 @@ JS;
 		$info  = gasf_photo_info( $id );
 		$place = gasf_photo_deepest_place( $id );
 
-		$who   = array_map( 'gasf_photo_label', array_slice( (array) $info['people'], 0, 3 ) );
+		// The public-name list, not every tagged person: a published attachment's
+		// title is a public surface — it is what the media REST route, the
+		// attachment page, and search all print — so somebody who has asked not
+		// to be named publicly must not be named here.
+		$who   = array_map( 'gasf_photo_label', array_slice( gasf_photo_public_people_names( $id ), 0, 3 ) );
 		$where = array_filter( array(
 			$place ? gasf_photo_label( $place->name ) : '',
 			! empty( $info['events'] ) ? gasf_photo_label( $info['events'][0] ) : '',
@@ -1379,10 +1451,19 @@ JS;
 	 * Bierstube" describes the picture, whereas a list of tags would be
 	 * keyword-stuffing dressed up as accessibility.
 	 */
-	function gasf_photo_apply_names( $attachment_id ) {
+	/**
+	 * @param bool $force Write the recomputed title and alt even when they come
+	 *                    out EMPTY. Normally an empty result means "we learned
+	 *                    nothing new" and the existing text is left alone — but
+	 *                    when a name is being withdrawn, leaving it alone is
+	 *                    precisely the bug: the old title still carries the name
+	 *                    somebody just asked to hide. Only the opt-out backfill
+	 *                    passes true.
+	 */
+	function gasf_photo_apply_names( $attachment_id, $force = false ) {
 		$id    = (int) $attachment_id;
 		$title = gasf_photo_title( $id );
-		if ( $title ) {
+		if ( $title || $force ) {
 			wp_update_post( array( 'ID' => $id, 'post_title' => $title ) );
 		}
 
@@ -1391,7 +1472,9 @@ JS;
 
 		if ( '' === $alt ) {
 			$place = gasf_photo_deepest_place( $id );
-			$who   = array_slice( (array) $info['people'], 0, 3 );
+			// Public-name list again: alt text is read aloud by screen readers on
+			// a public page, which is naming somebody in public by any measure.
+			$who   = array_slice( gasf_photo_public_people_names( $id ), 0, 3 );
 			if ( $who && $place ) {
 				$alt = sprintf( '%s at %s', gasf_photo_join_names( $who ), $place->name );
 			} elseif ( $who ) {
@@ -1401,7 +1484,13 @@ JS;
 			}
 		}
 
-		if ( '' !== $alt ) { update_post_meta( $id, '_wp_attachment_image_alt', $alt ); }
+		if ( '' !== $alt ) {
+			update_post_meta( $id, '_wp_attachment_image_alt', $alt );
+		} elseif ( $force ) {
+			// Nothing left that may be said out loud. Removed rather than left
+			// standing, for the same reason as the title above.
+			delete_post_meta( $id, '_wp_attachment_image_alt' );
+		}
 	}
 
 	/** "Hans and Greta", "Hans, Greta and Anna" — for a sentence, not a list. */

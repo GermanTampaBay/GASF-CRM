@@ -223,6 +223,13 @@ function gasf_crm_backup_sidecar( $id ) {
 	$edit = get_post_meta( $id, '_gasf_photo_edit', true );
 	$file = get_attached_file( $id );
 
+	// Named people, minus anybody who has opted out of being named publicly.
+	$all_people    = array_values( (array) $card['people'] );
+	$named_people  = function_exists( 'gasf_photo_public_people_names' )
+		? array_values( gasf_photo_public_people_names( $id ) )
+		: $all_people;
+	$withheld      = max( 0, count( $all_people ) - count( $named_people ) );
+
 	return array(
 		'schema'       => GASF_CRM_BACKUP_SCHEMA,
 		'generated_at' => gmdate( 'c' ),
@@ -232,7 +239,18 @@ function gasf_crm_backup_sidecar( $id ) {
 		'caption'      => (string) $card['caption'],
 		'taken_date'   => (string) $card['taken'],
 		'taken_time'   => (string) $card['taken_at'],
-		'people'       => array_values( (array) $card['people'] ),
+		/*
+		 * The public-name list, and an honest count of what it leaves out.
+		 *
+		 * A sidecar is read by whoever opens the archive years from now, so it is
+		 * a display surface like any other and somebody who asked not to be named
+		 * publicly is not named in it. But dropping names silently would make the
+		 * archive quietly wrong — a group photo that claims two people when four
+		 * are tagged — so the count says that something was withheld and the tags
+		 * themselves are untouched in the CRM, which remains the club's record.
+		 */
+		'people'          => $named_people,
+		'people_withheld' => $withheld,
 		'place'        => $place_path ? implode( ' / ', $place_path ) : $place,
 		'event'        => (string) ( $card['events'][0] ?? '' ),
 		// The one block that must outlive everything else. Two years from now

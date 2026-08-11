@@ -3262,7 +3262,7 @@ function gasf_crm_render_inbox_script() {
 					'</div>' +
 					'<div class="npublic-row">' +
 						'<label class="npublic"><input type="checkbox" class="npublic-toggle"' + (p.public_name_opt_out ? ' checked' : '') + '> ' +
-							'<span>Hide this name from public photo lists and filters</span></label>' +
+							'<span>Hide this name outside the club &mdash; website, clubhouse screen, and downloads</span></label>' +
 						'<span class="nprivacy-msg" role="status"></span>' +
 					'</div>' +
 					// The merge target box carries class p-person on purpose: the

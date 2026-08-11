@@ -89,7 +89,13 @@ function gasf_kiosk_photo_card( $id ) {
         'taken'    => $taken,
         'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
         'year'     => substr( $taken, 0, 4 ),
-        'people'   => $names( 'gasf_photo_person' ),
+        // The public-name list. A screen on the clubhouse wall during an open
+        // event is the most public surface the club operates, so somebody who
+        // asked not to be named publicly is not named on it either. The photo
+        // still shows, and volunteers still see the tag everywhere they work.
+        'people'   => function_exists( 'gasf_photo_public_people_names' )
+            ? gasf_photo_public_people_names( $id )
+            : $names( 'gasf_photo_person' ),
         'places'   => $names( 'gasf_photo_place' ),
         'events'   => $names( 'gasf_photo_event' ),
         'kind'     => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
@@ -155,6 +161,25 @@ add_action( 'rest_api_init', function () {
              * class the library route documents).
              */
             $facets = gasf_crm_photo_library_facets( gasf_kiosk_photo_ids() );
+
+            /*
+             * The filter bar is a name list, so it needs the same opt-out the
+             * cards got. Filtered here rather than inside the shared facet
+             * builder because the volunteer library uses that same function and
+             * MUST keep showing everybody - the opt-out hides a name from the
+             * public, not from the people doing the cataloguing.
+             */
+            if ( function_exists( 'gasf_photo_opted_out_person_names' ) && ! empty( $facets['people'] ) ) {
+                $hidden = gasf_photo_opted_out_person_names();
+                if ( $hidden ) {
+                    $facets['people'] = array_values( array_filter(
+                        (array) $facets['people'],
+                        function ( $row ) use ( $hidden ) {
+                            return ! in_array( (string) ( $row['value'] ?? '' ), $hidden, true );
+                        }
+                    ) );
+                }
+            }
 
             return array(
                 'photos'    => $photos,

@@ -546,10 +546,22 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		}
 	}
 
-	// Scrub every size, verify, move out of the review folder, hand over the
-	// file mode, flip to inherit. All of it already lives in publish.
+	/*
+	 * Scrub every size, verify, move out of the review folder, hand over the file
+	 * mode, flip to inherit. All of it already lives in publish.
+	 *
+	 * But only for a photo the consent record allows on the web. A guest at a
+	 * party who clears the pre-ticked box, or a volunteer who ticks "limited",
+	 * has said the club may keep and show it on its own walls and NOT put it on
+	 * the internet — and this path used to publish it regardless, which is the
+	 * one thing that permission withholds. So it asks the same question
+	 * gasf_crm_photo_confirm() asks, and a limited or refused photo is actively
+	 * kept behind the storage boundary instead: private, 0600, outside the
+	 * webroot, still perfectly visible to volunteers and the kiosk.
+	 */
+	$web_allowed = gasf_crm_photo_may( $id, 'web' );
 	if ( ! $hold ) {
-		$pub = gasf_crm_photo_publish( $id );
+		$pub = $web_allowed ? gasf_crm_photo_publish( $id ) : gasf_crm_photo_unpublish( $id );
 		if ( is_wp_error( $pub ) ) {
 			wp_delete_attachment( $id, true );
 			return $pub;
@@ -588,7 +600,14 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	// A held photo is SUPPOSED to still be private, sitting unscrubbed in the
 	// review folder exactly like an emailed one. The only question worth asking
 	// of it is whether the file is really there.
-	if ( $hold ? ( ! $path || ! is_file( $path ) ) : ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) ) {
+	//
+	// So is a photo whose consent withholds the web: it was just deliberately
+	// kept behind the boundary, and "still private" is the CORRECT outcome for
+	// it, not a failed publish. Without this the guard would delete every
+	// limited-scope upload the moment the branch above started honouring the
+	// permission — the protection eating exactly what it was taught to protect.
+	$expect_private = $hold || ! $web_allowed;
+	if ( $expect_private ? ( ! $path || ! is_file( $path ) ) : ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) ) {
 		gasf_crm_log( sprintf( 'CRM upload: media #%d did not publish cleanly (still private=%s, file=%s) — removed',
 			$id, gasf_crm_photo_is_private( $id ) ? 'yes' : 'no', $path ?: 'none' ) );
 		wp_delete_attachment( $id, true );

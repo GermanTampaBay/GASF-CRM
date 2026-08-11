@@ -1121,10 +1121,40 @@ add_action( 'rest_api_init', function () {
 					return new WP_Error( 'gasf_crm_save', 'The public-name preference did not persist.', array( 'status' => 500 ) );
 				}
 
+				/*
+				 * Rewrite what is already published, or the preference is a
+				 * promise the archive does not keep.
+				 *
+				 * Titles and alt text were written when the photo was tagged, so
+				 * every photo this person is already on still carries their name
+				 * in a public field. Storing the flag changes what is generated
+				 * NEXT time and nothing that exists — which would leave somebody
+				 * who has just asked not to be named publicly named on every
+				 * photo they were ever tagged in. So each of their photos is
+				 * regenerated now, forced, so an emptied title is written as
+				 * empty rather than quietly keeping the old text.
+				 *
+				 * Runs when the flag is cleared as well: turning the preference
+				 * off should put the name back, not wait for the next edit.
+				 *
+				 * Captions are deliberately left alone — a volunteer wrote those
+				 * words on purpose, and silently editing somebody's sentence is a
+				 * different and much larger decision than not generating a name.
+				 */
+				$touched = 0;
+				if ( function_exists( 'gasf_photo_apply_names' ) ) {
+					foreach ( (array) get_objects_in_term( array( $term_id ), 'gasf_photo_person' ) as $pid ) {
+						if ( 'attachment' !== get_post_type( (int) $pid ) ) { continue; }
+						gasf_photo_apply_names( (int) $pid, true );
+						$touched++;
+					}
+				}
+
 				gasf_crm_log( sprintf(
-					'Photo library: public name opt-out %s for “%s” — %s (user %d)',
+					'Photo library: public name opt-out %s for “%s” — %d photo(s) renamed — %s (user %d)',
 					$opt_out ? 'enabled' : 'cleared',
 					$term->name,
+					$touched,
 					gasf_crm_display_name( get_current_user_id() ),
 					get_current_user_id()
 				) );
@@ -1136,6 +1166,7 @@ add_action( 'rest_api_init', function () {
 					'term'                => $term_id,
 					'name'                => $term->name,
 					'public_name_opt_out' => $opt_out,
+					'photos_updated'      => $touched,
 				);
 			}
 

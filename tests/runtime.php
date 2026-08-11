@@ -387,6 +387,102 @@ final class GASF_CRM_Selftest {
 			'public names: deleting the person removes its opt-out metadata with the term' );
 	}
 
+	/**
+	 * An opted-out name disappears from every surface outside the club, and
+	 * from none of the ones volunteers work in.
+	 *
+	 * The opt-out used to reach only the public suggestion list, which meant the
+	 * one thing it did not do was stop the name being printed in the title and
+	 * alt text of a published photo — the most public place it appears. It now
+	 * governs the generated title, the alt text, the kiosk wall, and the archive
+	 * sidecars, and it rewrites what is ALREADY published rather than only what
+	 * is written next. What it must never touch is the tag itself: volunteers,
+	 * search, and face matching all still see the person.
+	 */
+	public function test_public_name_hidden_everywhere() {
+		$id     = $this->library_photo( 'st-optout' );
+		$suffix = wp_rand();
+		$shy    = 'Selftest Shy ' . $suffix;
+		$open   = 'Selftest Open ' . $suffix;
+
+		foreach ( array( $shy, $open ) as $n ) {
+			$t = wp_insert_term( $n, 'gasf_photo_person' );
+			if ( ! is_wp_error( $t ) ) { $this->made_people[] = (int) $t['term_id']; }
+		}
+		wp_set_object_terms( $id, array( $shy, $open ), 'gasf_photo_person' );
+		update_post_meta( $id, '_gasf_photo_taken', '2024-09-14' );
+		clean_post_cache( $id );
+
+		// Before any opt-out both names are public, and the title says so.
+		gasf_photo_apply_names( $id, true );
+		$before = (string) get_post_field( 'post_title', $id );
+		$this->ok(
+			false !== strpos( $before, 'Selftest Shy' ) && false !== strpos( $before, 'Selftest Open' ),
+			'opt-out: both names appear in the title while nobody has opted out'
+		);
+
+		// Opt one of them out through the real route, which must also rewrite
+		// the photos that already carry the name.
+		$shy_term = get_term_by( 'name', $shy, 'gasf_photo_person' );
+		if ( ! $this->ok( (bool) $shy_term, 'opt-out: the person exists to opt out' ) ) { return; }
+		$r = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action'              => 'public-name',
+			'term'                => (int) $shy_term->term_id,
+			'name'                => $shy,
+			'public_name_opt_out' => true,
+			'op_id'               => 'selftest-optout-' . $suffix,
+		) );
+		if ( ! $this->ok( ! is_wp_error( $r ), 'opt-out: the preference saves'
+			. ( is_wp_error( $r ) ? ' — ' . $r->get_error_message() : '' ) ) ) { return; }
+
+		clean_post_cache( $id );
+		$after = (string) get_post_field( 'post_title', $id );
+		$this->ok(
+			false === strpos( $after, 'Selftest Shy' ),
+			'opt-out: the already-published title no longer carries the name'
+		);
+		$this->ok(
+			false !== strpos( $after, 'Selftest Open' ),
+			'opt-out: the other person is untouched — it hides one name, not the photo'
+		);
+		$this->ok(
+			false === stripos( (string) get_post_meta( $id, '_wp_attachment_image_alt', true ), 'Selftest Shy' ),
+			'opt-out: the alt text no longer carries the name either'
+		);
+
+		// The shared public-name list, which the kiosk and the sidecars build on.
+		$public = gasf_photo_public_people_names( $id );
+		$this->ok(
+			! in_array( $shy, $public, true ) && in_array( $open, $public, true ),
+			'opt-out: the public name list drops the opted-out person and keeps the rest'
+		);
+		$this->ok(
+			in_array( $shy, gasf_photo_opted_out_person_names(), true ),
+			'opt-out: the person is listed for the surfaces that filter by name'
+		);
+
+		// And the thing that must NOT change: the tag itself.
+		$tagged = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+		$this->ok(
+			in_array( $shy, $tagged, true ),
+			'opt-out: the person is still tagged — volunteers and face matching keep the name'
+		);
+
+		// Clearing the preference puts the name back where it was.
+		$r2 = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action'              => 'public-name',
+			'term'                => (int) $shy_term->term_id,
+			'name'                => $shy,
+			'public_name_opt_out' => false,
+			'op_id'               => 'selftest-optin-' . $suffix,
+		) );
+		clean_post_cache( $id );
+		$this->ok(
+			! is_wp_error( $r2 ) && false !== strpos( (string) get_post_field( 'post_title', $id ), 'Selftest Shy' ),
+			'opt-out: clearing the preference restores the name on existing photos'
+		);
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );
@@ -738,6 +834,43 @@ final class GASF_CRM_Selftest {
 		$this->ok( ! gasf_crm_photo_may( $id, 'web' ), 'confirm limited: policy blocks web use' );
 		$t = get_term_by( 'name', 'Selftest Limited', 'gasf_photo_person' );
 		if ( $t ) { wp_delete_term( (int) $t->term_id, 'gasf_photo_person' ); }
+	}
+
+	/**
+	 * Approving a held door photo obeys the guest's permission, not the click.
+	 *
+	 * The held quick-lane used to call publish() unconditionally, so a guest who
+	 * cleared the pre-ticked box — "at the club and in the archive only" — had
+	 * their photo moved into public uploads anyway, while the SAME photo approved
+	 * from the Photos screen was correctly kept back. One photo, two answers,
+	 * decided by which screen a volunteer happened to open. Both routes now ask
+	 * gasf_crm_photo_may( id, 'web' ).
+	 */
+	public function test_held_decide_obeys_consent() {
+		// Limited: wanted, kept, and deliberately NOT put on the web.
+		$lim = $this->held_photo( 'st-held-limited' );
+		$this->consent( $lim, 'limited' );
+		$r = $this->rest_post( '/gasf/v1/crm/photos/held/decide', array(
+			'id' => $lim, 'approve' => true, 'revision' => gasf_crm_photo_revision( $lim ),
+		) );
+		if ( $this->ok( ! is_wp_error( $r ), 'held decide limited: approving succeeds'
+			. ( is_wp_error( $r ) ? ' — ' . $r->get_error_message() : '' ) ) ) {
+			$this->ok( gasf_crm_photo_is_private( $lim ), 'held decide limited: the photo is kept out of the webroot' );
+			$this->ok( get_post_meta( $lim, '_gasf_photo_confirmed', true ), 'held decide limited: it is still approved and kept' );
+			$this->ok( gasf_crm_photo_in_library( $lim ), 'held decide limited: and it still reaches the library' );
+		}
+
+		// Full consent on the same route still publishes, so the guard is a
+		// consent check and not a blanket refusal to publish anything.
+		$full = $this->held_photo( 'st-held-full' );
+		$this->consent( $full, 'granted' );
+		$r2 = $this->rest_post( '/gasf/v1/crm/photos/held/decide', array(
+			'id' => $full, 'approve' => true, 'revision' => gasf_crm_photo_revision( $full ),
+		) );
+		if ( $this->ok( ! is_wp_error( $r2 ), 'held decide full: approving succeeds'
+			. ( is_wp_error( $r2 ) ? ' — ' . $r2->get_error_message() : '' ) ) ) {
+			$this->ok( ! gasf_crm_photo_is_private( $full ), 'held decide full: a cleared photo does publish' );
+		}
 	}
 
 	/** The stateless door credentials: stamp ages honestly, pass binds. */

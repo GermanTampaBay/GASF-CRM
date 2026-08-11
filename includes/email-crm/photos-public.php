@@ -1426,10 +1426,25 @@ add_action( 'rest_api_init', function () {
 				return array( 'ok' => true, 'deleted' => true );
 			}
 
-			// Publish does the real work: scrub every size, verify, move out of
-			// the review folder. Confirmed goes on AFTERWARDS, so a photo that
-			// fails to scrub is never marked approved.
-			$pub = gasf_crm_photo_publish( $id );
+			/*
+			 * Approving says the photo is WANTED. It does not say the club may
+			 * put it on the internet — the guest decides that, by the tick they
+			 * left or cleared on the way in.
+			 *
+			 * So this asks the consent matrix, exactly as gasf_crm_photo_confirm()
+			 * does, rather than publishing whatever a volunteer approves. It used
+			 * to publish unconditionally, which meant a guest who cleared the box
+			 * ("at the club and in the archive only") had their photo scrubbed and
+			 * then moved into public uploads anyway — served at a URL, listed by
+			 * the media REST route — with the outcome depending on nothing more
+			 * than which of two screens the volunteer happened to use.
+			 *
+			 * Either branch moves real files and can fail, and either way the
+			 * confirmed stamp goes on AFTERWARDS, so a photo that could not be
+			 * filed away safely is never marked approved.
+			 */
+			$web_allowed = gasf_crm_photo_may( $id, 'web' );
+			$pub = $web_allowed ? gasf_crm_photo_publish( $id ) : gasf_crm_photo_unpublish( $id );
 			if ( is_wp_error( $pub ) ) {
 				gasf_crm_op_finish( $op, false );
 				if ( $src_thread_id > 0 ) {
