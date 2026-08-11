@@ -268,6 +268,29 @@ function gasf_crm_ingest( array $m, $direction, $stream = 'general' ) {
 	// would ever surface it again.
 	if ( empty( $thread['id'] ) ) { return $none; }
 
+	/*
+	 * A reply from somebody the thread was handed off to belongs to the FORK.
+	 *
+	 * Forwarding goes out from the shared mailbox, so the board replies to the
+	 * shared mailbox and Exchange keeps it in the same conversation — which
+	 * lands internal deliberation in the member's thread and silently makes the
+	 * board the reply target. Routed here, at the one point that knows both the
+	 * conversation and the sender, so every later read of the thread is already
+	 * right rather than each having to remember.
+	 *
+	 * Inbound only: an outbound message is the club writing, and which of its
+	 * own threads that belongs to is decided by the send path, not guessed from
+	 * a recipient list.
+	 */
+	$thread_id = (int) $thread['id'];
+	if ( 'in' === $direction ) {
+		$thread_id = gasf_crm_thread_route_inbound( $thread_id, $from_addr );
+		if ( $thread_id !== (int) $thread['id'] ) {
+			gasf_crm_thread_touch_inbound( $thread_id, $from_name, $from_addr, $sent_at );
+		}
+	}
+	$thread['id'] = $thread_id;
+
 	// An outbound message is usually the CRM's own reply coming back around via
 	// Sent Items. Adopt the placeholder the send path wrote instead of inserting
 	// a second copy — and use that as the signal for where the reply came from.

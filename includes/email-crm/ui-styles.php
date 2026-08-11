@@ -217,6 +217,21 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 /* Green, not blue: "this is answered" is a settled-good state, and blue is now
    a stream colour rather than a status one. */
 .note.ok{background:#f0f6ec;border-left:4px solid var(--ok)}
+/* Who "Reply" writes to, directly above the box it is written in. The internal
+   variant is deliberately loud: sending board talk to a member is the mistake
+   this whole arrangement exists to prevent. */
+.replyto{margin:12px 0 6px;padding:7px 10px;border:1px solid var(--gasf-border);
+	border-radius:4px;background:var(--s-wash);font-size:13px}
+.replyto code{font-size:12px}
+.replyto.internal{border-color:#b0561a;background:#f7ede2}
+.replyto.internal .tag{margin-left:8px;color:#b0561a;font-weight:600;font-size:12px}
+.replyto.none{color:var(--gasf-muted)}
+/* Where the other half of a handed-off conversation lives. */
+.forknote{border-left:3px solid var(--gasf-accent,#7a5c1e)}
+.forknote .muted{display:block;margin-top:4px;font-size:12px}
+.fwdhand{display:block;margin:8px 0 0;font-size:13px}
+.fwdhand .muted{display:block;margin:3px 0 0 22px;font-size:12px;line-height:1.45}
+
 .casebox{margin:12px 0;padding:10px 12px;border:1px solid var(--gasf-border);border-radius:5px;background:var(--s-wash)}
 .casebox h3{margin:0;font-size:13px;display:inline}
 /* Folded shut by default and out of the way at the bottom — the summary is the

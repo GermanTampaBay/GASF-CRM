@@ -29,6 +29,25 @@ function gasf_crm_install_tables() {
 	// conversation_id is varchar(191): Graph conversationIds are base64-ish and
 	// comfortably shorter, and 191 is the longest unique-indexable varchar under
 	// utf8mb4 on MySQL 5.7 (767-byte index limit / 4 bytes per char).
+	//
+	// parent_thread_id / fork_addrs / fork_label carry a FORK: the same Exchange
+	// conversation, held as two correspondences. Forwarding to the board sends
+	// from the shared mailbox, so the board replies to the shared mailbox and
+	// Exchange keeps it in the same conversation - which lands internal
+	// deliberation in the member's thread and silently re-aims the reply button
+	// at the board. Two counterparts in one thread is the bug; a fork is the
+	// second thread.
+	//
+	// A fork cannot share conversation_id: the unique key below forbids it,
+	// correctly, since that key is what stops the sync making duplicates. So it
+	// carries a synthetic one and is found by parentage instead - inbound
+	// resolves the parent by conversation_id as always, then routes to whichever
+	// child claims the sender. See gasf_crm_thread_route_inbound().
+	//
+	// (Kept out here rather than inside the SQL string, where a comment is both
+	// sent to MySQL and one stray double quote away from ending the string. That
+	// is not hypothetical: it is what the first version of this did, and php -l
+	// on the scratch ref is what caught it.)
 	dbDelta( "CREATE TABLE {$threads} (
 		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
 		conversation_id VARCHAR(191) NOT NULL,
@@ -43,10 +62,14 @@ function gasf_crm_install_tables() {
 		last_message_at DATETIME NULL,
 		last_status_change_at DATETIME NULL,
 		notified_at DATETIME NULL,
+		parent_thread_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+		fork_addrs TEXT NULL,
+		fork_label VARCHAR(191) NULL,
 		PRIMARY KEY  (id),
 		UNIQUE KEY conv_stream (stream, conversation_id),
 		KEY status_last (status, last_message_at),
-		KEY stream_status (stream, status, last_message_at)
+		KEY stream_status (stream, status, last_message_at),
+		KEY parent (parent_thread_id)
 	) {$charset};" );
 
 	// Audit log. Append-only — rows are never updated or deleted, because the
@@ -358,6 +381,179 @@ function gasf_crm_install_tables() {
  * sender blasted their list again would make the button pointless. Restoring an
  * ignored thread is a manual action from the Ignored tab.
  */
+/* ---------------------------------------------------------------------------
+ * Forks: one conversation, two correspondences
+ * ------------------------------------------------------------------------ */
+
+/** Normalise an address for comparison. Routing must not turn on capitals. */
+function gasf_crm_addr_key( $addr ) {
+	return strtolower( trim( (string) $addr ) );
+}
+
+/** The addresses a forked thread answers for. */
+function gasf_crm_thread_fork_addrs( $thread ) {
+	$raw = is_array( $thread ) ? ( $thread['fork_addrs'] ?? '' ) : '';
+	$out = array();
+	foreach ( (array) json_decode( (string) $raw, true ) as $a ) {
+		$k = gasf_crm_addr_key( $a );
+		if ( '' !== $k ) { $out[] = $k; }
+	}
+	return $out;
+}
+
+/** Every fork hanging off a thread. */
+function gasf_crm_thread_forks( $parent_id ) {
+	global $wpdb;
+	return (array) $wpdb->get_results( $wpdb->prepare(
+		'SELECT * FROM ' . gasf_crm_table( 'threads' ) . ' WHERE parent_thread_id = %d ORDER BY id',
+		(int) $parent_id
+	), ARRAY_A );
+}
+
+/**
+ * Which thread does an inbound message from this address belong to?
+ *
+ * The sync resolves a conversation to ONE thread — the original. If that thread
+ * has been forked, a reply from one of the fork's recipients belongs to the
+ * fork, not to the member's correspondence. Anything else stays with the parent,
+ * including a stranger who was CC'd: an address nobody forked to is not
+ * internal, and guessing it is would put a member's reply in the board's thread.
+ *
+ * @return int Thread id to file under. Always a real thread; falls back to the
+ *             one it was given.
+ */
+function gasf_crm_thread_route_inbound( $thread_id, $from_addr ) {
+	$key = gasf_crm_addr_key( $from_addr );
+	if ( '' === $key ) { return (int) $thread_id; }
+	foreach ( gasf_crm_thread_forks( $thread_id ) as $fork ) {
+		if ( in_array( $key, gasf_crm_thread_fork_addrs( $fork ), true ) ) {
+			return (int) $fork['id'];
+		}
+	}
+	return (int) $thread_id;
+}
+
+/**
+ * Start a fork: the same conversation, continued with somebody else.
+ *
+ * @return int New thread id, or 0.
+ */
+function gasf_crm_thread_fork( $parent_id, array $addrs, $label, $subject, $stream ) {
+	global $wpdb;
+
+	$parent_id = (int) $parent_id;
+	$clean     = array();
+	foreach ( $addrs as $a ) {
+		$k = gasf_crm_addr_key( $a );
+		if ( '' !== $k && is_email( $k ) ) { $clean[] = $k; }
+	}
+	$clean = array_values( array_unique( $clean ) );
+	if ( ! $parent_id || ! $clean ) { return 0; }
+
+	$now = current_time( 'mysql', true );
+	$ok  = $wpdb->insert( gasf_crm_table( 'threads' ), array(
+		// Synthetic, because the real conversation id belongs to the parent and
+		// the unique key rightly refuses a second row for it.
+		'conversation_id'       => 'fork:' . $parent_id . ':' . substr( md5( implode( ',', $clean ) . '|' . microtime( true ) ), 0, 20 ),
+		'stream'                => (string) $stream,
+		'subject'               => (string) $subject,
+		'last_from_name'        => (string) $label,
+		'last_from_addr'        => $clean[0],
+		'status'                => 'new',
+		'first_received_at'     => $now,
+		'last_message_at'       => $now,
+		'last_status_change_at' => $now,
+		'parent_thread_id'      => $parent_id,
+		'fork_addrs'            => wp_json_encode( $clean ),
+		'fork_label'            => (string) $label,
+	) );
+	if ( false === $ok ) {
+		gasf_crm_log( 'CRM fork: could not create a forked thread for #' . $parent_id . ' — ' . $wpdb->last_error );
+		return 0;
+	}
+
+	// Captured immediately — see the insert_id trap in CLAUDE.md.
+	return (int) $wpdb->insert_id;
+}
+
+/**
+ * A message arrived on a fork: move it back to the top of the list.
+ *
+ * The fork never goes through gasf_crm_upsert_thread — it has no real
+ * conversation id to be found by — so the bookkeeping that function does on
+ * every inbound has to happen here instead, or a board reply would land in a
+ * thread that still claims nothing has happened since the handoff.
+ */
+function gasf_crm_thread_touch_inbound( $thread_id, $from_name, $from_addr, $sent_at ) {
+	global $wpdb;
+	$id  = (int) $thread_id;
+	$row = gasf_crm_get_thread( $id );
+	if ( ! $row ) { return; }
+
+	$data = array(
+		'last_message_at' => (string) $sent_at,
+		'last_from_name'  => (string) $from_name,
+		'last_from_addr'  => (string) $from_addr,
+	);
+	// Answered, then somebody wrote back: that is open again, exactly as it is
+	// for an ordinary thread.
+	if ( in_array( (string) $row['status'], array( 'addressed', 'ignored' ), true ) ) {
+		$data['status']                = 'new';
+		$data['last_status_change_at'] = current_time( 'mysql', true );
+	}
+	$wpdb->update( gasf_crm_table( 'threads' ), $data, array( 'id' => $id ) );
+}
+
+/**
+ * Who a reply from this thread goes to, and why.
+ *
+ * The reply target is the newest inbound message from the thread's OWN
+ * counterpart: on a fork, whoever it was forwarded to; on a parent, anybody who
+ * is not one of its forks' recipients. Without this the target was simply the
+ * newest inbound message of any kind, so the first board reply silently
+ * redirected the button — and, because Graph quotes the message being replied
+ * to, would have carried the board's words to the member.
+ *
+ * @return array{message:array|null,addr:string,name:string,internal:bool}
+ */
+function gasf_crm_thread_reply_target( $thread_id ) {
+	global $wpdb;
+	$id     = (int) $thread_id;
+	$thread = gasf_crm_get_thread( $id );
+	$none   = array( 'message' => null, 'addr' => '', 'name' => '', 'internal' => false );
+	if ( ! $thread ) { return $none; }
+
+	$mine = gasf_crm_thread_fork_addrs( $thread );
+	$rows = (array) $wpdb->get_results( $wpdb->prepare(
+		'SELECT graph_message_id, from_addr, from_name, sent_at FROM ' . gasf_crm_table( 'messages' ) . "
+		  WHERE thread_id = %d AND direction = 'in'
+		  ORDER BY sent_at DESC, id DESC", $id
+	), ARRAY_A );
+
+	// On a fork the counterpart is explicit. On a parent it is everybody the
+	// forks have NOT claimed, so a member stays the target however much internal
+	// traffic the conversation has collected.
+	$exclude = array();
+	if ( ! $mine ) {
+		foreach ( gasf_crm_thread_forks( $id ) as $fork ) {
+			$exclude = array_merge( $exclude, gasf_crm_thread_fork_addrs( $fork ) );
+		}
+	}
+
+	foreach ( $rows as $m ) {
+		$k = gasf_crm_addr_key( $m['from_addr'] );
+		if ( $mine && ! in_array( $k, $mine, true ) ) { continue; }
+		if ( ! $mine && $exclude && in_array( $k, $exclude, true ) ) { continue; }
+		return array(
+			'message'  => $m,
+			'addr'     => (string) $m['from_addr'],
+			'name'     => (string) ( $m['from_name'] ?: $m['from_addr'] ),
+			'internal' => (bool) $mine,
+		);
+	}
+	return $none;
+}
+
 function gasf_crm_upsert_thread( $conversation_id, $subject, $from_name, $from_addr, $sent_at, $reopen, $stream = 'general' ) {
 	global $wpdb;
 	$t   = gasf_crm_table( 'threads' );

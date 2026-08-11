@@ -171,6 +171,7 @@ add_action( 'rest_api_init', function () {
 			}, gasf_crm_thread_messages( $id ) );
 
 			$thread = gasf_crm_get_thread( $id ); // re-read: the claim changed it
+			$aim    = gasf_crm_thread_reply_target( $id );
 			$case   = gasf_crm_case_by_thread( $id );
 			$tasks  = $case ? gasf_crm_case_tasks( (int) $case['id'] ) : array();
 			$cevs   = $case ? gasf_crm_case_events( (int) $case['id'], 24 ) : array();
@@ -213,6 +214,28 @@ add_action( 'rest_api_init', function () {
 							'at' => (string) $e['created_at'],
 						);
 					}, $cevs ),
+				),
+				// Who "Reply" actually writes to, said out loud. The screen must
+				// never make a volunteer infer this: on a handed-off thread the
+				// answer used to change silently the moment the board wrote back.
+				'reply_to'  => array(
+					'addr'     => (string) $aim['addr'],
+					'name'     => (string) $aim['name'],
+					'internal' => (bool) $aim['internal'],
+				),
+				// The other half of a handed-off conversation, both ways, so
+				// either thread can say where the rest of it went.
+				'fork'      => array(
+					'is_fork'  => ! empty( $thread['parent_thread_id'] ),
+					'label'    => (string) ( $thread['fork_label'] ?? '' ),
+					'parent'   => (int) ( $thread['parent_thread_id'] ?? 0 ),
+					'children' => array_map( function ( $f ) {
+						return array(
+							'id'     => (int) $f['id'],
+							'label'  => (string) ( $f['fork_label'] ?: $f['last_from_addr'] ),
+							'status' => (string) $f['status'],
+						);
+					}, gasf_crm_thread_forks( $id ) ),
 				),
 				'messages'  => $messages,
 				'events'    => array_map( function ( $e ) {
@@ -762,9 +785,13 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 	// sent_by_user_id stays 0 deliberately: that flag is what feeds the AI
 	// corpus, and "Forwarded to treasurer@…" is not a reply worth learning from.
 	// The audit log records who did it.
+	// Named up front so the handoff branch below can move exactly this row onto
+	// the fork, rather than guessing which outbound message was the forward.
+	$local_id = 'local-fwd-' . $thread_id . '-' . time() . '-' . $user_id;
+
 	gasf_crm_insert_message( array(
 		'thread_id'        => $thread_id,
-		'graph_message_id' => 'local-fwd-' . $thread_id . '-' . time() . '-' . $user_id,
+		'graph_message_id' => $local_id,
 		'direction'        => 'out',
 		'from_name'        => $name,
 		'from_addr'        => gasf_crm_stream_mailbox( $stream ),
@@ -778,6 +805,53 @@ function gasf_crm_rest_forward( WP_REST_Request $req ) {
 		'has_attachments'  => ! empty( $target['has_attachments'] ),
 		'sent_by_user_id'  => 0,
 	) );
+
+	/*
+	 * Two different things wear the same button.
+	 *
+	 * Sometimes forwarding IS the answer — the treasurer takes it from here and
+	 * the club owes nobody anything else. Sometimes it is a handoff in the
+	 * middle of a conversation the club is still having: "I have asked the
+	 * board" still has to go back to the member, and the board's reply is a
+	 * second correspondence that must not land on top of the first.
+	 *
+	 * A handoff therefore forks. The board's side gets its own thread, the
+	 * member's stays open because somebody still owes them a reply, and each
+	 * thread has exactly one counterpart — which is what makes "reply" a
+	 * question with an answer.
+	 */
+	$handoff = (bool) $req->get_param( 'handoff' );
+	$fork_id = 0;
+
+	if ( $handoff ) {
+		$fork_id = gasf_crm_thread_fork(
+			$thread_id,
+			$to,
+			trim( (string) $req->get_param( 'handoff_label' ) ) ?: implode( ', ', $to ),
+			'Handed off: ' . (string) $thread['subject'],
+			$stream
+		);
+	}
+
+	if ( $fork_id ) {
+		// The forward itself is the first message of the new correspondence, so
+		// it belongs on the fork rather than in the member's thread.
+		$wpdb->update(
+			gasf_crm_table( 'messages' ),
+			array( 'thread_id' => $fork_id ),
+			array( 'thread_id' => $thread_id, 'graph_message_id' => $local_id )
+		);
+
+		gasf_crm_log_event( $thread_id, 'forwarded',
+			'Handed off to ' . implode( ', ', $to ) . ' — kept open, their replies go to thread #' . $fork_id );
+		gasf_crm_log_event( $fork_id, 'forwarded', 'Started by a handoff from thread #' . $thread_id );
+		// Deliberately NOT marked answered: the member is still waiting.
+		gasf_crm_case_resolve_exceptions_by_thread( $thread_id, 'forward_send_failed' );
+		gasf_crm_log( 'CRM: thread ' . $thread_id . ' handed off to ' . implode( ', ', $to ) . ' as thread ' . $fork_id . ' by user ' . $user_id );
+		gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+
+		return array( 'ok' => true, 'to' => $to, 'handoff' => true, 'fork' => $fork_id );
+	}
 
 	gasf_crm_log_event( $thread_id, 'forwarded', 'Forwarded to ' . implode( ', ', $to ) . ' — closed as answered' );
 	gasf_crm_set_status( $thread_id, 'addressed' );
@@ -829,14 +903,37 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 		);
 	}
 
-	$target = $wpdb->get_row( $wpdb->prepare(
-		'SELECT graph_message_id FROM ' . gasf_crm_table( 'messages' ) . "
-		  WHERE thread_id = %d AND direction = 'in'
-		  ORDER BY sent_at DESC LIMIT 1", $thread_id
-	), ARRAY_A );
+	/*
+	 * The newest inbound message FROM THIS THREAD'S COUNTERPART, not simply the
+	 * newest inbound message.
+	 *
+	 * On a thread that has been handed off, the board replies to the shared
+	 * mailbox and Exchange keeps it in the same conversation. Taking "the newest
+	 * inbound" then meant the button quietly changed who it wrote to — and since
+	 * Graph's /reply quotes the message being replied to, a note meant for the
+	 * board would have gone out attached to a reply to the member. Routing the
+	 * board's traffic to a fork is what makes this answer trustworthy; this is
+	 * where the answer is used.
+	 */
+	$aim    = gasf_crm_thread_reply_target( $thread_id );
+	$target = $aim['message'];
 
 	if ( ! $target ) {
-		return new WP_Error( 'gasf_crm_noinbound', 'No inbound message to reply to.', array( 'status' => 400 ) );
+		return new WP_Error( 'gasf_crm_noinbound',
+			'There is nobody to reply to in this thread yet. If it was handed off, the reply belongs on the linked thread.',
+			array( 'status' => 400 ) );
+	}
+
+	// What the volunteer was shown as the recipient must be who it actually
+	// goes to. If the thread moved on between opening and sending — a new
+	// message arrived, or it was forked — refuse rather than send to somebody
+	// they did not choose.
+	$expect = trim( (string) $req->get_param( 'reply_to' ) );
+	if ( '' !== $expect && gasf_crm_addr_key( $expect ) !== gasf_crm_addr_key( $aim['addr'] ) ) {
+		return new WP_Error( 'gasf_crm_recipient_moved', sprintf(
+			'This would now go to %s rather than %s. Reload the thread and check before sending.',
+			$aim['addr'], $expect
+		), array( 'status' => 409 ) );
 	}
 
 	$cfg  = gasf_crm_cfg();

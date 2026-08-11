@@ -438,6 +438,26 @@ function gasf_crm_render_inbox_script() {
 				html += '<div class="frombox">Replies go out from <code>' + esc(t.mailbox) + '</code></div>';
 			}
 
+			/* Where the rest of this conversation is.
+			   A handed-off thread and the member's thread are two halves of one
+			   thing, and a volunteer who cannot get from one to the other will
+			   answer the wrong person eventually. */
+			var fk = t.fork || {};
+			if (fk.is_fork && fk.parent) {
+				html += '<div class="note forknote">This is the <strong>handed-off</strong> half of a conversation' +
+					(fk.label ? ' — with ' + esc(fk.label) : '') + '. ' +
+					'<a href="#" class="forklink" data-thread="' + parseInt(fk.parent, 10) + '">Open the original thread</a>' +
+					'<div class="muted">Replies here go to the people it was handed to, never to the member.</div></div>';
+			}
+			if (fk.children && fk.children.length) {
+				html += '<div class="note forknote">Handed off to ' +
+					fk.children.map(function(c){
+						return '<a href="#" class="forklink" data-thread="' + parseInt(c.id, 10) + '">' +
+							esc(c.label) + '</a>' + (c.status === 'addressed' ? ' <span class="muted">(answered)</span>' : '');
+					}).join(', ') +
+					'.<div class="muted">Their replies go to that thread. Replying here still writes to the sender.</div></div>';
+			}
+
 			if(!t.can_reply && t.locked_by){
 				html += '<div class="note warn">' + esc(t.locked_by) + ' is replying to this. You can read it, but not send.' +
 					'<div class="actions"><button type="button" class="btn sec" id="threadtakeover">Take over reply lock</button></div></div>';
@@ -504,6 +524,19 @@ function gasf_crm_render_inbox_script() {
 				html += '<div class="note ok">This is answered. If they write again it returns to Open by itself.</div>' +
 					'<div class="actions"><button class="btn sec" id="restore">Put back in Open</button></div><div id="msg"></div>';
 			} else if(t.can_reply){
+				/* Who this goes to, above the box you type it in.
+				   "Reply" is not a question a volunteer should have to work out
+				   from the thread, and on a handed-off conversation the honest
+				   answer used to change without saying so. The address is sent
+				   back with the reply, so if the thread moves on between reading
+				   this line and pressing send, the send is refused rather than
+				   quietly redirected. */
+				var rt = t.reply_to || {};
+				html += rt.addr
+					? '<div class="replyto' + (rt.internal ? ' internal' : '') + '">Replying to <strong>' +
+						esc(rt.name) + '</strong> <code>' + esc(rt.addr) + '</code>' +
+						(rt.internal ? '<span class="tag">internal — not the member</span>' : '') + '</div>'
+					: '<div class="replyto none">Nobody has written in on this thread yet, so there is nobody to reply to.</div>';
 				html += '<div class="ed"><div class="edbar">' +
 						'<button type="button" data-cmd="bold" title="Bold (Ctrl+B)"><b>B</b></button>' +
 						'<button type="button" data-cmd="italic" title="Italic (Ctrl+I)"><i>I</i></button>' +
@@ -567,6 +600,16 @@ function gasf_crm_render_inbox_script() {
 							'placeholder="name@example.com" autocomplete="off"></label>' +
 						'<label>Add a note (optional)<textarea id="fwdnote" ' +
 							'placeholder="e.g. Karl, can you take this one?"></textarea></label>' +
+						/* Forwarding means two different things and the button
+						   cannot tell them apart on its own. Unticked is the old
+						   behaviour: handing it over IS the answer. Ticked keeps
+						   the sender's thread open, because somebody still owes
+						   them a reply, and puts the replies that come back on a
+						   thread of their own. */
+						'<label class="fwdhand"><input type="checkbox" id="fwdhandoff"> ' +
+							'I still need to reply to the sender' +
+							'<span class="muted">Keeps this thread open and starts a separate one for their replies, ' +
+							'so an internal discussion can never be sent to the sender by mistake.</span></label>' +
 						'<div class="actions">' +
 						'<button class="btn" id="fwdsend">Send forward</button>' +
 						(BOARD ? '<button class="btn sec" id="fwdboard">Forward to Board</button>' : '') +
@@ -1845,6 +1888,15 @@ function gasf_crm_render_inbox_script() {
 		var fwdboard = document.getElementById('fwdboard'), boardArm = null;
 		var attopen = document.getElementById('attopen'), att = document.getElementById('att');
 		var atupload = document.getElementById('atupload'), atclose = document.getElementById('atclose');
+		// Cross-links between the two halves of a handed-off conversation.
+		Array.prototype.forEach.call(document.querySelectorAll('.forklink'), function(a){
+			a.onclick = function(ev){
+				ev.preventDefault();
+				var to = parseInt(a.getAttribute('data-thread'), 10);
+				if (to) { open(to); }
+			};
+		});
+
 		var takeover = document.getElementById('threadtakeover');
 		var caseOwner = document.getElementById('caseowner');
 		var caseResolveAll = document.getElementById('caseresolveall');
@@ -1955,6 +2007,10 @@ function gasf_crm_render_inbox_script() {
 				api('/threads/' + id + '/reply', {method:'POST', body: JSON.stringify({
 					body: ta.innerHTML,
 					attachments: attached.map(function(a){ return a.id; }),
+					// The address shown above the box. The server refuses the send
+					// if it no longer matches, so a thread that moved on between
+					// reading and pressing send cannot redirect the message.
+					reply_to: (thread && thread.reply_to && thread.reply_to.addr) || '',
 					op_id: nextOpId('reply-' + id)
 				})})
 					.then(function(){ open(id); })
@@ -2097,10 +2153,21 @@ function gasf_crm_render_inbox_script() {
 				var to = document.getElementById('fwdto').value.trim();
 				if(!to){ out.innerHTML = '<div class="note err">Enter an address to forward to.</div>'; return; }
 				busy(true, fwdsend);
+				var hand = document.getElementById('fwdhandoff');
+				var isHandoff = !!(hand && hand.checked);
 				api('/threads/' + id + '/forward', {method:'POST', body: JSON.stringify({
-					to: to, comment: document.getElementById('fwdnote').value, op_id: nextOpId('forward-' + id)
+					to: to, comment: document.getElementById('fwdnote').value,
+					handoff: isHandoff,
+					op_id: nextOpId('forward-' + (isHandoff ? 'h-' : '') + id)
 				})}).then(function(r){
 					loadContacts();
+					if (r.handoff) {
+						// Still open, still owed a reply — so the thread is
+						// reloaded rather than cleared, and now says where the
+						// other half of the conversation went.
+						open(id);
+						return;
+					}
 					// Forwarding closes the thread now, so the view clears the same
 					// way the other closing actions do rather than leaving a dead
 					// compose box open over a conversation that has moved on.

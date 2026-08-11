@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.19.0' );
+	define( 'GASF_CRM_SCHEMA', '1.20.0' );
 
 	/**
 	 * How long the sign-in history is kept.

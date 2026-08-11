@@ -629,6 +629,85 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * A handed-off conversation keeps its two halves apart.
+	 *
+	 * Forwarding goes out from the shared mailbox, so the board replies to the
+	 * shared mailbox and Exchange keeps it in the same conversation. Before the
+	 * fork that put internal deliberation in the member's thread and silently
+	 * re-aimed "Reply" at the board — and because Graph quotes the message being
+	 * replied to, a note meant for the board would have gone to the member.
+	 * These assertions are the ones standing between that and a volunteer.
+	 */
+	public function test_thread_handoff_fork() {
+		global $wpdb;
+		$T = gasf_crm_table( 'threads' );
+		$M = gasf_crm_table( 'messages' );
+
+		$suffix = wp_rand();
+		$member = 'st-member-' . $suffix . '@example.com';
+		$board  = 'st-board-' . $suffix . '@example.com';
+		$conv   = 'st-conv-' . $suffix;
+
+		$parent = gasf_crm_upsert_thread( $conv, 'Selftest handoff', 'A Member', $member, current_time( 'mysql', true ), true, 'general' );
+		$pid    = (int) $parent['id'];
+		if ( ! $this->ok( $pid > 0, 'handoff: the parent thread exists' ) ) { return; }
+
+		gasf_crm_insert_message( array(
+			'thread_id' => $pid, 'stream' => 'general', 'graph_message_id' => 'st-in-' . $suffix,
+			'direction' => 'in', 'from_name' => 'A Member', 'from_addr' => $member,
+			'to_addrs' => '[]', 'sent_at' => current_time( 'mysql', true ),
+			'body_preview' => 'hello', 'body_html' => '<p>hello</p>', 'has_attachments' => 0, 'sent_by_user_id' => 0,
+		) );
+
+		$fid = gasf_crm_thread_fork( $pid, array( $board ), 'The Board', 'Handed off: Selftest handoff', 'general' );
+		$this->ok( $fid > 0 && $fid !== $pid, 'handoff: forking makes a second thread' );
+
+		// The board writes back. It must land on the fork, not on the member's.
+		$routed = gasf_crm_thread_route_inbound( $pid, $board );
+		$this->ok( $routed === $fid, 'handoff: a reply from the board routes to the forked thread' );
+		// Anybody else stays with the member — an address nobody forked to is
+		// not internal, and guessing it is would misfile a member's own reply.
+		$this->ok(
+			gasf_crm_thread_route_inbound( $pid, $member ) === $pid
+			&& gasf_crm_thread_route_inbound( $pid, 'st-stranger-' . $suffix . '@example.com' ) === $pid,
+			'handoff: everybody else stays on the original thread'
+		);
+		// Case must not decide it.
+		$this->ok(
+			gasf_crm_thread_route_inbound( $pid, strtoupper( $board ) ) === $fid,
+			'handoff: routing ignores capitals in the address'
+		);
+
+		// Put the board's reply where it belongs, then check who each thread
+		// says it is writing to.
+		gasf_crm_insert_message( array(
+			'thread_id' => $fid, 'stream' => 'general', 'graph_message_id' => 'st-board-' . $suffix,
+			'direction' => 'in', 'from_name' => 'The Board', 'from_addr' => $board,
+			'to_addrs' => '[]', 'sent_at' => current_time( 'mysql', true ),
+			'body_preview' => 'we should do this', 'body_html' => '<p>we should do this</p>',
+			'has_attachments' => 0, 'sent_by_user_id' => 0,
+		) );
+
+		$to_member = gasf_crm_thread_reply_target( $pid );
+		$to_board  = gasf_crm_thread_reply_target( $fid );
+		$this->ok(
+			$this->addr_is( $to_member['addr'], $member ) && ! $to_member['internal'],
+			'handoff: the original thread still replies to the member'
+		);
+		$this->ok(
+			$this->addr_is( $to_board['addr'], $board ) && $to_board['internal'],
+			'handoff: the forked thread replies to the board, and says it is internal'
+		);
+
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$M} WHERE thread_id IN (%d,%d)", $pid, $fid ) );
+		$wpdb->query( $wpdb->prepare( "DELETE FROM {$T} WHERE id IN (%d,%d)", $pid, $fid ) );
+	}
+
+	private function addr_is( $a, $b ) {
+		return strtolower( trim( (string) $a ) ) === strtolower( trim( (string) $b ) );
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );
