@@ -133,10 +133,17 @@ admin panel at *Email CRM → Photos → Face suggestions*.
 must never reach the web host. Recognition runs on a private machine that
 **polls outward** (no inbound ports); the vectors live only in a local SQLite
 file. What crosses the wire back is a photo id, a rectangle, a name and a
-confidence — all things a volunteer could have typed. **A suggestion is never a
-tag:** it is stored outside `gasf_photo_person`, so it is structurally incapable
-of reaching the grid, search, sidecars or zip filenames. Only a volunteer's
-click writes a name. Two tests pin that negative.
+confidence — all things a volunteer could have typed. **A raw suggestion is
+stored apart from the taxonomy:** it lives outside `gasf_photo_person`, so a
+suggestion as such never reaches the grid, search, sidecars or zip filenames.
+But **auto-accept ships on** — the threshold is a WordPress option defaulting to
+95 — and above it the scanner's match is promoted into a real `gasf_photo_person`
+term, and so into the public title, the grid, search, and the exports, with no
+volunteer click. That is the club's deliberate, accepted trade for an
+org-internal tool; the earlier claim that "only a volunteer's click writes a
+name" no longer holds. What stays true: the confidence and box are recorded so a
+machine-made tag is inspectable, and a rejection removes it and blocks its
+return.
 
 **Built (client, on the target Windows machine):** the original
 `tools/face-scanner/scan.py` assumed `face_recognition`/dlib, which has **no

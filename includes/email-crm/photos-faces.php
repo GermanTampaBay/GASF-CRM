@@ -22,10 +22,16 @@
  *     a confidence. All of it is data the CRM already holds or a volunteer
  *     could have typed.
  *   - Suggestions are stored apart from the taxonomy and shown as chips a
- *     volunteer can click. Optionally, the admin may enable strict
- *     auto-accept at a high confidence threshold for routine photos. The
- *     system still records the confidence and box, so every machine-made
- *     decision stays inspectable and reversible.
+ *     volunteer can click. Above a confidence threshold, though, auto-accept
+ *     promotes the match into a real person term with no click — and that
+ *     threshold is a WordPress option defaulting to 95, i.e. ON unless an
+ *     admin turns it to zero. So a high-confidence match reaches the public
+ *     title, the grid, search, and the exports on the machine's say-so. The
+ *     confidence and box are still recorded and a rejection undoes it, so the
+ *     tag stays inspectable and reversible — but it is a tag, not a
+ *     suggestion, and the club has accepted that trade for an internal tool.
+ *     An earlier version of this file claimed "only a volunteer's click writes
+ *     a name"; that stopped being true when auto-accept shipped on by default.
  *
  * The consent question is not settled by any of that, and this file cannot
  * settle it: whether the club wants a face matcher pointed at its members —
@@ -99,8 +105,10 @@ add_action( 'set_object_terms', function ( $object_id, $terms, $tt_ids, $taxonom
  * at creation and never again, because a key the server can read back is a key
  * a database dump hands over.
  *
- * It reaches these four routes and nothing else. It cannot read mail, approve
- * a photo, or write a tag.
+ * It reaches the faces routes and nothing else — it cannot read mail or approve
+ * a photo. It CAN write a person term, through auto-accept above the confidence
+ * threshold (see the note at the top of this file), so a key that leaks writes
+ * names into public titles; that is why it is hashed at rest and shown once.
  */
 function gasf_crm_faces_key_hash() {
 	return (string) get_option( 'gasf_crm_faces_key', '' );
