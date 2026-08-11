@@ -505,6 +505,45 @@ final class GASF_CRM_Selftest {
 		$this->ok( ! get_post( $id ), 'decide: the winner really deleted the photo' );
 	}
 
+	/**
+	 * The revision seed the upload path now writes, and why it is not optional.
+	 *
+	 * Every decide/edit/delete guard is update_post_meta( id, have + 1, have ) —
+	 * a compare-and-swap. WordPress only honours the expected value when a row is
+	 * already there; with none, it adds the row and returns success regardless.
+	 * So a photo that reaches the review queue WITHOUT a seeded revision has a
+	 * guard that passes for everyone at once — the approve-vs-delete race. The
+	 * upload stamp seeds it at zero the instant the attachment exists, exactly as
+	 * the email intake does; this pins the primitive that makes the seed matter,
+	 * since the single-threaded harness cannot stage the real concurrent race.
+	 */
+	public function test_revision_seed() {
+		$seeded = $this->library_photo( 'st-rev-seeded' );
+		update_post_meta( $seeded, '_gasf_photo_rev', 0 ); // what the upload stamp now does
+
+		$this->ok(
+			metadata_exists( 'post', $seeded, '_gasf_photo_rev' ),
+			'revision: the seed leaves a row, not merely a zero read'
+		);
+		$this->ok(
+			update_post_meta( $seeded, '_gasf_photo_rev', 1, 0 ) && 1 === gasf_crm_photo_revision( $seeded ),
+			'revision: a seeded row advances 0 → 1 under compare-and-swap'
+		);
+		$this->ok(
+			! update_post_meta( $seeded, '_gasf_photo_rev', 9, 0 ) && 1 === gasf_crm_photo_revision( $seeded ),
+			'revision: a stale compare-and-swap is refused once the row exists'
+		);
+
+		// The failure the seed closes: with no row, the same guarded write wins
+		// anyway, ignoring the expected value — two first decisions would both pass.
+		$bare = $this->library_photo( 'st-rev-bare' );
+		delete_post_meta( $bare, '_gasf_photo_rev' );
+		$this->ok(
+			update_post_meta( $bare, '_gasf_photo_rev', 7, 0 ) && 7 === gasf_crm_photo_revision( $bare ),
+			'revision: without a seeded row the guard is void — the case the upload stamp closes'
+		);
+	}
+
 	/** Failed remote deletions are retried, not forgotten; 404 means done. */
 	public function test_deletion_retries() {
 		$this->snapshot_option( 'gasf_crm_backup_orphans' );

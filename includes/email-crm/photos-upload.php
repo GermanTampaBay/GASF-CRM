@@ -405,6 +405,20 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		// the review folder for as long as it takes a volunteer to look.
 		update_post_meta( $new_id, '_gasf_photo_source', $provenance );
 
+		// The revision row, seeded at zero the instant the attachment exists.
+		//
+		// Every decide, edit, and delete path guards on a compare-and-swap
+		// against this value — update_post_meta( id, have + 1, have ) — but that
+		// only *compares* when a row is already there. With none, it adds the row
+		// and returns success, ignoring the expected value entirely. A held door
+		// photo that two volunteers open at once would then let both first
+		// decisions win: one deletes the attachment while the other publishes it
+		// and stamps confirmed onto a post that no longer exists. The email intake
+		// seeds this at zero for exactly this reason (see gasf_crm_photo_approve);
+		// an upload never did, so its held photos raced. Written here, inside
+		// add_attachment, the row exists before the photo can be decided on.
+		update_post_meta( $new_id, '_gasf_photo_rev', 0 );
+
 		// Confirmed means somebody has vouched for it — and it is what puts the
 		// photo in the library before it has a single tag. A held photo has
 		// nobody vouching for it yet, which is the entire point of holding it:
