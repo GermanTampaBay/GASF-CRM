@@ -422,7 +422,49 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .lbedit textarea.p-caption{width:100%;padding:6px 8px;border:1px solid var(--gasf-border);border-radius:4px;
 	font:inherit;font-size:13px;background:var(--gasf-surface);color:var(--gasf-text);resize:vertical}
 .lbedit h3{margin:0 0 10px;font-size:15px}
-.lightbox.editing img{max-height:34vh}
+
+/* ---- editing: the photo beside the form, not above it ----
+   Tagging a face means looking at the face. Stacked, the photo was squeezed to
+   a third of the screen with the form below it, which is the wrong way round:
+   the picture is the thing being read and the form is the thing being filled
+   in from it. Side by side, the photo keeps the height it needs and the answers
+   sit next to what they describe. Stacks again below 900px, where two columns
+   would leave neither wide enough to be worth having. */
+.lightbox.editing{flex-direction:row;align-items:stretch;gap:16px;padding:16px}
+.lightbox.editing .lbstage{flex:1 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;
+	overflow:hidden;position:relative}
+.lightbox.editing .lbstage img{max-width:100%;max-height:calc(100vh - 32px);
+	transform-origin:center center;transition:transform .12s ease-out}
+.lightbox.editing .lbedit{flex:0 0 clamp(340px,32vw,460px);max-height:calc(100vh - 32px);align-self:flex-start}
+/* Zoomed in, the photo is dragged rather than scrolled — grab tells you so. */
+.lightbox.editing .lbstage.zoomed{cursor:grab}
+.lightbox.editing .lbstage.zoomed.dragging{cursor:grabbing}
+.lightbox.editing .lbstage.zoomed img{transition:none}
+@media (max-width:900px){
+	.lightbox.editing{flex-direction:column;align-items:center}
+	.lightbox.editing .lbstage img{max-height:40vh}
+	.lightbox.editing .lbedit{flex:1 1 auto;width:min(640px,100%)}
+}
+
+/* Zoom controls, over the picture's bottom edge so they never push it around. */
+.lbzoom{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);display:none;
+	gap:4px;background:rgba(0,0,0,.62);border:1px solid rgba(255,255,255,.18);
+	border-radius:4px;padding:4px;z-index:3}
+.lightbox.editing .lbzoom{display:flex}
+.lbzoom button{background:none;border:0;color:#fff;font:inherit;font-size:13px;line-height:1;
+	padding:6px 9px;cursor:pointer;border-radius:3px;min-width:30px}
+.lbzoom button:hover{background:rgba(255,255,255,.16)}
+.lbzoom button:disabled{opacity:.4;cursor:default;background:none}
+.lbzoom .lbzlevel{color:#cbd5e1;padding:6px 4px;min-width:44px;text-align:center;
+	font-variant-numeric:tabular-nums}
+
+/* The club's clearest photo of the person named in the box beside it.
+   The wrap becomes a flex row only where a face is actually shown, so the
+   existing absolute-positioned remove button keeps its footing everywhere else. */
+.p-people .pwrap:has(.pface:not([hidden])){display:flex;align-items:center;gap:7px}
+.p-people .pwrap:has(.pface:not([hidden])) .p-person{flex:1 1 auto;min-width:0}
+.pface{width:34px;height:34px;border-radius:3px;object-fit:cover;flex:none;
+	border:1px solid var(--gasf-border);background:var(--gasf-surface)}
 /* ---- the image editor ---- */
 .imged{margin:0 0 12px}
 .iewrap{position:relative;display:inline-block;max-width:100%;touch-action:none;user-select:none}

@@ -690,9 +690,15 @@ function gasf_crm_render_inbox() {
 
 <div class="lightbox" id="lbox" role="dialog" aria-modal="true" aria-label="Photo" hidden>
 	<button class="lbclose" id="lbclose" type="button" aria-label="Close">&times;</button>
-	<div class="lbstage">
+	<div class="lbstage" id="lbstage">
 		<img id="lbimg" src="" alt="">
-
+		<?php // Only shown while editing — see .lightbox.editing .lbzoom. ?>
+		<div class="lbzoom" id="lbzoom" role="group" aria-label="Zoom">
+			<button type="button" id="lbzout" aria-label="Zoom out" title="Zoom out">&minus;</button>
+			<span class="lbzlevel" id="lbzlevel" aria-live="polite">100%</span>
+			<button type="button" id="lbzin" aria-label="Zoom in" title="Zoom in">+</button>
+			<button type="button" id="lbzfit" title="Fit the whole photo">Fit</button>
+		</div>
 	</div>
 	<?php // A clip plays here instead. Never both — see openLb(). ?>
 	<video id="lbvid" controls preload="metadata" playsinline hidden></video>

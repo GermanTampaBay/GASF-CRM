@@ -360,6 +360,137 @@ function gasf_crm_face_is_rejected( $attachment_id, $name ) {
 	return false;
 }
 
+/* ---------------------------------------------------------------------------
+ * "Is this actually them?" — a reference face inside the CRM
+ *
+ * A volunteer being asked to put a name on a face needs to know what that
+ * person looks like, and a name in a box does not tell them. The labelling
+ * board on the scanning machine solves this with crops from faces.db, but
+ * those must never leave that machine, so the CRM cannot borrow them.
+ *
+ * It does not need to. WordPress already holds every photo and, thanks to the
+ * face labels, already knows which rectangle on which photo is this person.
+ * Cropping one is not a new category of data — it is a smaller copy of a
+ * picture this server already stores and already shows to the same volunteer.
+ * Nothing biometric crosses anything: the crop is made here, from here.
+ * ------------------------------------------------------------------------ */
+
+/** The file gasf_crm_photo_send_file would stream for a size, as a path. */
+function gasf_crm_photo_file_for_size( $attachment_id, $size ) {
+	$id   = (int) $attachment_id;
+	$file = get_attached_file( $id );
+	if ( 'full' !== $size ) {
+		$img = image_get_intermediate_size( $id, $size );
+		if ( $img && ! empty( $img['path'] ) ) {
+			$file = gasf_crm_photo_private_rel( $id )
+				? gasf_crm_photo_private_root() . '/' . basename( $img['path'] )
+				: trailingslashit( wp_upload_dir()['basedir'] ) . $img['path'];
+		}
+	}
+	return ( $file && file_exists( $file ) ) ? $file : '';
+}
+
+/**
+ * The clearest labelled face of one person: which photo, and which rectangle.
+ *
+ * Biggest box wins. Not a quality score — the server has none, that arithmetic
+ * lives with the scanner — but the largest face in the archive is reliably the
+ * most recognisable one, which is all this has to be.
+ *
+ * The boxes were measured by the scanner against the 'large' intermediate,
+ * because that is the size /faces/image serves it, so the crop has to be taken
+ * from that same size or it lands somewhere near an ear.
+ *
+ * @return array{photo:int,box:int[]}|null
+ */
+function gasf_crm_face_reference_shot( $person ) {
+	$person = trim( (string) $person );
+	if ( '' === $person ) { return null; }
+
+	$term = function_exists( 'gasf_photo_person_term_by_exact_name' )
+		? gasf_photo_person_term_by_exact_name( $person )
+		: get_term_by( 'name', $person, 'gasf_photo_person' );
+	if ( ! $term || is_wp_error( $term ) ) { return null; }
+
+	$best = null;
+	$area = 0;
+	foreach ( (array) get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' ) as $pid ) {
+		$pid = (int) $pid;
+		if ( 'attachment' !== get_post_type( $pid ) ) { continue; }
+		foreach ( gasf_crm_face_labels_for( $pid ) as $label ) {
+			if ( ! gasf_crm_face_name_same( $person, (string) $label['name'] ) ) { continue; }
+			$box = array_map( 'intval', (array) $label['box'] );
+			if ( 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+			$a = $box[2] * $box[3];
+			if ( $a > $area ) {
+				$area = $a;
+				$best = array( 'photo' => $pid, 'box' => array_values( $box ) );
+			}
+		}
+	}
+	return $best;
+}
+
+/** How big a reference face is served, and the room left around the box. */
+define( 'GASF_CRM_FACE_REF_PX', 96 );
+define( 'GASF_CRM_FACE_REF_PAD', 0.35 );
+
+/**
+ * That face, cropped and scaled, as JPEG bytes. Cached, because finding it
+ * walks every photo the person is on and the answer changes about as often as
+ * somebody labels a better picture of them.
+ *
+ * @return string|null
+ */
+function gasf_crm_face_reference_thumb( $person ) {
+	$key = 'gasf_face_ref_' . md5( strtolower( gasf_crm_face_canonical_key( $person ) ?: (string) $person ) );
+
+	$hit = get_transient( $key );
+	if ( is_string( $hit ) ) { return '' === $hit ? null : base64_decode( $hit ); }
+
+	$shot = gasf_crm_face_reference_shot( $person );
+	$file = $shot ? gasf_crm_photo_file_for_size( $shot['photo'], 'large' ) : '';
+	if ( ! $shot || '' === $file ) {
+		// Remembered as "nothing", so a person with no labelled face does not
+		// re-walk their whole photo set on every keystroke.
+		set_transient( $key, '', 6 * HOUR_IN_SECONDS );
+		return null;
+	}
+
+	$bytes = null;
+	try {
+		list( $x, $y, $w, $h ) = array_map( 'intval', $shot['box'] );
+		$pad_x = (int) round( $w * GASF_CRM_FACE_REF_PAD );
+		$pad_y = (int) round( $h * GASF_CRM_FACE_REF_PAD );
+
+		if ( class_exists( 'Imagick' ) ) {
+			$im = new Imagick( $file );
+			$iw = $im->getImageWidth();
+			$ih = $im->getImageHeight();
+			$x0 = max( 0, $x - $pad_x );
+			$y0 = max( 0, $y - $pad_y );
+			$x1 = min( $iw, $x + $w + $pad_x );
+			$y1 = min( $ih, $y + $h + $pad_y );
+			if ( $x1 - $x0 > 8 && $y1 - $y0 > 8 ) {
+				$im->cropImage( $x1 - $x0, $y1 - $y0, $x0, $y0 );
+				$im->setImagePage( 0, 0, 0, 0 );
+				$im->thumbnailImage( GASF_CRM_FACE_REF_PX, GASF_CRM_FACE_REF_PX, true );
+				$im->setImageFormat( 'jpeg' );
+				$im->setImageCompressionQuality( 82 );
+				$im->stripImage();   // a face crop carries no metadata onward
+				$bytes = $im->getImageBlob();
+			}
+			$im->clear();
+			$im->destroy();
+		}
+	} catch ( Exception $e ) {
+		$bytes = null;
+	}
+
+	set_transient( $key, $bytes ? base64_encode( $bytes ) : '', $bytes ? DAY_IN_SECONDS : HOUR_IN_SECONDS );
+	return $bytes;
+}
+
 /**
  * Follow a person through the face records when their name changes or goes.
  *
@@ -1899,6 +2030,39 @@ add_action( 'rest_api_init', function () {
 				count( (array) ( $result['busy'] ?? array() ) )
 			) );
 			return $result;
+		},
+	) );
+
+	/*
+	 * The club's clearest picture of one person, for the volunteer being asked
+	 * to put that name on a face. Streams the bytes rather than answering JSON,
+	 * so it can hang off an <img src> in the editor.
+	 */
+	register_rest_route( 'gasf/v1', '/crm/photos/face-thumb', array(
+		'methods'             => 'GET',
+		'permission_callback' => $volunteer_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$person = trim( (string) $req->get_param( 'person' ) );
+			if ( '' === $person ) {
+				return new WP_Error( 'gasf_crm_bad', 'A name is required.', array( 'status' => 400 ) );
+			}
+			$bytes = gasf_crm_face_reference_thumb( $person );
+			if ( ! $bytes ) {
+				// 204: nobody has labelled a face for this person yet, which the
+				// editor shows as "no picture" rather than as something broken.
+				status_header( 204 );
+				exit;
+			}
+			nocache_headers();
+			header( 'Content-Type: image/jpeg' );
+			header( 'Content-Length: ' . strlen( $bytes ) );
+			// Private and short-lived: it is a member's face, and it may improve
+			// the moment somebody labels a better photo of them.
+			header( 'Cache-Control: private, max-age=600' );
+			header( 'X-Content-Type-Options: nosniff' );
+			header( 'X-Robots-Tag: noindex, nofollow' );
+			echo $bytes; // phpcs:ignore WordPress.Security.EscapeOutput -- JPEG bytes.
+			exit;
 		},
 	) );
 

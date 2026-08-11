@@ -821,8 +821,35 @@ function gasf_crm_render_inbox_script() {
 		return s + '</div><button type="button" class="addg">+ Add another group</button>';
 	}
 
+	/* The club's clearest picture of this person, beside their name.
+	   Putting a name on a face is a claim about somebody, and a volunteer
+	   should not have to make it from memory. Empty until there is a name to
+	   look up; hidden entirely when nobody has labelled a face for them yet. */
+	/* The nonce rides in the query because an <img> cannot send the header the
+	   rest of the app uses. Same nonce, same cookie, same guard — WordPress
+	   accepts _wpnonce on a REST GET precisely for this case. */
+	function faceRefUrl(name){
+		return API + '/photos/face-thumb?person=' + encodeURIComponent(name) +
+			'&_wpnonce=' + encodeURIComponent(NONCE);
+	}
+	function updateFaceRef(input){
+		var wrap = input.closest ? input.closest('.pwrap') : null;
+		if (!wrap) { return; }
+		var img = wrap.querySelector('.pface');
+		var name = (input.value || '').trim();
+		if (!img) { return; }
+		if (!name) { img.hidden = true; img.removeAttribute('src'); return; }
+		if (img.dataset.for === name) { return; }   // already showing this person
+		img.dataset.for = name;
+		img.hidden = false;
+		img.src = faceRefUrl(name);
+	}
+
 	function personBox(v){
-		return '<span class="pwrap"><input type="text" class="p-person" maxlength="80" value="' + esc(v || '') +
+		var name = (v || '').trim();
+		return '<span class="pwrap"><img class="pface"' + (name ? ' src="' + esc(faceRefUrl(name)) + '" data-for="' + esc(name) + '"' : ' hidden') +
+			' alt="" title="The club\'s clearest photo of this person" onerror="this.hidden=true">' +
+			'<input type="text" class="p-person" maxlength="80" value="' + esc(v || '') +
 			'" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="pdelperson" aria-label="Remove this person">×</button></span>';
 	}
 
@@ -1066,6 +1093,20 @@ function gasf_crm_render_inbox_script() {
 			return;
 		}
 		root.__gasfPeopleWired = true;
+
+		/* Keep the reference face beside each name box in step with what is
+		   typed there. Delegated, so rows cloned by "+ Add another person"
+		   are covered without wiring each one. Debounced: a name is looked up
+		   once the typing stops, not once per letter. */
+		var faceTimer = null;
+		root.addEventListener('input', function(ev){
+			var input = ev.target && ev.target.classList && ev.target.classList.contains('p-person') ? ev.target : null;
+			if (!input) { return; }
+			clearTimeout(faceTimer);
+			faceTimer = setTimeout(function(){ updateFaceRef(input); }, 350);
+		});
+		// And on the way in, for boxes that already carry a name.
+		Array.prototype.forEach.call(root.querySelectorAll('.p-person'), updateFaceRef);
 
 		/*
 		 * A chip fills the first EMPTY name box, or adds one if every box is
@@ -3720,6 +3761,7 @@ function gasf_crm_render_inbox_script() {
 		document.getElementById('lbinfo').hidden = false;
 		document.getElementById('lbedit').hidden = true;
 		box.classList.remove('editing');
+		lbZoomReset();
 
 		var eb = document.getElementById('lbeditbtn');
 		if (eb) { eb.onclick = function(){ lbEdit(p); }; }
@@ -3937,9 +3979,79 @@ function gasf_crm_render_inbox_script() {
 	   pickers are wired by the same three functions the review screen uses, so
 	   place hierarchy, calendar search and "+ Add another person" all behave
 	   identically — a volunteer should not have to learn this twice. */
+	/* ---- zoom, for deciding whether that is really Bob ----
+	   Naming a face is a claim about a person, and at "fit the whole photo" a
+	   face across the room is a dozen pixels. Scale and offset are kept here
+	   rather than read back off the element, so dragging composes with the
+	   buttons instead of fighting them. */
+	var lbZoom = { scale: 1, x: 0, y: 0 };
+	var LB_ZOOM_MIN = 1, LB_ZOOM_MAX = 8;
+
+	function lbZoomApply(){
+		var img = document.getElementById('lbimg');
+		var stage = document.getElementById('lbstage');
+		var level = document.getElementById('lbzlevel');
+		if (!img) { return; }
+		if (lbZoom.scale <= 1.001) { lbZoom.scale = 1; lbZoom.x = 0; lbZoom.y = 0; }
+		img.style.transform = 'translate(' + lbZoom.x + 'px,' + lbZoom.y + 'px) scale(' + lbZoom.scale + ')';
+		if (stage) { stage.classList.toggle('zoomed', lbZoom.scale > 1); }
+		if (level) { level.textContent = Math.round(lbZoom.scale * 100) + '%'; }
+		var zin = document.getElementById('lbzin'), zout = document.getElementById('lbzout');
+		if (zin)  { zin.disabled  = lbZoom.scale >= LB_ZOOM_MAX - 0.001; }
+		if (zout) { zout.disabled = lbZoom.scale <= LB_ZOOM_MIN + 0.001; }
+	}
+	function lbZoomSet(next){
+		lbZoom.scale = Math.min(LB_ZOOM_MAX, Math.max(LB_ZOOM_MIN, next));
+		if (lbZoom.scale === 1) { lbZoom.x = 0; lbZoom.y = 0; }
+		lbZoomApply();
+	}
+	function lbZoomReset(){ lbZoom = { scale: 1, x: 0, y: 0 }; lbZoomApply(); }
+
+	(function wireZoom(){
+		var stage = document.getElementById('lbstage');
+		if (!stage || stage.__gasfZoomWired) { return; }
+		stage.__gasfZoomWired = true;
+
+		var zin = document.getElementById('lbzin');
+		var zout = document.getElementById('lbzout');
+		var zfit = document.getElementById('lbzfit');
+		if (zin)  { zin.onclick  = function(){ lbZoomSet(lbZoom.scale * 1.5); }; }
+		if (zout) { zout.onclick = function(){ lbZoomSet(lbZoom.scale / 1.5); }; }
+		if (zfit) { zfit.onclick = function(){ lbZoomReset(); }; }
+
+		// The wheel zooms only while editing, so an ordinary look at a photo
+		// still scrolls the page the way it always did.
+		stage.addEventListener('wheel', function(ev){
+			var box = document.getElementById('lbox');
+			if (!box || !box.classList.contains('editing')) { return; }
+			ev.preventDefault();
+			lbZoomSet(lbZoom.scale * (ev.deltaY < 0 ? 1.15 : 1 / 1.15));
+		}, { passive: false });
+
+		// Drag to pan once there is something to pan to.
+		var from = null;
+		stage.addEventListener('pointerdown', function(ev){
+			if (lbZoom.scale <= 1) { return; }
+			from = { x: ev.clientX - lbZoom.x, y: ev.clientY - lbZoom.y };
+			stage.classList.add('dragging');
+			stage.setPointerCapture && stage.setPointerCapture(ev.pointerId);
+		});
+		stage.addEventListener('pointermove', function(ev){
+			if (!from) { return; }
+			lbZoom.x = ev.clientX - from.x;
+			lbZoom.y = ev.clientY - from.y;
+			lbZoomApply();
+		});
+		var release = function(){ from = null; stage.classList.remove('dragging'); };
+		stage.addEventListener('pointerup', release);
+		stage.addEventListener('pointercancel', release);
+		stage.addEventListener('pointerleave', release);
+	})();
+
 	function lbEdit(p){
 		var box  = document.getElementById('lbox');
 		var edit = document.getElementById('lbedit');
+		lbZoomReset();
 
 		edit.dataset.photo = p.id; // so Escape knows which photo to step back to
 		edit.innerHTML = '<h3>' + esc(p.title || 'This photo') + '</h3>' +
