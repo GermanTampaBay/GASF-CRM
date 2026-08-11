@@ -569,6 +569,66 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * Face records follow a person when the name is corrected or merged.
+	 *
+	 * Labels, rejections, suggestions, and predictions all store the name as a
+	 * plain string, so nothing carried them when a term was renamed. The
+	 * scanner kept learning under the retired spelling and a merged person's
+	 * examples stayed in two piles — the matcher got worse every time somebody
+	 * tidied the names panel, silently, because nothing failed.
+	 */
+	public function test_face_records_follow_a_rename() {
+		$id  = $this->library_photo( 'st-face-rename' );
+		$old = 'Selftest Schmit ' . wp_rand();
+		$new = 'Selftest Schmidt ' . wp_rand();
+
+		update_post_meta( $id, '_gasf_face_labels', array(
+			array( 'name' => $old, 'box' => array( 10, 10, 40, 40 ) ),
+			array( 'name' => 'Selftest Other', 'box' => array( 90, 10, 40, 40 ) ),
+		) );
+		update_post_meta( $id, '_gasf_face_rejections', array(
+			array( 'name' => $old, 'at' => current_time( 'mysql', true ), 'by' => 0 ),
+		) );
+
+		$moved = gasf_crm_face_person_renamed( $id, $old, $new );
+		$this->ok( $moved, 'face rename: the photo reports a change' );
+
+		$labels = wp_list_pluck( gasf_crm_face_labels_for( $id ), 'name' );
+		$this->ok(
+			in_array( $new, $labels, true ) && ! in_array( $old, $labels, true ),
+			'face rename: the training label follows the new spelling'
+		);
+		$this->ok(
+			in_array( 'Selftest Other', $labels, true ),
+			'face rename: everybody else on the photo is left alone'
+		);
+		$this->ok(
+			gasf_crm_face_is_rejected( $id, $new ) && ! gasf_crm_face_is_rejected( $id, $old ),
+			'face rename: a rejection follows too, so it cannot come back under the new name'
+		);
+
+		// A merge is a rename onto somebody who may already be there, so the
+		// same box must not end up listed twice.
+		update_post_meta( $id, '_gasf_face_labels', array(
+			array( 'name' => $old, 'box' => array( 10, 10, 40, 40 ) ),
+			array( 'name' => $new, 'box' => array( 10, 10, 40, 40 ) ),
+		) );
+		gasf_crm_face_person_renamed( $id, $old, $new );
+		$this->ok(
+			1 === count( gasf_crm_face_labels_for( $id ) ),
+			'face merge: the same face is not left listed twice under one name'
+		);
+
+		// Removing a name takes its records with it: a name that turned out to
+		// be nobody must not stay behind as an example of somebody.
+		gasf_crm_face_person_renamed( $id, $new, '' );
+		$this->ok(
+			! gasf_crm_face_labels_for( $id ) && ! gasf_crm_face_is_rejected( $id, $new ),
+			'face delete: removing the name removes what it taught'
+		);
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );

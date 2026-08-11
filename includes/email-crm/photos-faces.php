@@ -360,6 +360,142 @@ function gasf_crm_face_is_rejected( $attachment_id, $name ) {
 	return false;
 }
 
+/**
+ * Follow a person through the face records when their name changes or goes.
+ *
+ * The taxonomy stores a person as a TERM, so renaming one updates every photo
+ * at once. The face-learning records do not: labels, rejections, suggestions,
+ * and predictions all carry the name as a plain string, written at the moment
+ * the decision was made. Nothing was migrating them, so every tidy-up of the
+ * names panel quietly split the scanner's training corpus — rename "Bob Schmit"
+ * to "Bob Schmidt" and the reference faces stayed filed under the typo, merge
+ * two spellings of one person and their examples stayed in two piles. The face
+ * matcher got worse each time somebody fixed a name, which is the opposite of
+ * what fixing a name is for, and it was invisible because nothing failed.
+ *
+ * @param int    $attachment_id
+ * @param string $from Name as it is stored now.
+ * @param string $to   New name, or '' to drop that person's records entirely.
+ * @return bool Whether this photo changed.
+ */
+function gasf_crm_face_person_renamed( $attachment_id, $from, $to ) {
+	$id   = (int) $attachment_id;
+	$from = trim( sanitize_text_field( (string) $from ) );
+	$to   = trim( sanitize_text_field( (string) $to ) );
+	if ( ! $id || '' === $from ) { return false; }
+
+	$changed = false;
+
+	// Labels and suggestions: both are {name, box}. A merge can leave the same
+	// person twice on one photo, so the box is what tells two entries apart.
+	foreach ( array( '_gasf_face_labels', '_gasf_face_suggestions' ) as $key ) {
+		$raw = get_post_meta( $id, $key, true );
+		if ( ! is_array( $raw ) || ! $raw ) { continue; }
+		$next = array();
+		$seen = array();
+		$hit  = false;
+		foreach ( $raw as $row ) {
+			if ( ! is_array( $row ) ) { continue; }
+			$name = trim( sanitize_text_field( (string) ( $row['name'] ?? '' ) ) );
+			if ( gasf_crm_face_name_same( $name, $from ) ) {
+				$hit = true;
+				if ( '' === $to ) { continue; }   // the person is gone
+				$row['name'] = $to;
+				$name        = $to;
+			}
+			$box    = implode( ',', array_map( 'intval', (array) ( $row['box'] ?? array() ) ) );
+			$dedupe = gasf_crm_face_canonical_key( $name ) . '|' . $box;
+			if ( isset( $seen[ $dedupe ] ) ) { continue; }
+			$seen[ $dedupe ] = true;
+			$next[]          = $row;
+		}
+		if ( ! $hit ) { continue; }
+		if ( $next ) { update_post_meta( $id, $key, $next ); }
+		else { delete_post_meta( $id, $key ); }
+		$changed = true;
+	}
+
+	// Rejections are per person, not per box: "not in this photo" said once
+	// about one person stays one entry however the name is spelled afterwards.
+	$raw = get_post_meta( $id, '_gasf_face_rejections', true );
+	if ( is_array( $raw ) && $raw ) {
+		$next = array();
+		$seen = array();
+		$hit  = false;
+		foreach ( $raw as $row ) {
+			if ( ! is_array( $row ) ) { continue; }
+			$name = trim( sanitize_text_field( (string) ( $row['name'] ?? '' ) ) );
+			if ( gasf_crm_face_name_same( $name, $from ) ) {
+				$hit = true;
+				if ( '' === $to ) { continue; }
+				$row['name'] = $to;
+				$name        = $to;
+			}
+			$dedupe = gasf_crm_face_canonical_key( $name );
+			if ( '' === $dedupe || isset( $seen[ $dedupe ] ) ) { continue; }
+			$seen[ $dedupe ] = true;
+			$next[]          = $row;
+		}
+		if ( $hit ) {
+			if ( $next ) { update_post_meta( $id, '_gasf_face_rejections', $next ); }
+			else { delete_post_meta( $id, '_gasf_face_rejections' ); }
+			$changed = true;
+		}
+	}
+
+	// Predictions carry a canonical key beside the name, and calibration counts
+	// them, so the key has to be recomputed rather than left pointing at a name
+	// that no longer exists.
+	$raw = get_post_meta( $id, '_gasf_face_predictions', true );
+	if ( is_array( $raw ) && $raw ) {
+		$next = array();
+		$hit  = false;
+		foreach ( $raw as $row ) {
+			if ( ! is_array( $row ) ) { continue; }
+			$name = trim( sanitize_text_field( (string) ( $row['name'] ?? '' ) ) );
+			if ( gasf_crm_face_name_same( $name, $from ) ) {
+				$hit = true;
+				if ( '' === $to ) { continue; }
+				$row['name']      = $to;
+				$row['canonical'] = gasf_crm_face_canonical_key( $to );
+			}
+			$next[] = $row;
+		}
+		if ( $hit ) {
+			if ( $next ) { update_post_meta( $id, '_gasf_face_predictions', $next ); }
+			else { delete_post_meta( $id, '_gasf_face_predictions' ); }
+			$changed = true;
+		}
+	}
+
+	return $changed;
+}
+
+/**
+ * The same, across every photo that carries the person.
+ *
+ * Called with the photo ids the caller already gathered to rewire the terms, so
+ * the two halves of a rename cannot walk different sets. Also nudges the
+ * learning cursor on anything it touched, so the scanner re-reads those photos
+ * rather than waiting for something else to change them.
+ *
+ * @return int Photos changed.
+ */
+function gasf_crm_face_person_renamed_across( array $photo_ids, $from, $to ) {
+	$n = 0;
+	foreach ( $photo_ids as $pid ) {
+		$pid = (int) $pid;
+		if ( 'attachment' !== get_post_type( $pid ) ) { continue; }
+		if ( gasf_crm_face_person_renamed( $pid, $from, $to ) ) {
+			$n++;
+			if ( function_exists( 'gasf_crm_faces_learning_touch' ) ) {
+				gasf_crm_faces_learning_touch( $pid );
+			}
+		}
+	}
+	return $n;
+}
+
 /* ---------------------------------------------------------------------------
  * Faces that are not people to tag
  *

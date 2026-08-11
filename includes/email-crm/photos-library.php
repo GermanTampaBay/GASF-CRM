@@ -1245,8 +1245,24 @@ add_action( 'rest_api_init', function () {
 				$nc = function_exists( 'gasf_photo_person_counts' ) ? gasf_photo_person_counts() : array();
 				$n  = isset( $nc[ (int) $term->term_id ] ) ? (int) $nc[ (int) $term->term_id ] : 0;
 
-				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s) — user %d',
-					$term->name, $to, $n, get_current_user_id() ) );
+				/*
+				 * The term moved; the face records have to be carried over.
+				 *
+				 * They store the name as a string, so a corrected spelling left
+				 * every reference face, rejection, and prediction filed under the
+				 * typo — the scanner kept learning "Bob Schmit" while the club
+				 * called him "Bob Schmidt", and the correction quietly made the
+				 * matching worse. Read from the term BEFORE the rename, which is
+				 * why $term->name is captured above rather than re-read here.
+				 */
+				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
+				$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
+				$faces_moved = function_exists( 'gasf_crm_face_person_renamed_across' )
+					? gasf_crm_face_person_renamed_across( $posts, $term->name, $to )
+					: 0;
+
+				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s), %d face record(s) — user %d',
+					$term->name, $to, $n, $faces_moved, get_current_user_id() ) );
 
 				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => $n );
@@ -1301,8 +1317,16 @@ add_action( 'rest_api_init', function () {
 
 				wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
 
-				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s) — user %d',
-					$term->name, $dest->name, count( $posts ), get_current_user_id() ) );
+				// The face records carry the name as a string, so they do not
+				// follow the term. Without this the scanner's examples of this
+				// person stay filed under the retired spelling and the merged
+				// person's training corpus stays split in two.
+				$faces_moved = function_exists( 'gasf_crm_face_person_renamed_across' )
+					? gasf_crm_face_person_renamed_across( $posts, $term->name, $dest->name )
+					: 0;
+
+				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s), %d face record(s) — user %d',
+					$term->name, $dest->name, count( $posts ), $faces_moved, get_current_user_id() ) );
 
 				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'action' => 'merge', 'from' => $term->name, 'to' => $dest->name, 'photos' => count( $posts ) );
@@ -1334,8 +1358,15 @@ add_action( 'rest_api_init', function () {
 					if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
 				}
 
-				gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s) — user %d',
-					$term->name, count( $posts ), get_current_user_id() ) );
+				// And the face records go with the name. An empty target means
+				// remove rather than rename: a name that turned out to be nobody
+				// must not stay behind as a training example of somebody.
+				$faces_cleared = function_exists( 'gasf_crm_face_person_renamed_across' )
+					? gasf_crm_face_person_renamed_across( $posts, $term->name, '' )
+					: 0;
+
+				gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s), %d face record(s) — user %d',
+					$term->name, count( $posts ), $faces_cleared, get_current_user_id() ) );
 
 				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
 				return array( 'ok' => true, 'action' => 'delete', 'from' => $term->name, 'to' => '(removed)', 'photos' => count( $posts ) );

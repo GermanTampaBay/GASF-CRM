@@ -869,6 +869,12 @@ def _migrate(conn):
         "redundancy": "REAL NOT NULL DEFAULT 0",
         "active": "INTEGER NOT NULL DEFAULT 1",
         "captured_at": "TEXT NOT NULL DEFAULT ''",
+        # A small JPEG crop of this reference face, so the labeler can show WHO
+        # it is suggesting rather than only spelling the name. Local-only, like
+        # the vector beside it: a face crop is more recognisable than a vector,
+        # not less, so it lives in exactly the same place and travels no further.
+        # Empty on rows written before this existed; those fill in as they relearn.
+        "thumb": "BLOB",
     }
     cols = {row[1] for row in conn.execute("PRAGMA table_info(refs)")}
     for column, declaration in ref_additions.items():
@@ -971,6 +977,56 @@ def state_get(conn, k, default=""):
 def state_set(conn, k, v):
     conn.execute("INSERT INTO state (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v", (k, str(v)))
     conn.commit()
+
+
+# How big a stored reference thumbnail is, and how much room to leave around
+# the detector's box. A box cropped tight to the jaw is oddly hard to recognise
+# - the hair and chin are most of what a person recognises somebody by - so the
+# crop is widened before it is scaled down.
+THUMB_PX = 112
+THUMB_PAD = 0.35
+
+
+def reference_thumb(display_pixels, box_css, size=THUMB_PX):
+    """
+    A small JPEG of one reference face, so the labeler can show WHO it means.
+
+    Never leaves this machine. It is written beside the vector in faces.db and
+    served only to the loopback labelling board; the wire back to WordPress
+    still carries nothing but an id, a rectangle, a name, and a confidence.
+
+    Returns None rather than raising: a missing thumbnail costs a picture next
+    to a name, and is not worth failing a learn pass over.
+    """
+    try:
+        from PIL import Image
+
+        height, width = display_pixels.shape[:2]
+        raw = css_box_to_xywh(box_css)
+        box = clamp_box_xywh(raw, width, height)
+        if box is None:
+            return None
+        x, y, bw, bh = box
+        pad_x = int(round(bw * THUMB_PAD))
+        pad_y = int(round(bh * THUMB_PAD))
+        x0 = max(0, x - pad_x)
+        y0 = max(0, y - pad_y)
+        x1 = min(width, x + bw + pad_x)
+        y1 = min(height, y + bh + pad_y)
+        if x1 - x0 < 8 or y1 - y0 < 8:
+            return None
+
+        crop = np.asarray(display_pixels[y0:y1, x0:x1], dtype=np.uint8)
+        if crop.ndim == 2:
+            image = Image.fromarray(crop, mode="L").convert("RGB")
+        else:
+            image = Image.fromarray(crop[..., :3], mode="RGB")
+        image.thumbnail((int(size), int(size)), Image.LANCZOS)
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=82, optimize=True)
+        return buffer.getvalue()
+    except Exception:
+        return None
 
 
 def reference_quality(display_pixels, box_css):
@@ -1218,6 +1274,9 @@ def replace_photo_references(conn, photo_id, engine, references):
                 max(0.0, min(1.0, float(metrics.get("quality", 0.5)))),
                 str(metrics.get("captured_at") or "")[:40],
                 np.asarray(vector, dtype=np.float32).tobytes(),
+                # Optional: rows learned before thumbnails existed simply carry
+                # None and fill in the next time that photo is relearned.
+                metrics.get("thumb") if isinstance(metrics.get("thumb"), (bytes, bytearray)) else None,
             )
         )
     with conn:
@@ -1229,8 +1288,8 @@ def replace_photo_references(conn, photo_id, engine, references):
             """INSERT INTO refs (
                    person, photo_id, engine, face_key,
                    face_width, face_height, sharpness, clipping,
-                   quality, captured_at, vector
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   quality, captured_at, vector, thumb
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             prepared,
         )
         refresh_reference_selection(
@@ -1239,6 +1298,32 @@ def replace_photo_references(conn, photo_id, engine, references):
             old_people.union({row[0] for row in prepared}),
         )
     return old_count, len(rows)
+
+
+def best_face_thumb(conn, engine, person):
+    """
+    The best stored picture of one person, for showing beside their name.
+
+    "Best" is the quality the learner already scored every reference on — size,
+    sharpness, and how much of the face ran off the edge — restricted to the
+    references actually in use for this engine. That is the same ranking the
+    matcher trusts, so the face a volunteer is shown is the face the machine is
+    reasoning from, which is the honest thing to put next to a percentage.
+
+    Returns None when the person has no thumbnail yet: references learned
+    before thumbnails existed carry none until that photo is relearned, and a
+    name with no picture beside it is the old behaviour, not a failure.
+    """
+    row = conn.execute(
+        """SELECT thumb FROM refs
+           WHERE engine = ? AND person = ? AND active = 1 AND thumb IS NOT NULL
+           ORDER BY quality DESC, face_width DESC, id
+           LIMIT 1""",
+        (engine, person),
+    ).fetchone()
+    if row and row[0]:
+        return bytes(row[0])
+    return None
 
 
 def load_references(conn, engine):
@@ -2798,6 +2883,11 @@ border:1px solid #26324a;border-radius:6px;background:#0b1220}
 .row{display:grid;grid-template-columns:64px 1fr auto auto;gap:6px;align-items:center}
 .notaperson{border:1px solid #475569;background:#0b1220;color:#94a3b8;border-radius:6px;padding:5px 9px;cursor:pointer;white-space:nowrap}
 .notaperson:hover{border-color:#f87171;color:#fca5a5}
+/* The suggested name, with the best stored picture of that person beside it -
+   a percentage says how sure the machine is, a face says who it means. */
+.usehint{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.hintface{width:34px;height:34px;border-radius:5px;object-fit:cover;flex:none;
+  border:1px solid #334155;background:#0b1220}
 .row label{font-size:12px;color:#cbd5e1}
 .row input{background:#0b1220;color:#e5e7eb;border:1px solid #334155;border-radius:6px;padding:6px 8px}
 .row button{background:#1d4ed8;color:white;border:0;border-radius:6px;padding:6px 8px;cursor:pointer}
@@ -3044,7 +3134,7 @@ function render(p){
     const val=(p.prefill && p.prefill[String(i)]) || '';
     const row=document.createElement('div'); row.className='row';
     const listId = localNames.length ? "peopleListLocal" : "peopleListGlobal";
-    row.innerHTML=`<label>Face ${i+1}</label><input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}">Use ${esc(hint.name)} (${hint.confidence}%)</button>`:'<span></span>'}`
+    row.innerHTML=`<label>Face ${i+1}</label><input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}" class="usehint"><img class="hintface" alt="" src="/api/face-thumb?person=${encodeURIComponent(hint.name)}&token=${encodeURIComponent(sessionToken)}" onerror="this.remove()"><span>Use ${esc(hint.name)} (${hint.confidence}%)</span></button>`:'<span></span>'}`
       + `<button class="notaperson" data-ignore="${i}" title="This is not a person to tag - a poster, a reflection, or somebody in the background. It will not be offered again.">Not a person</button>`;
     rows.appendChild(row);
     if(val){ addName(val); }
@@ -3396,6 +3486,12 @@ def local_label(
 
         def _authorized(self):
             supplied = self.headers.get("X-GASF-Label-Token", "")
+            if not supplied:
+                # An <img src> cannot send a header, and the face thumbnails are
+                # images. The token is per-run, loopback-only, and already rides
+                # in the query on the page load that opened this board, so this
+                # widens nothing - it just lets the browser fetch a picture.
+                supplied = (parse_qs(urlparse(self.path).query or "").get("token") or [""])[0]
             return bool(supplied) and secrets.compare_digest(supplied, state["token"])
 
         def do_GET(self):
@@ -3411,6 +3507,23 @@ def local_label(
                 )
             if not self._authorized():
                 return self._write(403, json.dumps({"error": "Forbidden"}))
+            if u.path == "/api/face-thumb":
+                # The best stored picture of one person, so a suggested name
+                # comes with a face. Read straight from faces.db and served only
+                # on this loopback board - it is never uploaded anywhere.
+                q = parse_qs(u.query or "")
+                person = (q.get("person") or [""])[0].strip()
+                if not person:
+                    return self._write(400, json.dumps({"error": "Missing person"}))
+                try:
+                    blob = best_face_thumb(conn, backend.name, person)
+                except Exception:
+                    blob = None
+                if not blob:
+                    # 204: there is simply no picture of this person yet, which
+                    # the page treats as "show the name alone" rather than an error.
+                    return self._write(204, b"", "image/jpeg")
+                return self._write(200, blob, "image/jpeg")
             if u.path == "/api/meta":
                 gallery = [
                     {
@@ -3709,6 +3822,7 @@ def learn(api, conn, backend, verbose=True):
                             face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
                             metrics = reference_quality(display_pixels, box_css)
                             metrics["captured_at"] = captured_at
+                            metrics["thumb"] = reference_thumb(display_pixels, box_css)
                             replacements.append((name, face_key, vector, metrics))
                         old_count, new_count = replace_photo_references(
                             conn, photo_id, backend.name, replacements
@@ -3747,6 +3861,7 @@ def learn(api, conn, backend, verbose=True):
                     box_css, vector = found[0]
                     metrics = reference_quality(display_pixels, box_css)
                     metrics["captured_at"] = captured_at
+                    metrics["thumb"] = reference_thumb(display_pixels, box_css)
                     old_count, new_count = replace_photo_references(
                         conn,
                         photo_id,
@@ -4418,6 +4533,37 @@ def selftest():
         and not _face_box_ignored([100, 120, 80, 80], 1000, 800, []),
         "label queue: a face put down stays down across a rescan at another size",
     )
+    with sqlite3.connect(":memory:") as thumb_db:
+        _migrate(thumb_db)
+        thumb_db.execute(
+            """INSERT INTO refs (person, photo_id, engine, face_key, quality, face_width, vector, thumb)
+               VALUES ('Bob', 1, 'engineA', '0', 0.40, 80, ?, ?)""",
+            (np.zeros(3, dtype=np.float32).tobytes(), b"WORSE"),
+        )
+        thumb_db.execute(
+            """INSERT INTO refs (person, photo_id, engine, face_key, quality, face_width, vector, thumb)
+               VALUES ('Bob', 2, 'engineA', '0', 0.90, 200, ?, ?)""",
+            (np.zeros(3, dtype=np.float32).tobytes(), b"BEST"),
+        )
+        # A better picture that is no longer in the active set must not win: the
+        # face shown has to be one the matcher is actually reasoning from.
+        thumb_db.execute(
+            """INSERT INTO refs (person, photo_id, engine, face_key, quality, face_width, vector, thumb, active)
+               VALUES ('Bob', 3, 'engineA', '0', 0.99, 300, ?, ?, 0)""",
+            (np.zeros(3, dtype=np.float32).tobytes(), b"RETIRED"),
+        )
+        thumb_db.execute(
+            """INSERT INTO refs (person, photo_id, engine, face_key, quality, vector)
+               VALUES ('Nothumb', 4, 'engineA', '0', 0.95, ?)""",
+            (np.zeros(3, dtype=np.float32).tobytes(),),
+        )
+        check_that(
+            best_face_thumb(thumb_db, "engineA", "Bob") == b"BEST"
+            and best_face_thumb(thumb_db, "engineA", "Nothumb") is None
+            and best_face_thumb(thumb_db, "engineB", "Bob") is None
+            and best_face_thumb(thumb_db, "engineA", "Nobody") is None,
+            "labeler: the best ACTIVE face of a person is what gets shown beside their name",
+        )
     check_that(
         clamp_box_xywh([95, 75, 20, 20], 100, 80) == [95, 75, 5, 5]
         and clamp_box_xywh([110, 90, 20, 20], 100, 80) is None,
