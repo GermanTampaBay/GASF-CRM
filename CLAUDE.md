@@ -63,7 +63,7 @@ ref costs ten seconds and has caught real breakage.
 
 ## Tests
 
-- **`tests/runtime.php`** — 69 assertions, run on the server against live
+- **`tests/runtime.php`** — ~135 assertions, run on the server against live
   WordPress (there is no second environment). Safe by construction: synthetic
   fixtures only, a shutdown reaper that survives fatals, options snapshotted,
   mail disabled. **Never point a test at a real photo** — a drill once did, died
@@ -93,7 +93,7 @@ ref costs ten seconds and has caught real breakage.
 
 ---
 
-## What exists (v2.15.x)
+## What exists (v2.21.x)
 
 **Email CRM** — Microsoft Graph app-only against a shared mailbox, volunteers
 sign in at `/email` with Google or Microsoft, Claude-drafted replies.
@@ -125,9 +125,14 @@ WP admins after 24h without a clean pass.
 
 ## In flight: the face scanner's home side
 
-**Built and live (server):** four key-guarded endpoints — `queue`, `image`,
-`suggest`, `confirmed` — plus suggestion chips in the library editor and an
-admin panel at *Email CRM → Photos → Face suggestions*.
+**Built and live (server):** twelve key-guarded endpoints — `queue`, `image`,
+`suggest`, `caption`, `label`, `discover-label`, `learned`, `label-queue`,
+`people`, `metrics`, `calibration`, and `confirmed` (plus `reject`, which takes
+a volunteer session rather than the key) — with suggestion chips in the library
+editor and an admin panel at *Email CRM → Photos → Face suggestions*. The
+scanner key rides in headers only (`Authorization: Bearer` or
+`X-GASF-Faces-Key`); it is never accepted in a query string, because a key in a
+URL lands in the shared host's access log.
 
 **The design constraint that matters:** face embeddings are biometric data and
 must never reach the web host. Recognition runs on a private machine that
@@ -184,26 +189,69 @@ architecture keeps that answer cheap to reverse. Board call.
 
 ## Open items, roughly ranked
 
-1. **Limited-scope photos are still physically web-served.** The policy
-   function returns `false` for `web`, but a published file is reachable by URL
-   regardless. True enforcement means gated storage behind the handler.
+1. **Limited-scope photos: mostly closed, two paths remain.** Consent is now
+   enforced by STORAGE — `gasf_crm_photo_enforce_web_boundary()` physically
+   moves a not-for-web photo back to the private root at 0600, and a version
+   upgrade backfills the whole library. But two callers still publish without
+   asking: the held quick-lane (`photos-public.php`, `held/decide`) and the
+   party/bulk branch in `gasf_crm_photo_upload_one()`. Both should do what
+   `gasf_crm_photo_confirm()` does — `may('web') ? publish : unpublish`. Until
+   they do, a guest who unticks the box can still be published to the open web.
+   **This is the top open item.** (Separately, anything already public stays
+   fetchable by direct URL: true enforcement for those means gated delivery.)
 2. **Party mode has no panic switch** — "disable this door and hide everything
    from the last N minutes" as one admin button.
-3. **Device/door counters are non-atomic** read-modify-write. Low stakes,
-   genuinely racy.
-4. **The held quick-lane duplicates publish logic** rather than routing through
-   `gasf_crm_photo_confirm()`. Works, drifts.
-5. **Eight public videos still carry GPS** — the blanker is proven against
-   copies; awaiting a go-ahead to clean the live files.
-6. **The club calendar starts 15 July 2023.** Nothing older survived the
+3. **The held quick-lane duplicates publish logic** rather than routing through
+   `gasf_crm_photo_confirm()`. Predicted to drift; it has — see item 1, and the
+   `_gasf_photo_confirmed` shape split (array from confirm, bare string here).
+4. **Eight public videos still carry GPS** — the blanker is proven and wired
+   into publish/upload, but nothing walks already-published files. Needs a
+   one-off backfill and a go-ahead.
+5. **The club calendar starts 15 July 2023.** Nothing older survived the
    MEC→GASF Events migration, so date-based event suggestions find nothing for
    older photos. Not a bug; missing data.
-7. **No QR generator** — party links are copy-paste into any QR tool.
+6. **No QR generator** — party links are copy-paste into any QR tool.
+7. **An edited photo's `-gasf-original` sidecar outlives its photo.** It is in
+   no attachment metadata, so neither delete nor unpublish removes it: the
+   full-quality pre-edit copy stays in public uploads after a photo is deleted
+   or withdrawn.
+8. **Face auto-accept has no bulk undo.** Revoking the scanner key stops new
+   writes but leaves every machine-written tag; there is no "purge what the
+   matcher wrote" action, and machine-written names are not marked as such.
+
+**Closed since this list was written** (v2.20.0–2.21.1): HEIC on every intake
+route plus the EXIF-date loss during conversion; door counters made atomic
+under `GET_LOCK`; the revision compare-and-swap, which was never comparing (see
+below); the scanner key out of URLs; the door device budget off a spoofable
+header; the permanent door's 600-photo brick; video-by-crafted-POST on the
+doors; the missing disk-free floor on upload; and people's names out of
+download filenames.
+
+---
+
+## Two traps worth remembering
+
+**`update_post_meta`'s previous-value guard is void at 0.** It only adds the
+expected value to its WHERE clause `if ( ! empty( $prev_value ) )`, and PHP's
+`empty(0)` is true — so `update_post_meta( id, 1, 0 )`, i.e. every FIRST
+decision, silently updates unconditionally and every racer wins. All revision
+guards now go through `gasf_crm_photo_rev_bump()`, which does it in SQL where 0
+is an ordinary value. `test_revision_bump` demonstrates the trap deliberately so
+a "simplification" back to `update_post_meta` cannot pass unnoticed.
+
+**A missing meta row is not a lost race.** The first version of that helper read
+"no `_gasf_photo_rev` row" as "somebody else won" — and 1,335 of this library's
+3,654 photos predate the seed, so approve/edit/tag/delete broke for all of them
+in production. `gasf_crm_photo_revision()` reports 0 for an absent row, so a
+caller holding 0 is current and must be allowed to create it. Both the bug and
+the fix were caught by `tests/runtime.php` on the run right after deploy, which
+is the argument for running it every time.
 
 ---
 
 ## Version note
 
-`gasf-crm.php` currently reads `2.15.0` while the newest commit is tagged
-`v2.15.1` in its message — the last commit changed behaviour without bumping
-the header. Bump it on the next change.
+The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
+loader shim's 1.0.0, not this. It currently reads **2.21.1** and matches the
+newest commit. Bump it with every behavioural change: that header is the only
+way to tell from the server what is actually deployed.
