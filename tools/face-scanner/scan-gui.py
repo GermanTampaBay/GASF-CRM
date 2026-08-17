@@ -5,6 +5,7 @@ Runs the scanner with checkbox-selected options, blocks unsupported combos,
 and streams output in one window.
 """
 
+import json
 import os
 import shutil
 import subprocess
@@ -13,10 +14,65 @@ import threading
 from datetime import datetime
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 
-SCAN_PY = str(Path(__file__).resolve().with_name("scan.py"))
+# The scanner beside this launcher, which is the right answer when the two were
+# checked out together.
+ADJACENT_SCAN_PY = str(Path(__file__).resolve().with_name("scan.py"))
+
+# Where the remembered choice lives.
+#
+# Deliberately OUTSIDE any checkout. This launcher gets run from whichever copy
+# of the repo is to hand - a worktree, an unpacked installer, a folder from
+# months ago - and each of those has its own scan.py beside it. Running the one
+# that happens to be adjacent is how a nine-day-old scanner on an abandoned
+# branch kept being used while the real one sat updated somewhere else, with
+# nothing on screen to say so. Remembering the path here means the answer
+# survives the folder it was chosen from being deleted.
+CONFIG_DIR = Path(
+    os.environ.get("LOCALAPPDATA")
+    or os.environ.get("XDG_CONFIG_HOME")
+    or (Path.home() / ".config")
+) / "GASF-Face-Scanner"
+CONFIG_PATH = CONFIG_DIR / "launcher.json"
+
+
+def load_saved_scan_py():
+    """The remembered scanner, if it is still there. Never guesses."""
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        saved = str(data.get("scan_py") or "").strip()
+    except Exception:
+        return ""
+    return saved if saved and os.path.isfile(saved) else ""
+
+
+def save_scan_py(path):
+    """Remember this scanner for next time. Failing to is not worth an error."""
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_PATH.write_text(
+            json.dumps({"scan_py": str(path)}, indent=2), encoding="utf-8"
+        )
+        return True
+    except Exception:
+        return False
+
+
+def resolve_scan_py():
+    """
+    Remembered first, adjacent second.
+
+    A saved path that has gone missing is ignored rather than reported as
+    broken: the usual cause is a worktree that was tidied up, and falling back
+    to the scanner beside this file is what the launcher did before any of this
+    existed. The window says which one is in use either way.
+    """
+    return load_saved_scan_py() or ADJACENT_SCAN_PY
+
+
+SCAN_PY = resolve_scan_py()
 
 
 class ScanGui(tk.Tk):
@@ -45,20 +101,93 @@ class ScanGui(tk.Tk):
         self.v_uploaded_after = tk.StringVar(value="")
         self.v_uploaded_before = tk.StringVar(value="")
         self.v_python = tk.StringVar(value="")
+        self.v_scan_py = tk.StringVar(value=SCAN_PY)
 
         self._build()
         self._refresh_constraints()
         self.v_python.set(self._python_label())
 
+    def _current_scan_py(self):
+        return self.v_scan_py.get().strip()
+
+    def _refresh_scan_note(self):
+        """
+        Say when the scanner is not the one beside this launcher.
+
+        Silent in the ordinary case. Loud when they differ, because that is
+        exactly the situation that goes unnoticed - two copies of the same file,
+        one of them months old, and nothing on screen distinguishing them.
+        """
+        note = ""
+        current = self._current_scan_py()
+        if not os.path.isfile(current):
+            note = "This file is missing. Choose the scan.py you want to run."
+        elif os.path.normcase(current) != os.path.normcase(ADJACENT_SCAN_PY):
+            note = (
+                "Remembered choice - this is NOT the scan.py beside this launcher. "
+                "That is fine if it is deliberate; it is worth checking if it is not."
+            )
+        self.lbl_scan_note.config(text=note)
+
+    def _apply_scan_py(self, path, remember):
+        path = str(Path(path).resolve())
+        self.v_scan_py.set(path)
+        global SCAN_PY
+        SCAN_PY = path
+        if remember and not save_scan_py(path):
+            messagebox.showwarning(
+                "Could not remember that",
+                "The scanner will run from:\n\n" + path +
+                "\n\nbut the choice could not be written to:\n" + str(CONFIG_PATH) +
+                "\n\nIt will have to be chosen again next time.",
+            )
+        self._refresh_scan_note()
+
+    def _pick_scan_py(self):
+        start = self._current_scan_py()
+        initial = os.path.dirname(start) if os.path.isfile(start) else os.path.dirname(ADJACENT_SCAN_PY)
+        chosen = filedialog.askopenfilename(
+            title="Choose the scan.py to run",
+            initialdir=initial,
+            filetypes=[("The scanner", "scan.py"), ("Python files", "*.py"), ("All files", "*.*")],
+        )
+        if not chosen:
+            return
+        name = os.path.basename(chosen).lower()
+        if name != "scan.py" and not messagebox.askyesno(
+            "That is not called scan.py",
+            "You picked:\n\n" + chosen + "\n\nThe launcher expects the scanner itself. Use it anyway?",
+        ):
+            return
+        self._apply_scan_py(chosen, remember=True)
+
+    def _use_adjacent(self):
+        """Forget the remembered path and go back to the neighbouring scanner."""
+        try:
+            if CONFIG_PATH.exists():
+                CONFIG_PATH.unlink()
+        except Exception:
+            pass
+        self._apply_scan_py(ADJACENT_SCAN_PY, remember=False)
+
     def _build(self):
         wrap = ttk.Frame(self, padding=12)
         wrap.pack(fill="both", expand=True)
 
-        ttk.Label(
-            wrap,
-            text="Scanner: " + SCAN_PY,
-            foreground="#1f4d7a",
-        ).pack(anchor="w", pady=(0, 8))
+        # Which scanner this will actually run, and a way to change it. Shown as
+        # a live row rather than a fixed label because the whole point is that
+        # the answer is not obvious from where the launcher was started.
+        scan_row = ttk.Frame(wrap)
+        scan_row.pack(fill="x", pady=(0, 2))
+        ttk.Label(scan_row, text="Scanner:").pack(side="left")
+        self.lbl_scan = ttk.Label(scan_row, textvariable=self.v_scan_py, foreground="#1f4d7a")
+        self.lbl_scan.pack(side="left", padx=(4, 8))
+        ttk.Button(scan_row, text="Change...", command=self._pick_scan_py).pack(side="left")
+        ttk.Button(scan_row, text="Use the one beside this launcher", command=self._use_adjacent).pack(side="left", padx=(6, 0))
+
+        self.lbl_scan_note = ttk.Label(wrap, text="", foreground="#8a6508", wraplength=880, justify="left")
+        self.lbl_scan_note.pack(anchor="w", pady=(0, 8))
+        self._refresh_scan_note()
 
         opts = ttk.LabelFrame(wrap, text="Options", padding=10)
         opts.pack(fill="x")
@@ -291,14 +420,20 @@ class ScanGui(tk.Tk):
         self.ent_discovery.configure(state="normal" if self.v_discover.get() else "disabled")
 
     def _build_cmd(self):
-        if not os.path.isfile(SCAN_PY):
-            raise ValueError("scan.py was not found beside scan-gui.py:\n" + SCAN_PY)
+        # Read from the field, not the startup constant: the whole point of the
+        # picker is that this can change without restarting the launcher.
+        scan_py = self._current_scan_py()
+        if not os.path.isfile(scan_py):
+            raise ValueError(
+                "The scanner was not found:\n" + scan_py +
+                "\n\nUse Change... to pick the scan.py you want to run."
+            )
 
         py = self._python_cmd()
         if not py:
             raise ValueError("Python launcher not found. Install Python or add 'py'/'python' to PATH.")
 
-        cmd = py + ["-u", SCAN_PY]
+        cmd = py + ["-u", scan_py]
         if self.v_learn.get():
             cmd.append("--learn")
         if self.v_label.get():
@@ -376,6 +511,12 @@ class ScanGui(tk.Tk):
                     encoding="utf-8",
                     errors="replace",
                     bufsize=1,
+                    # Run from the scanner's own folder, exactly as run.ps1 does
+                    # with Set-Location. scan.py finds faces.db and config.json
+                    # from __file__ so those were already right, but anything it
+                    # writes by relative path - the log among them - would
+                    # otherwise land wherever this launcher happened to start.
+                    cwd=os.path.dirname(self._current_scan_py()) or None,
                 )
                 assert self.proc.stdout is not None
                 for line in self.proc.stdout:
