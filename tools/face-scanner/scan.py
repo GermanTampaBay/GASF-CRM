@@ -138,6 +138,15 @@ DEFAULT_DISCOVERY_TOLERANCE = {
 # somebody is an accident waiting to happen — a bad angle becomes "the system
 # thinks everyone is Hans".
 MIN_REFERENCES = 3
+
+# Smallest group the discovery board will offer for naming.
+#
+# Tied to MIN_REFERENCES rather than picked, because it is the same number for
+# the same reason: load_references() only trusts a person once they have this
+# many examples, so naming a group smaller than it produces a person the matcher
+# still cannot use. One click, no recognition. The board exists to grow the
+# reference set, and below this it is not doing that.
+MIN_DISCOVERY_CLUSTER = MIN_REFERENCES
 MAX_ACTIVE_REFERENCES = 12
 MIN_ACTIVE_QUALITY = 0.28
 ACTIVE_LEARNING_THRESHOLD = 0.45
@@ -1995,6 +2004,8 @@ main{padding:20px}.notice{max-width:900px;margin:0 0 18px;padding:12px 14px;back
 .sheet{display:grid;grid-template-columns:repeat(3,1fr);height:220px;background:#dcdcde;gap:2px}.sheet img{width:100%;height:100%;object-fit:cover;background:#eee}
 .cluster .meta{padding:11px 13px}.cluster strong{font-size:17px}.range{color:var(--muted);font-size:13px}
 #empty{padding:30px;background:#fff;border:1px solid var(--line)}
+.smallnote{padding:10px 14px;margin:0 0 12px;background:#fff;border:1px solid var(--line);
+  border-left:3px solid #8a6508;color:#4b5563;font-size:13px;line-height:1.5}
 .modal{position:fixed;inset:0;z-index:5;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:22px}.modal.on{display:flex}
 .dialog{background:#fff;width:min(1050px,100%);max-height:94vh;overflow:auto;border-radius:7px}.dialog header{position:sticky;padding:13px 16px}
 .dialog .body{padding:16px}.instruction{padding:10px 12px;background:#fcf0c3;border-left:4px solid #dba617;font-weight:600}
@@ -2006,6 +2017,7 @@ main{padding:20px}.notice{max-width:900px;margin:0 0 18px;padding:12px 14px;back
 </style></head><body>
 <header><h1>People Discovery</h1><p>Biometric vectors stay in this PC's local faces.db. WordPress receives only reviewed photo, box, and name facts.</p><button class="secondary" id="closeBoard">Close board</button></header>
 <main><div class="notice"><strong>Review before naming.</strong> Each card is a conservative local cluster. Open one, deselect any wrong faces, and type one name. That one name applies to every selected face.</div>
+<div id="smallnote" class="smallnote" hidden></div>
 <div id="clusters"></div><div id="empty" hidden>No unresolved faces are waiting. Run discovery again after new photos are scanned.</div></main>
 <div class="modal" id="modal"><section class="dialog"><header><h1 id="clusterTitle">Review cluster</h1><button class="secondary" id="closeModal">Back</button></header><div class="body">
 <div class="instruction">One name applies to all selected faces. Deselect mistakes before applying.</div>
@@ -2022,6 +2034,12 @@ async function call(path,options={}){options.headers={...(options.headers||{}),'
 async function putCrop(img,id,revision){try{const r=await fetch(`/api/crop?id=${encodeURIComponent(id)}`,{headers:{'X-GASF-Discovery-Token':TOKEN}});if(!r.ok)throw new Error();const blob=await r.blob();if(revision!==viewRevision)return;img.src=URL.createObjectURL(blob)}catch(e){if(revision===viewRevision)img.alt='Crop unavailable'}}
 function contextText(o){const c=o.context||{};return [...(c.events||[]),...(c.places||[])].slice(0,2).join(' / ')}
 function render(next){meta=next;const revision=++viewRevision;const root=byId('clusters');root.innerHTML='';byId('empty').hidden=meta.clusters.length>0;byId('people').innerHTML=(meta.people||[]).map(n=>`<option value="${esc(n)}">`).join('');
+/* Groups smaller than the reference floor are not offered: naming one gives a
+   person the matcher still cannot use. Said out loud so the board never reads
+   as "that is everything" when it is not. */
+const note=byId('smallnote');const hidden=Number(meta.hidden_small||0);
+note.hidden=hidden<1;
+if(hidden>0){note.textContent=`${hidden} smaller group${hidden===1?'':'s'} hidden — a person needs ${meta.min_cluster||3} photos before the scanner can recognise them, so naming fewer would not teach it anything. They return here once more of the same face turns up.`;}
 meta.clusters.forEach((cluster,index)=>{const card=document.createElement('article');card.className='cluster';card.tabIndex=0;card.innerHTML=`<div class="sheet"></div><div class="meta"><strong>${cluster.count} occurrence${cluster.count===1?'':'s'}</strong><div class="range">${esc(cluster.first_date&&cluster.last_date?(cluster.first_date===cluster.last_date?cluster.first_date:`${cluster.first_date} to ${cluster.last_date}`):'Date unavailable')}</div></div>`;card.onclick=()=>openCluster(index);card.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();openCluster(index)}};const sheet=card.querySelector('.sheet');cluster.occurrences.slice(0,6).forEach(o=>{const img=document.createElement('img');img.alt=`Face from photo ${o.photo}`;sheet.appendChild(img);putCrop(img,o.id,revision)});root.appendChild(card)})}
 function openCluster(index){current=meta.clusters[index];if(!current)return;const revision=++viewRevision;byId('clusterTitle').textContent=`Review ${current.count} occurrence${current.count===1?'':'s'}`;byId('personName').value='';byId('message').textContent='';const root=byId('occurrences');root.innerHTML='';current.occurrences.forEach(o=>{const card=document.createElement('article');card.className='occ';card.innerHTML=`<img alt="Face crop from photo ${o.photo}"><label><input type="checkbox" value="${o.id}" checked> Photo #${o.photo}<small>${esc(o.taken_at||o.uploaded_at||'Date unavailable')}</small><small>${esc(contextText(o))}</small></label>`;const cb=card.querySelector('input');cb.onchange=()=>card.classList.toggle('off',!cb.checked);root.appendChild(card);putCrop(card.querySelector('img'),o.id,revision)});byId('modal').classList.add('on')}
 function selected(){return [...byId('occurrences').querySelectorAll('input:checked')].map(el=>Number(el.value))}
@@ -2048,16 +2066,24 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
 
     def current_meta():
         with state["db_lock"]:
-            return {
-                "engine": backend.name,
-                "threshold": threshold,
-                "people": state["people"],
-                "clusters": discovery_metadata(
-                    conn,
-                    backend.name,
-                    state["observation_ids"],
-                ),
-            }
+            everything = discovery_metadata(
+                conn,
+                backend.name,
+                state["observation_ids"],
+            )
+        shown = [c for c in everything if c["count"] >= MIN_DISCOVERY_CLUSTER]
+        hidden = len(everything) - len(shown)
+        return {
+            "engine": backend.name,
+            "threshold": threshold,
+            "people": state["people"],
+            "clusters": shown,
+            # Said, not swallowed. A board that silently dropped most of its
+            # groups would read as "that is all of them" - the house rule
+            # against silent caps exists because that is how work disappears.
+            "hidden_small": hidden,
+            "min_cluster": MIN_DISCOVERY_CLUSTER,
+        }
 
     class DiscoveryHandler(BaseHTTPRequestHandler):
         def _write(self, code, payload, ctype="application/json; charset=utf-8"):
@@ -4711,6 +4737,23 @@ def selftest():
         and "b.style.cursor='default'" in _label_html,
         "labeler: finishing clears the button's wait cursor instead of spinning forever",
     )
+    # The discovery floor. Tied to MIN_REFERENCES because that is WHY it exists:
+    # a person the matcher will not trust is a person not worth clicking for.
+    _disc_all = [
+        {"count": 5, "id": "a"}, {"count": 3, "id": "b"},
+        {"count": 2, "id": "c"}, {"count": 1, "id": "d"}, {"count": 1, "id": "e"},
+    ]
+    _disc_shown = [c for c in _disc_all if c["count"] >= MIN_DISCOVERY_CLUSTER]
+    check_that(
+        MIN_DISCOVERY_CLUSTER == MIN_REFERENCES
+        and [c["id"] for c in _disc_shown] == ["a", "b"]
+        and (len(_disc_all) - len(_disc_shown)) == 3,
+        "discovery: groups below the reference floor are withheld, and counted rather than dropped in silence",
+    )
+    check_that(
+        "hidden_small" in _discovery_ui_html("selftest-token"),
+        "discovery: the board says how many groups it is holding back",
+    )
     check_that(
         _caption_error_line(requests.exceptions.ConnectionError("boom")).startswith("the local captioner is not running")
         and "urllib3" not in _caption_error_line(requests.exceptions.ConnectionError("urllib3 nonsense")),
@@ -5554,6 +5597,29 @@ def selftest():
             }],
             0.15,
         )
+        # Two more sightings of the same face, so the group reaches
+        # MIN_DISCOVERY_CLUSTER and the board still offers it. This test is about
+        # the board's lifecycle - tokens, CSP, naming, cleanup - and a fixture
+        # that fell under the floor would fail it for an unrelated reason.
+        for extra_photo in (702, 703):
+            reconcile_unknown_photo(
+                discovery_conn,
+                backend,
+                {
+                    "id": extra_photo,
+                    "url": f"selftest://{extra_photo}",
+                    "uploaded_at": "2026-08-08 01:00:00",
+                    "caption_context": {"taken_at": "2026-07-04"},
+                },
+                [{
+                    "face_key": "i:0",
+                    "box": [20, 15, 30, 30],
+                    "image_width": 100,
+                    "image_height": 80,
+                    "vector": np.array([0.0, 0.0, 0.0], dtype=np.float32),
+                }],
+                0.15,
+            )
         discovery_scope = [
             int(row[0])
             for row in discovery_conn.execute(
@@ -5598,6 +5664,11 @@ def selftest():
                 timeout=3,
             ).json()
             occurrence_id = board_meta["clusters"][0]["occurrences"][0]["id"]
+            # Every occurrence in the group, because naming one face of a person
+            # and leaving their others in the queue is not what the board does:
+            # "one name applies to all selected faces", and all of them are
+            # selected by default.
+            occurrence_ids = [o["id"] for o in board_meta["clusters"][0]["occurrences"]]
             crop = requests.get(
                 base + f"/api/crop?id={occurrence_id}",
                 headers=headers,
@@ -5614,13 +5685,13 @@ def selftest():
                 json={
                     "cluster": board_meta["clusters"][0]["id"],
                     "name": "Anna",
-                    "selected": [occurrence_id],
+                    "selected": occurrence_ids,
                 },
                 timeout=3,
             ).json()
             sent_occurrence = discovery_posts[0]["occurrences"][0]
             check_that(
-                named.get("applied") == 1
+                named.get("applied") == len(occurrence_ids)
                 and set(sent_occurrence) == {
                     "client_key",
                     "photo",
