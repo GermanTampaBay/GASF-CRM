@@ -2880,7 +2880,16 @@ border:1px solid #26324a;border-radius:6px;background:#0b1220}
 .viewprefs button:hover{border-color:#60a5fa}
 .viewprefs .zoomread{grid-column:1/-1;text-align:center;font-size:12px;color:#94a3b8}
 .rows{display:grid;gap:8px;flex:1 1 auto;min-height:0;overflow:auto}
-.row{display:grid;grid-template-columns:64px 1fr auto auto;gap:6px;align-items:center}
+.row{display:grid;grid-template-columns:96px 1fr auto auto;gap:6px;align-items:center}
+/* The tick beside "Face 3" shows or hides that rectangle, and nothing else. */
+.facelab{display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer}
+.facelab input{cursor:pointer;margin:0}
+.rowshead{display:flex;align-items:center;gap:10px;margin:0 0 8px;flex-wrap:wrap}
+.boxesall{padding:5px 10px;border:1px solid #334155;border-radius:6px;background:#0b1220;
+  color:#cbd5e1;cursor:pointer;font:inherit;font-size:13px}
+.boxesall:hover{border-color:#60a5fa}
+.boxesall:disabled{opacity:.5;cursor:default}
+.rowshead .muted{font-size:12px}
 .notaperson{border:1px solid #475569;background:#0b1220;color:#94a3b8;border-radius:6px;padding:5px 9px;cursor:pointer;white-space:nowrap}
 .notaperson:hover{border-color:#f87171;color:#fca5a5}
 /* The suggested name, with the best stored picture of that person beside it -
@@ -2941,6 +2950,10 @@ border:1px solid #26324a;border-radius:6px;background:#0b1220}
         <button id="panRight" type="button" title="Pan right">Right</button>
         <button id="panCenter" type="button" title="Center without changing zoom">Center</button>
         <div class="zoomread"><span id="zoomValue">100%</span> - drag image to pan; Ctrl+wheel to zoom</div>
+      </div>
+      <div class="rowshead">
+        <button type="button" id="boxesall" class="boxesall">Hide all boxes</button>
+        <span class="muted">Ticks only show or hide the rectangles. Names are saved either way.</span>
       </div>
       <div class="rows" id="rows"></div>
       <div class="muted">Names save automatically when you move to another photo.</div>
@@ -3075,6 +3088,34 @@ function setupLocalNames(p){
   dlocal.innerHTML=local.map(n=>`<option value="${esc(n)}"></option>`).join('');
   return local;
 }
+/* Which rectangles are hidden right now.
+   Purely about seeing the photograph: on a group shot the boxes and their
+   numbers cover the very faces they are pointing at, and there was no way to
+   look underneath. Hiding one changes nothing that gets saved - the name typed
+   beside it is still submitted - so this is a pair of spectacles, not a
+   decision. Cleared whenever a different photo is opened. */
+var hiddenBoxes = new Set();
+
+/* One button for a crowded group shot, where ticking fifteen boxes off one at a
+   time is its own chore. Reads as whichever action is useful next. */
+function syncBoxesAll(){
+  const btn=document.getElementById('boxesall');
+  if(!btn||!current||!current.boxes){return;}
+  const total=current.boxes.length;
+  const allHidden = total>0 && hiddenBoxes.size>=total;
+  btn.textContent = allHidden ? 'Show all boxes' : 'Hide all boxes';
+  btn.disabled = total===0;
+}
+
+function setAllBoxes(show){
+  if(!current||!current.boxes){return;}
+  hiddenBoxes = new Set();
+  if(!show){ current.boxes.forEach((b,i)=>hiddenBoxes.add(i)); }
+  document.querySelectorAll('#rows input.boxtoggle').forEach(cb=>{ cb.checked = !!show; });
+  drawBoxes(current);
+  syncBoxesAll();
+}
+
 function drawBoxes(p){
   const ov=document.getElementById('ov'); ov.innerHTML='';
   if(!p||!p.boxes||!p.boxes.length){return;}
@@ -3084,6 +3125,7 @@ function drawBoxes(p){
   const ow=ov.clientWidth||img.clientWidth||1, oh=ov.clientHeight||img.clientHeight||1;
   const minW=Math.max(0.35, (10*100)/ow), minH=Math.max(0.35, (10*100)/oh);
   p.boxes.forEach((b,i)=>{
+    if(hiddenBoxes.has(i)){return;}
     const left=Math.max(0,Math.min(100,b[0]*100/w));
     const top=Math.max(0,Math.min(100,b[1]*100/h));
     const ww=Math.max(minW,Math.min(100-left,b[2]*100/w));
@@ -3107,6 +3149,10 @@ function render(p){
   const renderSeq=++imageRenderSeq;
   current=p;
   dirty=false;
+  // A different photo starts with every rectangle showing: hiding one is about
+  // reading THIS picture, and carrying it over would leave a face invisible on
+  // a photo where nobody chose to hide anything.
+  hiddenBoxes = new Set();
   resetView();
   showDetail();
   setText('title', `Photo #${p.id}`);
@@ -3134,7 +3180,10 @@ function render(p){
     const val=(p.prefill && p.prefill[String(i)]) || '';
     const row=document.createElement('div'); row.className='row';
     const listId = localNames.length ? "peopleListLocal" : "peopleListGlobal";
-    row.innerHTML=`<label>Face ${i+1}</label><input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}" class="usehint"><img class="hintface" alt="" src="/api/face-thumb?person=${encodeURIComponent(hint.name)}&token=${encodeURIComponent(sessionToken)}" onerror="this.remove()"><span>Use ${esc(hint.name)} (${hint.confidence}%)</span></button>`:'<span></span>'}`
+    row.innerHTML=`<label class="facelab"><input type="checkbox" class="boxtoggle" data-box="${i}"`
+      + `${hiddenBoxes.has(i)?'':' checked'} title="Show this face's rectangle on the photo. Unticking only hides it - the name is still saved.">`
+      + ` Face ${i+1}</label>`
+      + `<input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}" class="usehint"><img class="hintface" alt="" src="/api/face-thumb?person=${encodeURIComponent(hint.name)}&token=${encodeURIComponent(sessionToken)}" onerror="this.remove()"><span>Use ${esc(hint.name)} (${hint.confidence}%)</span></button>`:'<span></span>'}`
       + `<button class="notaperson" data-ignore="${i}" title="This is not a person to tag - a poster, a reflection, or somebody in the background. It will not be offered again.">Not a person</button>`;
     rows.appendChild(row);
     if(val){ addName(val); }
@@ -3162,6 +3211,13 @@ function render(p){
       setText('msg','Could not save that: '+e.message);
     }
   });
+  rows.querySelectorAll('input.boxtoggle').forEach(cb=>cb.onchange=()=>{
+    const i=parseInt(cb.getAttribute('data-box'),10);
+    if(cb.checked){ hiddenBoxes.delete(i); } else { hiddenBoxes.add(i); }
+    drawBoxes(current);   // redraw only; nothing about the labels is touched
+    syncBoxesAll();
+  });
+  syncBoxesAll();
   rows.querySelectorAll('button[data-fill]').forEach(b=>b.onclick=()=>{
     const i=b.getAttribute('data-fill');
     const hint=(p.hints||[]).find(h=>String(h.index)===String(i));
@@ -3258,7 +3314,12 @@ async function init(){
 function collectLabels(){
   if(!current){return [];}
   const labels=[];
-  document.querySelectorAll('#rows input').forEach(inp=>{
+  // input[data-i] and nothing else. A bare '#rows input' would also collect the
+  // show/hide checkboxes beside each face, whose value is the string "on" - so
+  // ticking one off would have quietly saved a person called "on" against an
+  // undefined box. The checkboxes are a way to see the picture and must be
+  // invisible to saving.
+  document.querySelectorAll('#rows input[data-i]').forEach(inp=>{
     const name=inp.value.trim(); if(!name){return;}
     addName(name);
     const i=parseInt(inp.getAttribute('data-i'),10); labels.push({name, box: current.boxes[i]});
@@ -3398,6 +3459,10 @@ async function beginFinish(){
   }
 }
 document.getElementById('save').onclick=saveAndNext;
+document.getElementById('boxesall').onclick=()=>{
+  const total=(current&&current.boxes)?current.boxes.length:0;
+  setAllBoxes(!(total>0 && hiddenBoxes.size>=total));
+};
 document.getElementById('back').onclick=async()=>{ await saveAndOpen(pos - 1); };
 document.getElementById('next').onclick=async()=>{ await saveAndOpen(pos + 1); };
 document.getElementById('exit').onclick=async()=>{
@@ -4564,6 +4629,21 @@ def selftest():
             and best_face_thumb(thumb_db, "engineA", "Nobody") is None,
             "labeler: the best ACTIVE face of a person is what gets shown beside their name",
         )
+    # The show/hide ticks must be invisible to saving. collectLabels() reads
+    # '#rows input[data-i]'; a bare '#rows input' would also match the checkboxes,
+    # whose value is the string "on", so ticking one off would have saved a
+    # person called "on" against an undefined box. Asserted against the HTML the
+    # board is built from, because that selector IS the guarantee.
+    _label_html = _label_ui_html()
+    check_that(
+        "'#rows input[data-i]'" in _label_html
+        and "querySelectorAll('#rows input')" not in _label_html,
+        "labeler: saving reads only the name inputs, never the show/hide ticks",
+    )
+    check_that(
+        "hiddenBoxes" in _label_html and 'class="boxtoggle"' in _label_html,
+        "labeler: every face has a tick that only shows or hides its rectangle",
+    )
     check_that(
         clamp_box_xywh([95, 75, 20, 20], 100, 80) == [95, 75, 5, 5]
         and clamp_box_xywh([110, 90, 20, 20], 100, 80) is None,
