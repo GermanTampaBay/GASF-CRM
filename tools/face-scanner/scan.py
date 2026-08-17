@@ -2740,6 +2740,25 @@ def _label_item_status(face_count, prefill, hints, known_threshold):
     return "full"
 
 
+def _caption_error_line(exc):
+    """
+    One readable line instead of a urllib3 stack of nouns.
+
+    "Max retries exceeded with url: /api/generate (Caused by NewConnectionError(
+    '<urllib3.connection.HTTPConnection object at 0x...>: [WinError 10061] No
+    connection could be made because the target machine actively refused it'))"
+    is thirty words that mean "Ollama is not running", printed once per photo.
+    The distinction worth keeping is between a captioner that is switched off -
+    ordinary, and nobody's fault - and one that answered with something wrong.
+    """
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        return "the local captioner is not running (start Ollama, or ignore this if you are not using captions)"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "the local captioner did not answer in time"
+    text = " ".join(str(exc).split())
+    return (text[:160] + "…") if len(text) > 160 else (text or exc.__class__.__name__)
+
+
 def _face_name_rejected(name, rejected_names):
     """Match the server's per-photo negative names without weakening other hints."""
     keys = _face_name_keys(name)
@@ -3387,18 +3406,35 @@ async function saveAndOpen(newPos){
     setText('sub',e && e.message ? e.message : String(e));
   }
 }
+/* The finish button, once there is nothing left to wait for.
+   Disabled alone is not enough: the stylesheet gives a disabled finish button a
+   wait cursor, so leaving it disabled and still reading "Finishing..." is how a
+   completed session looked identical to a stuck one. */
+function finishDone(label){
+  const b=document.getElementById('finish');
+  if(!b){return;}
+  b.disabled=true;
+  b.textContent=label;
+  b.style.cursor='default';
+}
+
 async function pollFinish(){
   if(!finishing){return;}
   try{
     const s=await j('/api/finish-status');
     finishPollFailures=0;
     if(s.status==='done'){
+      finishing=false;
       setText('finishTitle','Labeling finished');
       setText('finishMessage',labelFlow
-        ? 'Your labels are saved. References are refreshing, then one final scan will run in ScanGUI.'
+        ? 'Your labels are saved. ScanGUI is now refreshing references and running a final scan — that can take several minutes, and its progress appears in the ScanGUI window, not here. You can close this tab.'
         : 'Your labels are saved. You can close this tab.');
       document.getElementById('finishSpinner').hidden=true;
-      document.getElementById('finish').disabled=true;
+      // The button said "Finishing..." and stayed disabled, which the stylesheet
+      // draws with an hourglass cursor — so a finished, saved session looked
+      // exactly like one still grinding away, for as long as the tab stayed
+      // open. Say the true thing instead.
+      finishDone('Labels saved');
       return;
     }
     if(s.status==='error'){
@@ -3420,9 +3456,16 @@ async function pollFinish(){
       setTimeout(pollFinish,800);
       return;
     }
-    setText('finishTitle','Finish sent to ScanGUI');
-    setText('finishMessage','This page could not confirm the final status. Check the ScanGUI output before closing this tab.');
+    /* The board closes as soon as the session is handed back, so losing the
+       connection here is the ORDINARY ending, not a fault: it means ScanGUI has
+       taken over and moved on to learning and scanning. Said plainly, because
+       the old wording read like something had gone wrong and left the button
+       spinning underneath it. */
+    finishing=false;
+    setText('finishTitle','Handed back to ScanGUI');
+    setText('finishMessage','This board has closed, which is what happens when the session ends. Any names you saved are already stored — ScanGUI is now refreshing references and running a final scan, and its progress appears in the ScanGUI window. You can close this tab.');
     document.getElementById('finishSpinner').hidden=true;
+    finishDone('Handed back');
   }
 }
 async function beginFinish(){
@@ -4002,6 +4045,9 @@ def scan(
     total_kept = 0
     total_captions = 0
     deferred_ids = set()
+    # Latched the first time the local captioner refuses a connection: it will
+    # not come up mid-run, and asking once per photo costs a timeout each.
+    captioner_down = False
 
     while True:
         qp = {}
@@ -4166,6 +4212,14 @@ def scan(
 
                 caption_done = False
                 caption_item = None
+                # Once the captioner has refused a connection, it is not going to
+                # start mid-run. Asking again per photo bought nothing but a
+                # timeout each and a screen of identical urllib3 text; the photos
+                # stay pending either way and are captioned on a later pass.
+                if needs_caption and captioner_down:
+                    deferred_ids.add(photo_id)
+                    needs_caption = False
+
                 if needs_caption and image_bytes is not None:
                     try:
                         cap, model = local_caption(
@@ -4202,8 +4256,11 @@ def scan(
                                     print(f"  #{photo_id}: deterministic caption failure ({n}/{QUARANTINE_FAILS}) — {e}")
                         else:
                             deferred_ids.add(photo_id)
-                            if verbose:
-                                print(f"  #{photo_id}: caption left pending — {e}")
+                            if isinstance(e, requests.exceptions.ConnectionError) and not captioner_down:
+                                captioner_down = True
+                                print("  captions skipped for this run: " + _caption_error_line(e))
+                            elif verbose and not captioner_down:
+                                print(f"  #{photo_id}: caption left pending — {_caption_error_line(e)}")
 
                 if not needs_faces and not caption_done:
                     continue
@@ -4643,6 +4700,21 @@ def selftest():
     check_that(
         "hiddenBoxes" in _label_html and 'class="boxtoggle"' in _label_html,
         "labeler: every face has a tick that only shows or hides its rectangle",
+    )
+    # A finished session must stop looking like a working one. The button was
+    # left disabled and still reading "Finishing...", which the stylesheet draws
+    # with a wait cursor, so a saved session was indistinguishable from a hung
+    # one for as long as the tab stayed open.
+    check_that(
+        "function finishDone(" in _label_html
+        and _label_html.count("finishDone(") >= 3
+        and "b.style.cursor='default'" in _label_html,
+        "labeler: finishing clears the button's wait cursor instead of spinning forever",
+    )
+    check_that(
+        _caption_error_line(requests.exceptions.ConnectionError("boom")).startswith("the local captioner is not running")
+        and "urllib3" not in _caption_error_line(requests.exceptions.ConnectionError("urllib3 nonsense")),
+        "captions: a captioner that is switched off says so in one line",
     )
     check_that(
         clamp_box_xywh([95, 75, 20, 20], 100, 80) == [95, 75, 5, 5]
