@@ -3829,6 +3829,25 @@ function gasf_crm_render_inbox_script() {
 			// remember — and so it cannot stretch the row it used to sit in.
 			if (p.edited) { bits.push('<em class="muted">Edited &mdash; the original is kept and can be restored.</em>'); }
 		}
+		/* Download, as a link rather than a button: the browser's own save is
+		   more reliable than anything script can do, it works for a private
+		   photo (the URL is the authenticated stream route) and a published one
+		   alike, and the name comes from the catalogue rather than IMG_4471.
+		   dl=1 asks the server for an attachment disposition, so the filename
+		   survives even where the download attribute is ignored. */
+		var dlName = (p.dlname || '').trim();
+		var dlHref = p.url || p.full || '';
+		if (dlHref) {
+			/* dl=1 only where a PHP route can act on it. On a published photo
+			   the URL is a static file, so the query would buy nothing and cost
+			   a cache miss on a full-size image; the download attribute names
+			   that one on its own. */
+			var streamed = dlHref.indexOf('/wp-json/') !== -1 || dlHref.indexOf('rest_route=') !== -1;
+			if (streamed) { dlHref += (dlHref.indexOf('?') === -1 ? '?' : '&') + 'dl=1'; }
+			acts.push('<a class="btn sec" id="lbdl" href="' + esc(dlHref) + '"' +
+				(dlName ? ' download="' + esc(dlName) + '"' : ' download') +
+				' title="Save this to your computer' + (dlName ? ' as ' + esc(dlName) : '') + '">Download</a>');
+		}
 		if (p.lib) { acts.push('<button class="btn warn" id="lbdelbtn" type="button">Delete photo</button>'); }
 
 		// The library passes the CARD (whose .lopen is the button); the review

@@ -2173,7 +2173,7 @@ function gasf_crm_photo_img_url( $attachment_id, $size = 'medium', $token = '' )
  * Send one private image, or die trying — never a redirect to the real file,
  * which would hand out the very URL this exists to withhold.
  */
-function gasf_crm_photo_send_file( $attachment_id, $size ) {
+function gasf_crm_photo_send_file( $attachment_id, $size, $as_download = false ) {
 	$id   = (int) $attachment_id;
 	$file = get_attached_file( $id );
 
@@ -2199,7 +2199,21 @@ function gasf_crm_photo_send_file( $attachment_id, $size ) {
 	nocache_headers();
 	header( 'Content-Type: ' . $mime );
 	header( 'Content-Length: ' . filesize( $file ) );
-	header( 'Content-Disposition: inline; filename="' . sanitize_file_name( basename( $file ) ) . '"' );
+	/*
+	 * Inline for viewing, attachment when the viewer asked to save it.
+	 *
+	 * The catalogued name is used for the download because "2019-07-04
+	 * Oktoberfest Biergarten.jpg" is what somebody wants in their downloads
+	 * folder, and IMG_4471.jpg is what the camera happened to call it. It
+	 * carries no people's names — that is deliberate, see gasf_photo_filename().
+	 */
+	$dl_name = '';
+	if ( $as_download && function_exists( 'gasf_photo_filename' ) ) {
+		$dl_name = (string) gasf_photo_filename( $id );
+	}
+	if ( '' === $dl_name ) { $dl_name = basename( $file ); }
+	header( ( $as_download ? 'Content-Disposition: attachment; filename="' : 'Content-Disposition: inline; filename="' )
+		. sanitize_file_name( $dl_name ) . '"' );
 	// Not public and not shared: no proxy or CDN should keep a copy of a photo
 	// nobody has reviewed yet.
 	header( 'Cache-Control: private, no-store, max-age=0' );
@@ -4605,7 +4619,13 @@ add_action( 'rest_api_init', function () {
 				$ok = gasf_crm_photo_in_library( $id );
 			}
 			if ( ! $ok ) { status_header( 404 ); exit; }
-			gasf_crm_photo_send_file( $id, (string) $req->get_param( 'size' ) );
+			// dl=1 is the Download button in the viewer. Same permission check,
+			// same bytes — only the disposition and the filename differ.
+			gasf_crm_photo_send_file(
+				$id,
+				(string) $req->get_param( 'size' ),
+				(bool) $req->get_param( 'dl' )
+			);
 		},
 	) );
 
