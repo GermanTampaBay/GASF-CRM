@@ -232,6 +232,9 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .fwdhand{display:block;margin:8px 0 0;font-size:13px}
 .fwdhand .muted{display:block;margin:3px 0 0 22px;font-size:12px;line-height:1.45}
 
+.zipconv{display:inline-flex;align-items:baseline;gap:6px;font-size:13px;margin-left:4px}
+.zipconv .muted{font-size:12px}
+
 .casebox{margin:12px 0;padding:10px 12px;border:1px solid var(--gasf-border);border-radius:5px;background:var(--s-wash)}
 .casebox h3{margin:0;font-size:13px;display:inline}
 /* Folded shut by default and out of the way at the bottom — the summary is the

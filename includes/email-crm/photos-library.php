@@ -643,7 +643,55 @@ function gasf_crm_photo_zip_dir() {
  *
  * @return array{token:string,name:string,files:int,bytes:int}|WP_Error
  */
-function gasf_crm_photo_zip_build( array $ids ) {
+/**
+ * Formats every site that takes an upload will accept.
+ *
+ * WebP is not among them, and about a third of this library is WebP: the host's
+ * performance module converts uploads, so a photo somebody sent as a JPEG can
+ * leave here as a .webp and be refused by Eventbrite, a print shop, or whatever
+ * the newsletter is pasted into. The file is fine; the container is unfamiliar.
+ */
+function gasf_crm_zip_portable_types() {
+	return array( 'jpg', 'jpeg', 'png', 'gif' );
+}
+
+/**
+ * @param bool $convert Rewrite anything a site might refuse into PNG. Only the
+ *                      awkward formats are touched: turning the 2,300 JPEGs in
+ *                      this library into PNG would multiply their size several
+ *                      times over to solve a problem they do not have.
+ */
+/**
+ * One image as a PNG in a temp file, or '' if it will not convert.
+ *
+ * Lossless on purpose: the point is a container a website will accept, and
+ * re-compressing somebody's photo to save a download a few megabytes would be
+ * throwing away picture quality to solve a filename problem. EXIF is stripped
+ * with the format change, which is the same thing publish already did.
+ */
+function gasf_crm_zip_to_png( $path ) {
+	if ( ! class_exists( 'Imagick' ) ) { return ''; }
+	if ( ! function_exists( 'wp_tempnam' ) ) { require_once ABSPATH . 'wp-admin/includes/file.php'; }
+	$out = '';
+	try {
+		Imagick::setResourceLimit( Imagick::RESOURCETYPE_MEMORY, 256 * MB_IN_BYTES );
+		Imagick::setResourceLimit( Imagick::RESOURCETYPE_MAP, 256 * MB_IN_BYTES );
+		$im = new Imagick( $path );
+		$im->setImageFormat( 'png' );
+		$im->stripImage();
+		$out = wp_tempnam( 'gasf-zip-png' );
+		$im->writeImage( $out );
+		$im->clear();
+		$im->destroy();
+	} catch ( Exception $e ) {
+		if ( $out ) { @unlink( $out ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		gasf_crm_log( 'CRM zip: could not convert ' . basename( $path ) . ' to PNG — ' . $e->getMessage() );
+		return '';
+	}
+	return $out;
+}
+
+function gasf_crm_photo_zip_build( array $ids, $convert = false ) {
 	if ( ! class_exists( 'ZipArchive' ) ) {
 		return new WP_Error( 'gasf_crm_nozip', 'This server cannot build zip files, so photos have to be downloaded one at a time.' );
 	}
@@ -699,7 +747,11 @@ function gasf_crm_photo_zip_build( array $ids ) {
 		return new WP_Error( 'gasf_crm_nozip', 'The server could not start building that download.' );
 	}
 
-	$used = array();
+	$used        = array();
+	$temps       = array();   // converted copies, removed once the zip is closed
+	$written     = 0;         // what actually went in, which conversion changes
+	$converted   = 0;
+	$unconverted = 0;
 	foreach ( $files as $f ) {
 		$name = function_exists( 'gasf_photo_filename' ) ? gasf_photo_filename( $f['id'] ) : '';
 		if ( '' === $name ) { $name = basename( $f['path'] ); }
@@ -717,16 +769,59 @@ function gasf_crm_photo_zip_build( array $ids ) {
 			$used[ $name ] = 1;
 		}
 
-		$zip->addFile( $f['path'], $name );
+		/*
+		 * Converted on the way in, never on disk. The library keeps whatever it
+		 * was given - re-encoding the archive to suit one website would be
+		 * letting a download decide what the club's records are made of.
+		 */
+		$src = $f['path'];
+		$ext = strtolower( pathinfo( $src, PATHINFO_EXTENSION ) );
+		if ( $convert && ! in_array( $ext, gasf_crm_zip_portable_types(), true ) && class_exists( 'Imagick' ) ) {
+			$as_png = gasf_crm_zip_to_png( $src );
+			if ( $as_png ) {
+				$temps[] = $as_png;
+				$src     = $as_png;
+				$name    = preg_replace( '~\.[a-z0-9]+$~i', '', $name ) . '.png';
+				$converted++;
+			} else {
+				$unconverted++;
+			}
+		}
+
+		$written += (int) filesize( $src );
+		$zip->addFile( $src, $name );
 	}
 
 	$org  = sanitize_file_name( gasf_crm_cfg()['signature_org'] ?: 'photos' );
 	$name = 'GASF-photos-' . gmdate( 'Y-m-d' ) . '-' . count( $files ) . '.zip';
 	$zip->setArchiveComment( $org . ' — ' . count( $files ) . ' photo(s), downloaded ' . gmdate( 'Y-m-d' ) );
 
-	if ( ! $zip->close() ) {
+	$closed = $zip->close();
+
+	// The converted copies exist only to be zipped. Removed whether the close
+	// worked or not, so a failed download does not leave PNGs in the temp dir.
+	foreach ( $temps as $tmp ) { @unlink( $tmp ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+	if ( ! $closed ) {
 		@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		return new WP_Error( 'gasf_crm_nozip', 'The download could not be finished. Try a smaller selection.' );
+	}
+
+	/*
+	 * Checked on what was WRITTEN, not on what was selected.
+	 *
+	 * The cap upstream measures the originals, and PNG is lossless, so a
+	 * selection that fits comfortably as WebP can be several times the size
+	 * converted. Refusing here - after the work, before the download - is worse
+	 * than refusing early and better than handing somebody a file their
+	 * connection will not survive.
+	 */
+	if ( $written > GASF_CRM_LIB_ZIP_MAX_BYTES ) {
+		@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return new WP_Error( 'gasf_crm_toobig', sprintf(
+			'Converted to PNG that selection comes to %s, over the %s limit — PNG keeps every pixel, so it runs several times larger than the originals. Take fewer at a time, or download them as they are.',
+			size_format( $written ), size_format( GASF_CRM_LIB_ZIP_MAX_BYTES )
+		) );
 	}
 
 	set_transient( 'gasf_crm_zip_' . $token, array(
@@ -747,6 +842,11 @@ function gasf_crm_photo_zip_build( array $ids ) {
 		// Said out loud, never silently. A zip quietly missing the one photo
 		// somebody actually wanted is how people stop trusting the download.
 		'refused' => count( $refused ),
+		// What the conversion actually did. A tickbox that silently did nothing
+		// - no Imagick, or a file it could not read - would look identical to
+		// one that worked, right up until the upload was refused again.
+		'converted'   => $converted,
+		'unconverted' => $unconverted,
 	);
 }
 
@@ -1702,8 +1802,16 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $lib_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			$ids = (array) $req->get_param( 'ids' );
-			$op = gasf_crm_op_start( 'photo-zip:' . md5( wp_json_encode( array_values( array_map( 'intval', $ids ) ) ) ), $req, 20 * MINUTE_IN_SECONDS );
+			$ids     = (array) $req->get_param( 'ids' );
+			$convert = (bool) $req->get_param( 'convert' );
+			// The convert flag is part of the identity of the job: the same
+			// selection asked for twice, once converted and once not, is two
+			// different downloads and must not answer from one cached result.
+			$op = gasf_crm_op_start(
+				'photo-zip:' . ( $convert ? 'png:' : '' ) . md5( wp_json_encode( array_values( array_map( 'intval', $ids ) ) ) ),
+				$req,
+				20 * MINUTE_IN_SECONDS
+			);
 			if ( is_wp_error( $op ) ) { return $op; }
 			if ( ! empty( $op['duplicate'] ) ) {
 				$cached = get_transient( $op['key'] . ':result' );
@@ -1711,7 +1819,7 @@ add_action( 'rest_api_init', function () {
 					return $cached;
 				}
 			}
-			$res = gasf_crm_photo_zip_build( $ids );
+			$res = gasf_crm_photo_zip_build( $ids, $convert );
 			if ( is_wp_error( $res ) ) {
 				gasf_crm_op_finish( $op, false );
 				return $res;

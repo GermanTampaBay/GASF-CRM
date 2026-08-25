@@ -566,6 +566,14 @@ function gasf_crm_render_inbox() {
 	<div class="card pad libbar" id="libbar" hidden>
 		<strong><span id="lnsel">0</span> selected</strong>
 		<button class="btn" id="lzip" type="button">Download as a zip</button>
+		<?php /* About a third of the library is WebP, because the host converts
+		         uploads. Plenty of sites refuse it - Eventbrite among them - and
+		         the file is perfectly good, just in a container they do not
+		         know. Only the awkward ones are rewritten: JPEGs are already
+		         accepted everywhere and turning them into PNG would multiply
+		         the download for nothing. */ ?>
+		<label class="zipconv"><input type="checkbox" id="lzippng"> Convert WebP to PNG
+			<span class="muted">for sites that refuse WebP, like Eventbrite</span></label>
 		<button class="btn sec" id="lnone" type="button">Clear selection</button>
 		<button class="btn sec" id="lbulk" type="button">Tag selected&hellip;</button>
 		<span class="muted" id="lzipmsg"></span>

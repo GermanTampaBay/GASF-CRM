@@ -3683,15 +3683,21 @@ function gasf_crm_render_inbox_script() {
 			lzip.textContent = 'Building…';
 			msg.textContent = ids.length + ' photo' + (ids.length === 1 ? '' : 's') + ' — this can take a moment.';
 
+			var wantPng = !!(document.getElementById('lzippng') && document.getElementById('lzippng').checked);
 			api('/photos/zip', { method:'POST', body: JSON.stringify({
 				ids: ids,
-				op_id: nextOpId('photo-zip-' + ids.join('-'))
+				convert: wantPng,
+				op_id: nextOpId('photo-zip-' + (wantPng ? 'png-' : '') + ids.join('-'))
 			}) })
 				.then(function(r){
 					// Navigating to it rather than fetching: the browser's own
 					// download handles a large file far better than holding it in
 					// memory as a blob, and it names the file from the header.
 					msg.textContent = 'Ready — ' + r.files + ' photo(s), ' + Math.round(r.bytes / 1048576) + ' MB.' +
+						(r.converted ? '  ' + r.converted + ' converted to PNG.' : '') +
+						// A conversion that could not happen is said out loud: the
+						// alternative is finding out when the upload is refused.
+						(r.unconverted ? '  ' + r.unconverted + ' could not be converted and are unchanged.' : '') +
 						(r.refused ? '  ' + r.refused + ' left out by their permission records (do-not-publish, or cleared for the club and archive only).' : '');
 					window.location.href = r.url;
 					lzip.disabled = false;

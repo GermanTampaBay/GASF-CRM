@@ -708,6 +708,54 @@ final class GASF_CRM_Selftest {
 		return strtolower( trim( (string) $a ) ) === strtolower( trim( (string) $b ) );
 	}
 
+	/**
+	 * The export can hand out a format every site accepts.
+	 *
+	 * The host's performance module turns uploads into WebP, so a photo the
+	 * club was sent as a JPEG leaves here as a .webp and gets refused by
+	 * Eventbrite and friends. Only the awkward formats are rewritten: the
+	 * library's JPEGs are accepted everywhere already, and converting those to
+	 * PNG would multiply a download for nothing.
+	 */
+	public function test_zip_png_conversion() {
+		$this->ok(
+			in_array( 'jpg', gasf_crm_zip_portable_types(), true )
+			&& in_array( 'png', gasf_crm_zip_portable_types(), true )
+			&& ! in_array( 'webp', gasf_crm_zip_portable_types(), true ),
+			'zip convert: webp counts as awkward, jpg and png do not'
+		);
+
+		if ( ! class_exists( 'Imagick' ) || ! count( ( new Imagick() )->queryFormats( 'WEBP' ) ) ) {
+			return;   // nothing to convert from on this host
+		}
+
+		$im = new Imagick();
+		$im->newImage( 60, 40, 'gray' );
+		$im->setImageFormat( 'webp' );
+		$src = wp_tempnam( 'st-zip.webp' );
+		$im->writeImage( $src );
+		$im->destroy();
+
+		$out = gasf_crm_zip_to_png( $src );
+		$this->ok( $out && is_file( $out ), 'zip convert: a webp becomes a real file' );
+		if ( $out && is_file( $out ) ) {
+			$d = @getimagesize( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$this->ok(
+				$d && IMAGETYPE_PNG === $d[2] && 60 === $d[0] && 40 === $d[1],
+				'zip convert: and it is a PNG of the same picture'
+			);
+			@unlink( $out ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+		@unlink( $src ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		// A file that is not an image must fail closed rather than produce a
+		// PNG-named something the download then carries.
+		$junk = wp_tempnam( 'st-zip-junk.webp' );
+		file_put_contents( $junk, 'not an image' );
+		$this->ok( '' === gasf_crm_zip_to_png( $junk ), 'zip convert: rubbish converts to nothing, not to a broken PNG' );
+		@unlink( $junk ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );
