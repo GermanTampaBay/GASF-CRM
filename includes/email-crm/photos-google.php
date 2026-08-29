@@ -95,18 +95,43 @@ function gasf_crm_gphotos_api( $method, $url, $token, $body = null ) {
 	$code = (int) wp_remote_retrieve_response_code( $res );
 	$json = json_decode( (string) wp_remote_retrieve_body( $res ), true );
 
-	if ( 401 === $code || 403 === $code ) {
-		// The grant is gone — revoked in the Google account, or simply expired.
-		// Dropping it here means the next attempt asks again rather than
-		// failing in the same way forever.
+	$said = isset( $json['error']['message'] ) ? trim( (string) $json['error']['message'] ) : '';
+
+	if ( 401 === $code ) {
+		// The grant really is gone — expired, or revoked in the Google account.
+		// Dropping it means the next attempt asks again rather than failing the
+		// same way forever.
 		gasf_crm_gphotos_token_clear();
 		return new WP_Error( 'gasf_crm_gph_auth',
 			'Google is no longer accepting that permission. Press the button again to reconnect.',
 			array( 'status' => 401 ) );
 	}
+
+	if ( 403 === $code ) {
+		/*
+		 * A 403 is NOT a dead token, and treating it as one is a trap I set for
+		 * myself: the commonest cause is the Picker API not being enabled on
+		 * the Cloud project, and clearing the token then sends the volunteer
+		 * round the reconnect loop forever, each time being told to press the
+		 * button that cannot help. Google says exactly what is wrong in its own
+		 * message; the job here is to pass that on rather than replace it with
+		 * a guess.
+		 */
+		gasf_crm_log( 'CRM Google Photos: 403 from ' . $url . ' — ' . ( $said ?: 'no message' ) );
+		$hint = '';
+		if ( false !== stripos( $said, 'has not been used' ) || false !== stripos( $said, 'disabled' ) ) {
+			$hint = ' Enable the "Photos Picker API" for this project in the Google Cloud console, then try again.';
+		} elseif ( false !== stripos( $said, 'scope' ) || false !== stripos( $said, 'permission' ) ) {
+			$hint = ' The permission granted does not cover picking photos — check the scope on the OAuth consent screen.';
+		}
+		return new WP_Error( 'gasf_crm_gph',
+			( $said ?: 'Google refused the request.' ) . $hint,
+			array( 'status' => 502 ) );
+	}
+
 	if ( $code < 200 || $code >= 300 ) {
-		$msg = isset( $json['error']['message'] ) ? (string) $json['error']['message'] : ( 'Google answered ' . $code );
-		return new WP_Error( 'gasf_crm_gph', $msg, array( 'status' => 502 ) );
+		gasf_crm_log( 'CRM Google Photos: ' . $code . ' from ' . $url . ' — ' . ( $said ?: 'no message' ) );
+		return new WP_Error( 'gasf_crm_gph', $said ?: ( 'Google answered ' . $code ), array( 'status' => 502 ) );
 	}
 	return is_array( $json ) ? $json : array();
 }
