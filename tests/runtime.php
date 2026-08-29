@@ -570,6 +570,64 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * A whole photo can be passed over, and it really leaves the queue.
+	 *
+	 * The label queue is a fixed number of photos, so every crowd shot of
+	 * strangers in it is a photo of people we could actually name that the
+	 * scanner never reached - and the client downloads and runs a detector over
+	 * each one before the labeling page even opens. Marking a photo is not the
+	 * feature; marking it and having it still arrive would cost exactly what it
+	 * cost before.
+	 *
+	 * So the assertion that matters is the QUEUE one, asked through the route
+	 * the scanner actually calls rather than by reading the meta back.
+	 */
+	public function test_face_photo_skip() {
+		$id = $this->library_photo( 'st-face-skip' );
+		$cb = $this->rest_cb( '/gasf/v1/crm/photos/faces/label-queue' );
+		$this->ok( is_callable( $cb ), 'face skip: the label queue route is there to be asked' );
+
+		$ask = function () use ( $cb ) {
+			/*
+			 * Flushed on purpose, and this is not tidiness.
+			 *
+			 * WordPress caches a post query under a key that changes only when
+			 * clean_post_cache() bumps it, and update_post_meta() does not bump
+			 * it. Both halves of this test run the same query in one PHP
+			 * process, so without this the second ask would be answered from
+			 * the first ask's cache and the result would say nothing about the
+			 * change being tested.
+			 */
+			wp_cache_flush();
+			$req = new WP_REST_Request( 'GET', '' );
+			$req->set_param( 'limit', 40 );
+			$out = call_user_func( $cb, $req );
+			return array_map( 'intval', wp_list_pluck( (array) ( $out['photos'] ?? array() ), 'id' ) );
+		};
+
+		$this->ok( ! gasf_crm_face_photo_skipped( $id ), 'face skip: nothing is passed over to begin with' );
+		$this->ok( in_array( $id, $ask(), true ), 'face skip: a fresh library photo is offered for labelling' );
+
+		$this->ok( true === gasf_crm_face_photo_skip( $id ), 'face skip: it can be passed over' );
+		$this->ok( gasf_crm_face_photo_skipped( $id ), 'face skip: and the decision is recorded' );
+		$this->ok(
+			! in_array( $id, $ask(), true ),
+			'face skip: and it stops being offered, which is the whole point'
+		);
+
+		// Asking twice is a volunteer double-clicking, not an error.
+		$this->ok( true === gasf_crm_face_photo_skip( $id ), 'face skip: passing it over twice is not an error' );
+
+		// The undo. Bulk in the admin panel, because a photo the queue no
+		// longer offers cannot be reached from the labeler that passed it over.
+		gasf_crm_face_photo_skip( $id, false );
+		$this->ok(
+			! gasf_crm_face_photo_skipped( $id ) && in_array( $id, $ask(), true ),
+			'face skip: and it can be put back in the queue'
+		);
+	}
+
+	/**
 	 * Face records follow a person when the name is corrected or merged.
 	 *
 	 * Labels, rejections, suggestions, and predictions all store the name as a

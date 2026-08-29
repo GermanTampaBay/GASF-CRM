@@ -776,6 +776,85 @@ function gasf_crm_face_unignore( $attachment_id, array $box, $iw, $ih ) {
 	return true;
 }
 
+/* ---------------------------------------------------------------------------
+ * Passing over a WHOLE photo
+ *
+ * A different answer from "not a person to tag", and needed for a different
+ * problem. Putting one face down is for a poster on the wall or a reflection;
+ * this is for the crowd shot at the back of a hall where sixty strangers are
+ * looking the other way and nobody at the club will ever know a single one of
+ * them. There is nothing to put down face by face - the whole photograph is
+ * the wrong photograph to be asked about.
+ *
+ * It matters more than it sounds, because the label queue is a fixed number of
+ * photos. Every crowd shot in it is a photo of people we might actually name
+ * that the scanner never got to, and every run pays for it again: the client
+ * downloads each queued photo and runs the detector over it before the browser
+ * even opens. Passing one over here means it is never sent, never downloaded,
+ * and never embedded.
+ *
+ * Stored on the server rather than in the local faces.db, for the same reason
+ * an ignored face is: it has to survive a rebuilt database, a reinstall, or a
+ * different machine. And it is a plain flag with a date and a name against it,
+ * so "offer them all again" is one button rather than an archaeology project.
+ * ------------------------------------------------------------------------ */
+
+/** Has a volunteer said this whole photo is not worth being asked about? */
+function gasf_crm_face_photo_skipped( $attachment_id ) {
+	$raw = get_post_meta( (int) $attachment_id, '_gasf_face_photo_skipped', true );
+	return is_array( $raw ) && ! empty( $raw['at'] );
+}
+
+/**
+ * Pass a photo over, or put it back.
+ *
+ * @param int  $attachment_id The photo.
+ * @param bool $on            True to pass over, false to offer it again.
+ * @return true|WP_Error True whether or not this was already the case: asking
+ *                       twice is a double-click, not an error.
+ */
+function gasf_crm_face_photo_skip( $attachment_id, $on = true ) {
+	$id = (int) $attachment_id;
+	if ( ! $id ) {
+		return new WP_Error( 'gasf_crm_bad', 'A photo is required.', array( 'status' => 400 ) );
+	}
+	if ( $on ) {
+		update_post_meta( $id, '_gasf_face_photo_skipped', array(
+			'at' => current_time( 'mysql', true ),
+			'by' => get_current_user_id(),
+		) );
+		// Verified rather than assumed: this codebase has been bitten by writes
+		// that reported success having done nothing.
+		if ( ! gasf_crm_face_photo_skipped( $id ) ) {
+			return new WP_Error( 'gasf_crm_store', 'That photo could not be passed over.', array( 'status' => 500 ) );
+		}
+	} else {
+		delete_post_meta( $id, '_gasf_face_photo_skipped' );
+	}
+	return true;
+}
+
+/** How many photos are being passed over, for the admin panel to own up to. */
+function gasf_crm_face_photos_skipped_count() {
+	global $wpdb;
+	return (int) $wpdb->get_var( // phpcs:ignore WordPress.DB
+		"SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_photo_skipped'"
+	);
+}
+
+/** Offer every passed-over photo again. Returns how many were put back. */
+function gasf_crm_face_photos_unskip_all() {
+	global $wpdb;
+	$n = (int) $wpdb->query( // phpcs:ignore WordPress.DB
+		"DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_photo_skipped'"
+	);
+	// The rows are gone from the table, but get_post_meta answers from a cache
+	// that has not been told, so the queue would keep skipping them until
+	// something else happened to flush it.
+	wp_cache_flush();
+	return $n;
+}
+
 /**
  * Remember one false person recommendation and remove only that recommendation.
  *
@@ -2120,6 +2199,43 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	/**
+	 * Pass a whole photo over, or put it back.
+	 *
+	 * Takes the scanner key or a volunteer session, like /ignore does: this is
+	 * pressed in the labeler, which holds the key, but it is an ordinary
+	 * volunteer decision and there is no reason a signed-in one could not make
+	 * it from somewhere else later.
+	 */
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/skip', array(
+		'methods'             => 'POST',
+		'permission_callback' => $either_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$id    = (int) $req->get_param( 'photo' );
+			$clear = (bool) $req->get_param( 'clear' );
+
+			if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) {
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
+
+			$done = gasf_crm_face_photo_skip( $id, ! $clear );
+			if ( is_wp_error( $done ) ) { return $done; }
+
+			gasf_crm_log( sprintf(
+				'CRM faces: photo #%d %s — user %d',
+				$id,
+				$clear ? 'put back in the labelling queue' : 'passed over for labelling',
+				get_current_user_id()
+			) );
+
+			return array(
+				'ok'      => true,
+				'photo'   => $id,
+				'skipped' => gasf_crm_face_photo_skipped( $id ),
+			);
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/faces/reject', array(
 		'methods'             => 'POST',
 		'permission_callback' => $volunteer_guard,
@@ -2226,6 +2342,11 @@ add_action( 'rest_api_init', function () {
 				'post_mime_type' => 'image',
 				'meta_query'     => array(
 					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
+					// Excluded in the QUERY rather than skipped in the loop below.
+					// The limit is what the scanner is willing to download and run
+					// a detector over, so a page half full of photos it will throw
+					// away is the exact problem passing them over is meant to fix.
+					array( 'key' => '_gasf_face_photo_skipped', 'compare' => 'NOT EXISTS' ),
 				),
 				'date_query'     => $date_query,
 			) );
@@ -2504,6 +2625,14 @@ function gasf_crm_faces_admin_handle( $act ) {
 		return '<div class="notice notice-success"><p>Scanner key revoked. The home scanner will stop being able to poll until a new one is issued.</p></div>';
 	}
 
+	if ( 'faces_unskip_all' === $act ) {
+		$n = gasf_crm_face_photos_unskip_all();
+		gasf_crm_log( sprintf( 'CRM faces: %d passed-over photo(s) put back by %s',
+			$n, gasf_crm_display_name( get_current_user_id() ) ) );
+		return '<div class="notice notice-success"><p>' . (int) $n . ' photo(s) put back in the labelling queue. '
+			. 'The scanner will offer them again on its next run.</p></div>';
+	}
+
 	if ( 'faces_rescan' === $act ) {
 		global $wpdb;
 		$n = $wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
@@ -2546,6 +2675,7 @@ function gasf_crm_faces_admin_section() {
 	global $wpdb;
 	$scanned = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
 	$sugg    = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_suggestions'" ); // phpcs:ignore WordPress.DB
+	$skipped = gasf_crm_face_photos_skipped_count();
 
 	echo '<h3>Face suggestions</h3>';
 	echo '<p class="description" style="max-width:820px">A machine at home scans library photos and suggests who is in them. '
@@ -2562,6 +2692,7 @@ function gasf_crm_faces_admin_section() {
 		. '<tr><td>Waiting to be scanned</td><td>%d</td></tr>'
 		. '<tr><td>Learn-eligible photos</td><td>%d</td></tr>'
 		. '<tr><td>Learn-marked photos</td><td>%d</td></tr>'
+		. '<tr><td>Passed over for labelling</td><td>%d</td></tr>'
 		. '</tbody></table>',
 		$has
 			? '<span style="color:#2c7a3f">&#10003; issued</span>' . ( $made ? ' <span class="description">' . esc_html( $made ) . ' UTC</span>' : '' )
@@ -2569,7 +2700,8 @@ function gasf_crm_faces_admin_section() {
 		esc_html( $auto_label ),
 		$scanned, $sugg, gasf_crm_faces_unscanned_count(),
 		(int) ( $metrics['eligible'] ?? 0 ),
-		(int) ( $metrics['learned'] ?? 0 )
+		(int) ( $metrics['learned'] ?? 0 ),
+		$skipped
 	);
 
 	echo '<form method="post" style="max-width:820px;margin:0 0 12px;padding:10px;border:1px solid #dcdcde;background:#fff">'
@@ -2629,8 +2761,11 @@ function gasf_crm_faces_admin_section() {
 		'faces_key_make'   => array( $has ? 'Issue a new key' : 'Issue a scanner key', $has ? 'Issue a new key? The current one stops working immediately.' : '' ),
 		'faces_key_revoke' => array( 'Revoke the key', 'Revoke the scanner key? The home scanner will stop being able to poll.' ),
 		'faces_rescan'     => array( 'Rescan everything', 'Clear every scan stamp so the whole library is looked at again?' ),
+		'faces_unskip_all' => array( 'Offer passed-over photos again', 'Put every passed-over photo back in the labelling queue?' ),
 	) as $act => $bits ) {
 		if ( 'faces_key_revoke' === $act && ! $has ) { continue; }
+		// Nothing has been passed over, so the button would be a puzzle.
+		if ( 'faces_unskip_all' === $act && ! $skipped ) { continue; }
 		printf( '<form method="post" style="display:inline-block;margin:0 6px 6px 0"%s>',
 			$bits[1] ? ' onsubmit="return confirm(' . "'" . esc_js( $bits[1] ) . "'" . ')"' : '' );
 		wp_nonce_field( 'gasf_crm' );
