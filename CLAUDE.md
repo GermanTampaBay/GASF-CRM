@@ -61,7 +61,13 @@ ref costs ten seconds and has caught real breakage.
 
 **Step 5 is not optional, and is not a formality.** Run it after every deploy,
 including the ones that are "obviously safe", and read the number. Two hours of
-this project's history are the argument:
+this project's history are the argument.
+
+**It is also not free.** The suite runs against live WordPress because there is
+no second environment, so it competes with whoever is using the site — and one
+of its tests briefly holds the scanner key (see the fifth trap). If a volunteer
+is mid-run on the labelling board, say so before deploying, or expect their
+session to notice. The argument for running it anyway:
 
 - **v2.21.0** shipped a revision helper that read "no `_gasf_photo_rev` row" as
   "somebody else won". 1,335 of 3,654 photos predate that meta, so approve,
@@ -273,11 +279,13 @@ being filed under a thread id that belonged to another table**.
 
 ---
 
-## Four traps worth remembering
+## Five traps worth remembering
 
-All four are the same shape: **state that is correct when you read it and wrong
+All five are the same shape: **state that is correct when you read it and wrong
 by the time you use it**, failing silently, looking exactly like the normal
-empty case. None produced an error. Three reached production.
+failure everyone already knows about. None produced an error a reader could
+trust. Four reached production, and the fifth was caused by the suite that is
+supposed to catch the others.
 
 **`update_post_meta`'s previous-value guard is void at 0.** It only adds the
 expected value to its WHERE clause `if ( ! empty( $prev_value ) )`, and PHP's
@@ -307,6 +315,24 @@ yet**. Capture the id into a local the instant the insert returns, before
 anything else can insert. The other three `insert_id` reads in the plugin were
 audited and each reads immediately after its own insert.
 
+**A test revoked the live credential another machine was using.**
+`test_face_key` issues a scanner key, checks it is stored hashed, revokes it,
+and checks revoking works. There is only one key and the functions are hardcoded
+to its option, so it does all that to the REAL one — snapshotting the option and
+restoring it in teardown, which is the right shape for a value nobody else is
+reading. A live credential is not that value. Teardown runs after every
+remaining test, so the key was missing for most of a minute, and during that
+minute a volunteer labelling photos on the scanning machine was told **"Not
+signed in"** — indistinguishable from a key that has gone bad, and whose advice
+is to issue a new one, which would have broken the config that was working
+perfectly. Seventy-seven photos in. **Restore a live credential where you
+took it, in a `finally`, and then assert it came back** — a restore that quietly
+did nothing looks exactly like one that worked. And on the client: an auth
+refusal is only proof of a bad key if the key has **never** been accepted on
+that run. One that was working two seconds ago and is refused now is something
+changing underneath a working session, and the answer to that is to wait and ask
+again, not to throw the session away.
+
 **Rejecting a face NAME made the face permanently unresolved.** The scanner
 counts a face as resolved only if it has an explicit label, is the lone face on
 a single-named photo, or matches a reference whose name is not rejected. So
@@ -321,6 +347,6 @@ shape generally — a negative signal wired into a positive test can invert it.
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.26.1** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.35.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.

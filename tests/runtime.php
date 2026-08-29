@@ -1824,24 +1824,60 @@ final class GASF_CRM_Selftest {
 		if ( $removed_term ) { wp_delete_term( (int) $removed_term->term_id, 'gasf_photo_person' ); }
 	}
 
-	/** The scanner key: hashed at rest, and the only way through the guard. */
+	/**
+	 * The scanner key: hashed at rest, and the only way through the guard.
+	 *
+	 * This test issues and revokes the REAL key. There is only one, and the
+	 * functions under test are hardcoded to its option, so there is no second
+	 * key to practise on — the same "no second environment" this whole suite
+	 * lives with.
+	 *
+	 * For as long as the option is not the live key, every request the home
+	 * scanner makes is refused, and a volunteer at the labelling board is told
+	 * "Not signed in" — which reads exactly like a key that has gone bad, and
+	 * whose advice is to issue a new one, which would break the config that was
+	 * working perfectly. That is not hypothetical: a labelling session died
+	 * mid-run because this suite was run underneath it, seventy-seven photos in.
+	 *
+	 * So the live key goes back HERE, in a finally, and not at teardown.
+	 * Snapshot-and-restore is the right shape for an option nobody else is
+	 * reading; for a live credential it turned a few milliseconds into the whole
+	 * rest of the run. The snapshot stays as the backstop for a fatal.
+	 */
 	public function test_face_key() {
 		$this->snapshot_option( 'gasf_crm_faces_key' );
 		$this->snapshot_option( 'gasf_crm_faces_key_made' );
+		$live_key  = (string) get_option( 'gasf_crm_faces_key', '' );
+		$live_made = (string) get_option( 'gasf_crm_faces_key_made', '' );
 
-		$key = gasf_crm_faces_key_make();
-		$this->ok( 0 === strpos( $key, 'gasf_face_' ), 'faces: the key is recognisably ours' );
-		$this->ok( strlen( $key ) > 40, 'faces: the key is long enough to be unguessable' );
+		try {
+			$key = gasf_crm_faces_key_make();
+			$this->ok( 0 === strpos( $key, 'gasf_face_' ), 'faces: the key is recognisably ours' );
+			$this->ok( strlen( $key ) > 40, 'faces: the key is long enough to be unguessable' );
 
-		$stored = get_option( 'gasf_crm_faces_key', '' );
-		$this->ok( '' !== $stored && false === strpos( $stored, $key ),
-			'faces: the key is stored hashed, never in the clear' );
-		$this->ok( wp_check_password( $key, $stored ), 'faces: the stored hash verifies the real key' );
-		$this->ok( ! wp_check_password( $key . 'x', $stored ), 'faces: a doctored key does not verify' );
+			$stored = get_option( 'gasf_crm_faces_key', '' );
+			$this->ok( '' !== $stored && false === strpos( $stored, $key ),
+				'faces: the key is stored hashed, never in the clear' );
+			$this->ok( wp_check_password( $key, $stored ), 'faces: the stored hash verifies the real key' );
+			$this->ok( ! wp_check_password( $key . 'x', $stored ), 'faces: a doctored key does not verify' );
 
-		gasf_crm_faces_key_revoke();
-		$this->ok( '' === gasf_crm_faces_key_hash(), 'faces: revoking really removes the key' );
-		$this->ok( is_wp_error( gasf_crm_faces_guard() ), 'faces: with no key issued, the guard refuses' );
+			gasf_crm_faces_key_revoke();
+			$this->ok( '' === gasf_crm_faces_key_hash(), 'faces: revoking really removes the key' );
+			$this->ok( is_wp_error( gasf_crm_faces_guard() ), 'faces: with no key issued, the guard refuses' );
+		} finally {
+			if ( '' !== $live_key ) {
+				update_option( 'gasf_crm_faces_key', $live_key, false );
+				if ( '' !== $live_made ) { update_option( 'gasf_crm_faces_key_made', $live_made, false ); }
+			}
+		}
+
+		// Checked, not assumed. A scanner mid-run depends on that line having
+		// worked, and a restore that quietly did nothing looks exactly like one
+		// that worked — right up until somebody's session dies.
+		$this->ok(
+			$live_key === (string) get_option( 'gasf_crm_faces_key', '' ),
+			'faces: the live key is back before anything else in the suite runs'
+		);
 	}
 
 	/** Origin telemetry expires; fresh records and the latch survive. */

@@ -385,35 +385,46 @@ class Api:
         self.s.headers["X-GASF-Faces-Key"] = key
         self.s.headers["User-Agent"] = USER_AGENT
         self.s.headers["Accept"] = "application/json"
+        # Whether this key has EVER been accepted by this server on this run.
+        # It is the difference between "you pasted the wrong key" and "something
+        # changed underneath a working session", which are the same HTTP status
+        # and want opposite answers.
+        self._authed_once = False
 
     # How many times a refusal that looks like the HOST rather than the CRM is
     # tried again before giving up, and how long to wait between attempts.
-    AUTH_RETRIES = 4
+    AUTH_RETRIES = 5
     AUTH_BACKOFF = 2.0
 
     def _auth_verdict(self, r, url):
         """
-        Tell a wrong key from a doorman having a moment.
+        Tell a wrong key from a working key that stopped working for a moment.
 
-        Both arrive as 403. The CRM answers with its own JSON - a code and a
-        message - and that genuinely means the key is not accepted, so there is
-        no point trying again. The shared host answers with an HTML page when
-        mod_security or a rate limiter decides it has seen enough requests, and
-        that IS worth trying again: it says nothing about the key, and a run of
-        five hundred photos should not die on the hundred and seventy-sixth
-        because a doorman blinked.
+        The first version of this asked WHO was refusing: the CRM answering with
+        its own JSON meant the key was not accepted and there was no point
+        trying again, while an HTML page from the shared host meant mod_security
+        or a rate limiter and was worth retrying.
 
-        Before the key moved into headers, a 401/403/406 quietly retried with
-        the key in the query string, which absorbed these without anybody
-        noticing. Taking that out - rightly, a key in a URL lands in the access
-        log - left every transient refusal fatal. This is the part that should
-        have replaced it.
+        That was half the answer, and the missing half killed a labelling
+        session seventy-seven photos in. The CRM really did refuse, with its own
+        JSON, because the runtime suite had briefly revoked the live key to test
+        that revoking works. The key was fine; it was fine before and fine two
+        seconds later. Refusing to retry on the grounds that WordPress was the
+        one saying no threw away a session over a gap measured in milliseconds -
+        and told the volunteer to issue a new key, which would have broken the
+        config that was working.
+
+        So the question is not only who refused, but WHEN. A key that has never
+        been accepted on this run is a key somebody typed wrongly: stop, and say
+        so. A key that has been accepted and is now refused is something
+        changing underneath a working session, and the right answer to that is
+        to wait a moment and ask again.
 
         Returns "fatal", or "retry".
         """
         body = (r.text or "").strip()
         looks_ours = body.startswith("{") and ("gasf" in body or "rest_" in body)
-        if looks_ours:
+        if looks_ours and not self._authed_once:
             return "fatal"
         return "retry"
 
@@ -423,6 +434,10 @@ class Api:
         for attempt in range(1, self.AUTH_RETRIES + 1):
             r = self.s.request(method, url, **kw)
             if r.status_code not in (401, 403, 406):
+                # Only a real answer counts as proof the key works. A 404 is the
+                # route not matching, which happens before any key is looked at.
+                if 200 <= r.status_code < 300:
+                    self._authed_once = True
                 return r
 
             verdict = self._auth_verdict(r, url)
@@ -440,6 +455,15 @@ class Api:
                 # hammering it is how a pause becomes a ban.
                 time.sleep(self.AUTH_BACKOFF * attempt)
 
+        if self._authed_once:
+            sys.exit(
+                "The server stopped accepting the key part-way through this run: %s\n"
+                "The key is almost certainly fine - it was accepted earlier in this "
+                "same run. Do NOT issue a new one; that would break a config that "
+                "works. This is what a key being reissued, or the runtime test suite "
+                "running against the live site, looks like from here. Wait a moment "
+                "and run again - work already saved is kept." % last
+            )
         sys.exit(
             "The server kept refusing requests, and not because of the key: %s\n"
             "That is the host (mod_security or a rate limit), not WordPress. "
@@ -4932,11 +4956,21 @@ def selftest():
         def __init__(self, text):
             self.text = text
     _api_probe = Api.__new__(Api)
+    _api_probe._authed_once = False
     check_that(
         _api_probe._auth_verdict(_FakeResp('{"code":"gasf_crm_403","message":"no"}'), "u") == "fatal"
         and _api_probe._auth_verdict(_FakeResp("<html><body>Not Acceptable</body></html>"), "u") == "retry"
         and _api_probe._auth_verdict(_FakeResp(""), "u") == "retry",
-        "scanner: a refusal from the CRM stops the run, one from the host is retried",
+        "scanner: a refusal before the key has ever worked stops the run",
+    )
+    # The half that was missing, and that cost a labeling session: the CRM
+    # refusing a key it has already been accepting is not a bad key.
+    _api_probe._authed_once = True
+    check_that(
+        _api_probe._auth_verdict(
+            _FakeResp('{"code":"gasf_crm_auth","message":"Not signed in.","data":{"status":401}}'), "u"
+        ) == "retry",
+        "scanner: a refusal AFTER the key has been working is waited out, not fatal",
     )
     check_that(
         _caption_error_line(requests.exceptions.ConnectionError("boom")).startswith("the local captioner is not running")
