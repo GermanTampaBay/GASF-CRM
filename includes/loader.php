@@ -92,6 +92,9 @@ if ( true ) {
 	// After photos-library.php: editing gates on in_library, bumps the same
 	// revision, and answers with the same card.
 	require_once GASF_CRM_DIR . '/photos-edit.php';
+	// After photos-upload.php: an import hands its bytes to
+	// gasf_crm_photo_upload_one() rather than taking photos in itself.
+	require_once GASF_CRM_DIR . '/photos-google.php';
 	// After photos-library.php: the backup walks the library and reads cards.
 	require_once GASF_CRM_DIR . '/photos-backup.php';
 	// After photos-upload.php: the public doors hand guests' photos to

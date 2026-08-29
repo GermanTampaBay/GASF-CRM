@@ -686,6 +686,16 @@ function gasf_crm_render_inbox() {
 			         the phone had just dumped it into. */ ?>
 			<input type="file" id="upinput" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/avif,.heic,.heif,.avif,video/mp4,video/quicktime" multiple hidden>
 		</div>
+		<?php /* The same photos are usually already in the volunteer's Google
+		         Photos, and downloading them to a laptop only to upload them
+		         again is a chore with nothing to show for it. Google removed
+		         library browsing for apps like this in 2025; what is left is a
+		         picker the volunteer drives, which is the better shape anyway -
+		         the club never sees a photo that was not handed over. */ ?>
+		<div class="gphrow">
+			<button class="btn sec" id="gphgo" type="button">Import from Google Photos&hellip;</button>
+			<span class="muted" id="gphmsg">You choose the photos in Google's own picker. The club never browses your library.</span>
+		</div>
 		<div id="uplist" class="uplist"></div>
 		<div class="actions" style="margin-top:14px">
 			<button class="btn" id="upgo" type="button" disabled>Upload</button>

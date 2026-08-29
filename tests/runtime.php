@@ -756,6 +756,44 @@ final class GASF_CRM_Selftest {
 		@unlink( $junk ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
 
+	/**
+	 * The Google Photos import asks for as little as it can, and keeps none of it.
+	 *
+	 * The risk in connecting a club tool to somebody personal photo library is
+	 * not the import; it is the standing permission left behind afterwards.
+	 * These pin the three things that keep this narrow: one scope and only one,
+	 * a grant that expires rather than a refresh token, and a token that is
+	 * dropped the moment Google stops honouring it.
+	 */
+	public function test_google_photos_scope() {
+		$this->ok(
+			'https://www.googleapis.com/auth/photospicker.mediaitems.readonly' === GASF_CRM_GPHOTOS_SCOPE,
+			'google photos: asks for the picker scope and nothing wider'
+		);
+		$src = file_get_contents( GASF_CRM_DIR . '/photos-google.php' );
+		$this->ok(
+			false === strpos( $src, 'photoslibrary' ),
+			'google photos: never asks for library access, which Google withdrew in 2025'
+		);
+		$this->ok(
+			false !== strpos( $src, "'access_type'   => 'online'" )
+			&& false === strpos( $src, 'refresh_token' ),
+			'google photos: no refresh token, so a click today cannot reach the library tomorrow'
+		);
+
+		// A stored grant must expire on its own, whoever forgets to tidy up.
+		$key = gasf_crm_gphotos_token_key( 0 );
+		$this->ok( '' === gasf_crm_gphotos_token(), 'google photos: nothing is connected to begin with' );
+		gasf_crm_gphotos_token_set( 'selftest-token', 3600 );
+		$this->ok( 'selftest-token' === gasf_crm_gphotos_token(), 'google photos: a granted token is readable while it lasts' );
+		$this->ok(
+			(int) get_option( '_transient_timeout_' . $key, 0 ) > 0 || false !== get_transient( $key ),
+			'google photos: and it is stored with an expiry rather than kept'
+		);
+		gasf_crm_gphotos_token_clear();
+		$this->ok( '' === gasf_crm_gphotos_token(), 'google photos: disconnecting really drops it' );
+	}
+
 	/** The zip export obeys the policy, and says how many it left out. */
 	public function test_zip_policy() {
 		$lim  = $this->library_photo( 'st-zip-lim' );

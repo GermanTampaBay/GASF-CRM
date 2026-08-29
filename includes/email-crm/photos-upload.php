@@ -461,7 +461,28 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	// EXIF is read on the way in by the catalogue module's add_attachment hook,
 	// which is what puts the date, the time and the geofence guess on the photo
 	// before the scrub below takes them out of the file.
-	$id = media_handle_upload( 'file', 0, array(), array( 'test_form' => false ) );
+	/*
+	 * A browser upload and a file the server fetched itself differ in exactly
+	 * one respect: whether PHP put it there.
+	 *
+	 * media_handle_upload insists on $_FILES and is_uploaded_file, which is
+	 * right for a form post and impossible for bytes pulled from Google Photos.
+	 * media_handle_sideload takes the same array without that test. Branching
+	 * here rather than writing a second importer means Google Photos inherits
+	 * every guard above it - the byte cap, the decompression-bomb check, HEIC
+	 * conversion, the duplicate fingerprint, consent, the private review
+	 * folder - instead of a parallel path that drifts away from them.
+	 */
+	if ( ! empty( $in['sideload'] ) ) {
+		$id = media_handle_sideload(
+			array( 'name' => $f['name'], 'tmp_name' => $f['tmp_name'] ),
+			0,
+			null,
+			array( 'test_form' => false )
+		);
+	} else {
+		$id = media_handle_upload( 'file', 0, array(), array( 'test_form' => false ) );
+	}
 	if ( ! $isVideo ) {
 		remove_filter( 'intermediate_image_sizes_advanced', $no_sizes, 99 );
 		remove_filter( 'big_image_size_threshold', $defer_sizes, 99 );

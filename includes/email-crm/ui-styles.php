@@ -232,6 +232,9 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .fwdhand{display:block;margin:8px 0 0;font-size:13px}
 .fwdhand .muted{display:block;margin:3px 0 0 22px;font-size:12px;line-height:1.45}
 
+.gphrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 0}
+.gphrow .muted{font-size:12px;line-height:1.45}
+
 .zipconv{display:inline-flex;align-items:baseline;gap:6px;font-size:13px;margin-left:4px}
 .zipconv .muted{font-size:12px}
 

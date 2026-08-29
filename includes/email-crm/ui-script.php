@@ -3673,6 +3673,110 @@ function gasf_crm_render_inbox_script() {
 		};
 	}
 
+	/* ============ import from Google Photos ============
+	 *
+	 * Three steps, none of which the club drives: ask Google for permission
+	 * (once, and only for the picker scope), open Google's own picker in a new
+	 * tab, then bring back exactly what was chosen. The CRM cannot browse a
+	 * library, search one, or see anything that was not handed over.
+	 *
+	 * The polling interval comes from Google rather than from us — asking
+	 * faster than told is how an app gets rate limited.
+	 */
+	var gphgo = document.getElementById('gphgo');
+	if (gphgo) {
+		var gphmsg = document.getElementById('gphmsg');
+		var gphSay = function(t){ if (gphmsg) { gphmsg.textContent = t; } };
+		var gphBusy = function(on, label){
+			gphgo.disabled = !!on;
+			gphgo.textContent = label || 'Import from Google Photos…';
+		};
+
+		var gphImport = function(session){
+			gphBusy(true, 'Bringing them in…');
+			gphSay('Downloading the photos you chose. This can take a minute.');
+			return api('/photos/google/import', { method:'POST', body: JSON.stringify({
+				session: session,
+				// The batch fields from the upload form above, so an import is
+				// described exactly like a drag-and-drop and lands with the same
+				// date, place and permission rather than as untagged strangers.
+				taken: upEl('update').value,
+				place: upEl('upplace').value,
+				event: upEl('upevent').value,
+				event_id: upEventId(),
+				group: upEl('upgroup').value,
+				flyer: upEl('upflyer').checked ? '1' : '0',
+				note: upEl('upnote').value,
+				consent_scope: upEl('upconsent').checked ? 'full' : 'limited',
+				op_id: nextOpId('gphotos-' + session)
+			}) }).then(function(r){
+				var bits = [];
+				if (r.added)   { bits.push(r.added + ' added'); }
+				// Said, not swallowed: re-picking a set imported last week is
+				// the commonest thing to do, and silence would read as failure.
+				if (r.skipped) { bits.push(r.skipped + ' already here'); }
+				if (r.errors && r.errors.length) { bits.push(r.errors.length + ' could not be taken'); }
+				gphSay(bits.length ? bits.join(', ') + '.' : 'Nothing came back.');
+				if (r.errors && r.errors.length) { gphSay(bits.join(', ') + '. ' + r.errors[0]); }
+				gphBusy(false);
+				if (r.added && typeof loadPhotos === 'function') { loadPhotos(); }
+			});
+		};
+
+		var gphWait = function(session, every){
+			// Google says how often to ask; honour it, and give up rather than
+			// poll a tab somebody closed an hour ago.
+			var tries = 0, cap = Math.ceil((15 * 60) / Math.max(2, every));
+			var tick = function(){
+				if (++tries > cap) {
+					gphBusy(false);
+					gphSay('Gave up waiting. Press the button again when you are ready to choose.');
+					return;
+				}
+				api('/photos/google/poll?session=' + encodeURIComponent(session))
+					.then(function(r){
+						if (r.picked) { gphImport(session).catch(function(e){ gphBusy(false); gphSay(e.message); }); return; }
+						setTimeout(tick, Math.max(2, every) * 1000);
+					})
+					.catch(function(e){ gphBusy(false); gphSay(e.message); });
+			};
+			setTimeout(tick, Math.max(2, every) * 1000);
+		};
+
+		gphgo.onclick = function(){
+			gphBusy(true, 'Connecting…');
+			gphSay('Asking Google for permission to receive the photos you pick.');
+			api('/photos/google/start', { method:'POST', body: JSON.stringify({}) })
+				.then(function(r){
+					if (r.connected) { return gphOpenPicker(); }
+					// A popup, so the half-filled upload form behind it survives.
+					var w = window.open(r.url, 'gasfgoogle', 'width=520,height=680');
+					if (!w) { gphBusy(false); gphSay('Your browser blocked the Google window. Allow popups for this site and try again.'); return; }
+					var onMsg = function(ev){
+						if (ev.origin !== window.location.origin || !ev.data || !ev.data.gasfGooglePhotos) { return; }
+						window.removeEventListener('message', onMsg);
+						if (ev.data.gasfGooglePhotos !== 'ok') { gphBusy(false); gphSay('Google did not grant access, so nothing was connected.'); return; }
+						gphOpenPicker();
+					};
+					window.addEventListener('message', onMsg);
+				})
+				.catch(function(e){ gphBusy(false); gphSay(e.message); });
+		};
+
+		var gphOpenPicker = function(){
+			gphBusy(true, 'Opening the picker…');
+			gphSay('Choose your photos in the Google window, then press Done there.');
+			return api('/photos/google/session', { method:'POST', body: JSON.stringify({}) })
+				.then(function(r){
+					window.open(r.pickerUri, 'gasfpicker');
+					gphBusy(true, 'Waiting for your choice…');
+					gphSay('Waiting for you to finish choosing in Google Photos.');
+					gphWait(r.session, r.poll || 5);
+				})
+				.catch(function(e){ gphBusy(false); gphSay(e.message); });
+		};
+	}
+
 	var lzip = document.getElementById('lzip');
 	if (lzip) {
 		lzip.onclick = function(){
