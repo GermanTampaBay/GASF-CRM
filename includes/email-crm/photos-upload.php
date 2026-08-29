@@ -494,6 +494,41 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	if ( is_wp_error( $id ) ) { return $id; }
 	$id = (int) $id;
 
+	/*
+	 * Make sure the recorded path is RELATIVE, whatever WordPress just wrote.
+	 *
+	 * _wp_attached_file is supposed to hold a path relative to the uploads
+	 * basedir, and everything downstream depends on it: gasf_crm_photo_is_private()
+	 * decides by testing whether it starts with the review folder, and from
+	 * that follows whether the CRM serves the photo through the authenticated
+	 * route or hands out an ordinary uploads URL.
+	 *
+	 * WordPress derives it with _wp_relative_upload_path(), which reads
+	 * wp_upload_dir() - and that caches per request. If anything asked for the
+	 * uploads directory before the upload_dir filter above went on, the cached
+	 * answer has the REAL basedir, the review folder does not sit inside it,
+	 * and the absolute path is stored verbatim. The photo is then in the
+	 * private folder while claiming not to be: is_private() says no, the grid
+	 * asks for a public URL, the host's image CDN is handed a filesystem path,
+	 * and the volunteer sees a broken thumbnail they cannot open.
+	 *
+	 * Corrected here rather than by fighting the cache, because this is the one
+	 * fact the rest of the module reads and it can be checked outright.
+	 */
+	$rel = (string) get_post_meta( $id, '_wp_attached_file', true );
+	if ( '' !== $rel && '/' === $rel[0] && function_exists( 'gasf_crm_photo_private_root' ) ) {
+		$root = (string) gasf_crm_photo_private_root();
+		$base = $root ? dirname( $root ) : '';
+		if ( $base && 0 === strpos( $rel, $base . '/' ) ) {
+			$fixed = ltrim( substr( $rel, strlen( $base ) ), '/' );
+			update_post_meta( $id, '_wp_attached_file', $fixed );
+			// Verified, not assumed: this is the value everything else trusts.
+			if ( gasf_crm_photo_is_private( $id ) ) {
+				gasf_crm_log( sprintf( 'CRM upload: normalised the stored path for media #%d to %s', $id, $fixed ) );
+			}
+		}
+	}
+
 	// The sweep can still have reached it if this request was slow enough and an
 	// intake ran before the stamp landed. Saying so beats a confusing failure
 	// three steps further down, against a post that is no longer there.
