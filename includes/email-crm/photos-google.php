@@ -95,6 +95,17 @@ function gasf_crm_gphotos_api( $method, $url, $token, $body = null ) {
 	$code = (int) wp_remote_retrieve_response_code( $res );
 	$json = json_decode( (string) wp_remote_retrieve_body( $res ), true );
 
+	/*
+	 * Upstream failures are reported as 409, never 5xx.
+	 *
+	 * A WP_Error carrying status 502 renders as perfectly good JSON, and this
+	 * host's proxy then throws it away and substitutes its own HTML error page
+	 * for anything in the 500s - so the volunteer saw "the server returned an
+	 * error page" while the message that named the actual problem (an API not
+	 * enabled, with the console link to enable it) never left the building. A
+	 * 4xx passes through untouched. The failure is upstream either way; what
+	 * matters is that its explanation survives the trip.
+	 */
 	$said = isset( $json['error']['message'] ) ? trim( (string) $json['error']['message'] ) : '';
 
 	if ( 401 === $code ) {
@@ -126,12 +137,12 @@ function gasf_crm_gphotos_api( $method, $url, $token, $body = null ) {
 		}
 		return new WP_Error( 'gasf_crm_gph',
 			( $said ?: 'Google refused the request.' ) . $hint,
-			array( 'status' => 502 ) );
+			array( 'status' => 409 ) );
 	}
 
 	if ( $code < 200 || $code >= 300 ) {
 		gasf_crm_log( 'CRM Google Photos: ' . $code . ' from ' . $url . ' — ' . ( $said ?: 'no message' ) );
-		return new WP_Error( 'gasf_crm_gph', $said ?: ( 'Google answered ' . $code ), array( 'status' => 502 ) );
+		return new WP_Error( 'gasf_crm_gph', $said ?: ( 'Google answered ' . $code ), array( 'status' => 409 ) );
 	}
 	return is_array( $json ) ? $json : array();
 }
@@ -216,7 +227,7 @@ add_action( 'rest_api_init', function () {
 				array( 'timeout' => 20 )
 			);
 			if ( is_wp_error( $res ) ) {
-				return new WP_Error( 'gasf_crm_gph', 'Could not check that permission with Google. Try again.', array( 'status' => 502 ) );
+				return new WP_Error( 'gasf_crm_gph', 'Could not check that permission with Google. Try again.', array( 'status' => 409 ) );
 			}
 			$info = json_decode( (string) wp_remote_retrieve_body( $res ), true );
 			if ( ! is_array( $info ) || empty( $info['aud'] ) ) {
@@ -265,7 +276,7 @@ add_action( 'rest_api_init', function () {
 			$s = gasf_crm_gphotos_api( 'POST', 'https://photospicker.googleapis.com/v1/sessions', $token, array() );
 			if ( is_wp_error( $s ) ) { return $s; }
 			if ( empty( $s['id'] ) || empty( $s['pickerUri'] ) ) {
-				return new WP_Error( 'gasf_crm_gph', 'Google did not open a picking session.', array( 'status' => 502 ) );
+				return new WP_Error( 'gasf_crm_gph', 'Google did not open a picking session.', array( 'status' => 409 ) );
 			}
 			return array(
 				'ok'        => true,
