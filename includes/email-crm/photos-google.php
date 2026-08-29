@@ -85,8 +85,20 @@ function gasf_crm_gphotos_api( $method, $url, $token, $body = null ) {
 		),
 	);
 	if ( null !== $body ) {
+		/*
+		 * An empty PHP array encodes as [], and Google wants {}.
+		 *
+		 * json_encode cannot tell an empty list from an empty map - both are
+		 * array() - so a request meaning "no options" went out as an empty JSON
+		 * ARRAY and was refused with "Root element must be a message", which is
+		 * true and unhelpful in equal measure. Anything non-empty and
+		 * associative already encodes as an object, so only the empty case
+		 * needs saying.
+		 */
 		$args['headers']['Content-Type'] = 'application/json';
-		$args['body']                    = wp_json_encode( $body );
+		$args['body']                    = wp_json_encode(
+			( is_array( $body ) && ! $body ) ? new stdClass() : $body
+		);
 	}
 
 	$res = wp_remote_request( $url, $args );
