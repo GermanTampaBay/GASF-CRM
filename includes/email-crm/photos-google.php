@@ -373,13 +373,12 @@ add_action( 'rest_api_init', function () {
 			}
 
 			/*
-			 * download_url() lives in wp-admin/includes/file.php, which a REST
-			 * request does not load. Without this the import fataled the moment
-			 * it reached the first photo, and WordPress answered with an HTML
-			 * error page - which the browser then tried to read as JSON and
-			 * reported as "Unexpected token '<'". The real error never reached
-			 * anybody. Required here rather than at the top of the file so the
-			 * cost lands on the one request that needs it.
+			 * wp_tempnam() lives in wp-admin/includes/file.php, which a REST
+			 * request does not load. Without this the import fataled on the
+			 * first photo and WordPress answered with an HTML error page, which
+			 * the browser reported as "Unexpected token '<'" - a complaint about
+			 * parsing that named nothing. Required here rather than at the top
+			 * of the file so the cost lands on the one request that needs it.
 			 */
 			require_once ABSPATH . 'wp-admin/includes/file.php';
 
@@ -418,11 +417,44 @@ add_action( 'rest_api_init', function () {
 				$is_video = 0 === strpos( $mime, 'video/' );
 				$fetch    = $base . ( $is_video ? '=dv' : '=d' );
 
-				$tmp = download_url( $fetch, 120, false, array(
-					'headers' => array( 'Authorization' => 'Bearer ' . $token ),
+				/*
+				 * Streamed by hand rather than with download_url().
+				 *
+				 * download_url( $url, $timeout, $signature_verification ) takes
+				 * three arguments and no request args, so the Authorization
+				 * header passed as a fourth was accepted by PHP and quietly
+				 * dropped. Google requires a bearer token on a baseUrl and
+				 * answered 403, which arrived as the single word "Forbidden" -
+				 * true, and giving no hint that the request had gone out naked.
+				 * wp_safe_remote_get streams to a file the same way and does
+				 * take headers.
+				 */
+				$tmp = wp_tempnam( $name );
+				if ( ! $tmp ) {
+					$errors[] = ( $name ? $name : 'A photo' ) . ': the server could not make room for it.';
+					continue;
+				}
+				$got = wp_safe_remote_get( $fetch, array(
+					'timeout'  => 120,
+					'stream'   => true,
+					'filename' => $tmp,
+					'headers'  => array( 'Authorization' => 'Bearer ' . $token ),
 				) );
-				if ( is_wp_error( $tmp ) ) {
-					$errors[] = ( $name ? $name : 'A photo' ) . ': ' . $tmp->get_error_message();
+				if ( is_wp_error( $got ) ) {
+					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					$errors[] = ( $name ? $name : 'A photo' ) . ': ' . $got->get_error_message();
+					continue;
+				}
+				$got_code = (int) wp_remote_retrieve_response_code( $got );
+				if ( $got_code < 200 || $got_code >= 300 ) {
+					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					gasf_crm_log( 'CRM Google Photos: ' . $got_code . ' fetching a picked photo' );
+					$errors[] = ( $name ? $name : 'A photo' ) . ': Google refused the download (' . $got_code . ').';
+					continue;
+				}
+				if ( ! @filesize( $tmp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+					$errors[] = ( $name ? $name : 'A photo' ) . ': arrived empty.';
 					continue;
 				}
 
