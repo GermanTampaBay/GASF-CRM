@@ -686,22 +686,27 @@ function gasf_crm_render_inbox() {
 			         the phone had just dumped it into. */ ?>
 			<input type="file" id="upinput" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/avif,.heic,.heif,.avif,video/mp4,video/quicktime" multiple hidden>
 		</div>
-		<?php /* The same photos are usually already in the volunteer's Google
-		         Photos, and downloading them to a laptop only to upload them
-		         again is a chore with nothing to show for it. Google removed
-		         library browsing for apps like this in 2025; what is left is a
-		         picker the volunteer drives, which is the better shape anyway -
-		         the club never sees a photo that was not handed over. */ ?>
-		<div class="gphrow">
-			<button class="btn sec" id="gphgo" type="button">Import from Google Photos&hellip;</button>
-			<span class="muted" id="gphmsg">You choose the photos in Google's own picker. The club never browses your library.</span>
-		</div>
 		<div id="uplist" class="uplist"></div>
 		<div class="actions" style="margin-top:14px">
 			<button class="btn" id="upgo" type="button" disabled>Upload</button>
 			<button class="btn sec" id="upclear" type="button" hidden>Reset form</button>
 			<button class="btn warn" id="upstop" type="button" hidden>Stop</button>
 			<span class="muted" id="upstatus"></span>
+		</div>
+		<?php /* A SECOND way in, not a step in the first one.
+		         It sat between the dropzone and the file list, which read as
+		         part of dragging files in - so an import finished, nothing was
+		         queued, Upload stayed correctly greyed out, and the whole panel
+		         looked broken. Below the Upload row, under its own heading, it
+		         is what it actually is: the other route, which needs no Upload
+		         because the photos are already here when it finishes. */ ?>
+		<div class="gphblock">
+			<h4>Or bring them straight from Google Photos</h4>
+			<p class="muted">You pick them in Google's own picker and they arrive here already saved &mdash; there is no need to press Upload. The club never browses your library; it only receives what you hand over.</p>
+			<div class="gphrow">
+				<button class="btn sec" id="gphgo" type="button">Import from Google Photos&hellip;</button>
+				<span class="muted" id="gphmsg"></span>
+			</div>
 		</div>
 	</div>
 </div>

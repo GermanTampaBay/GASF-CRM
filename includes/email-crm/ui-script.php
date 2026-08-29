@@ -3726,13 +3726,17 @@ function gasf_crm_render_inbox_script() {
 				op_id: nextOpId('gphotos-' + session)
 			}) }).then(function(r){
 				var bits = [];
-				if (r.added)   { bits.push(r.added + ' added'); }
+				if (r.added)   { bits.push(r.added + (r.added === 1 ? ' photo saved' : ' photos saved')); }
 				// Said, not swallowed: re-picking a set imported last week is
 				// the commonest thing to do, and silence would read as failure.
 				if (r.skipped) { bits.push(r.skipped + ' already here'); }
 				if (r.errors && r.errors.length) { bits.push(r.errors.length + ' could not be taken'); }
-				gphSay(bits.length ? bits.join(', ') + '.' : 'Nothing came back.');
-				if (r.errors && r.errors.length) { gphSay(bits.join(', ') + '. ' + r.errors[0]); }
+				var done = bits.length ? bits.join(', ') + '.' : 'Nothing came back.';
+				// "Saved" on its own still leaves somebody looking at a greyed-out
+				// Upload button wondering whether they have finished. Say so.
+				if (r.added) { done += ' They are in the library now — nothing else to press.'; }
+				if (r.errors && r.errors.length) { done += ' ' + r.errors[0]; }
+				gphSay(done);
 				gphBusy(false);
 				if (r.added && typeof loadPhotos === 'function') { loadPhotos(); }
 			});
