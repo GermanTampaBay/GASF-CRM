@@ -176,16 +176,29 @@ python scan-gui.py
 - Tick options, click **Start**, and it runs `scan.py`.
 - It blocks unsupported combinations (for example `--learn` + `--label`).
 - In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
-- **Skip this photo** passes a whole photograph over for good. Different from
-  **Not a person**, which puts one rectangle down: this is for the crowd shot
-  from the back of a hall where nobody at the club will ever name a face. It
-  matters more than it sounds, because the label queue is a fixed number of
-  photos - every crowd shot in it is a photo of people you could name that the
-  scanner never reached, and the client downloads and runs the detector over
-  each one before the browser opens. Passed-over photos are never sent again, on
-  this machine or any other; the decision lives in WordPress. Undo is in bulk,
-  at *Email CRM -> Photos -> Face suggestions*, because a photo the queue no
-  longer offers cannot be reached from the labeler that passed it over.
+- Three answers close a photo, and they are not interchangeable:
+  - **Not a person** puts ONE rectangle down - a poster on the wall, a
+    reflection, or the detector finding a face in a curtain. The photo carries
+    on.
+  - **Done with this photo** saves the names typed on it and then closes it.
+    This is the common ending: two members named, a stranger three tables back
+    who will never be named, so the photo is correctly tagged and permanently
+    short of a full set - which is exactly what used to bring it round again
+    every single run, looking like work nobody had started.
+  - **Skip this photo** closes it without saving anything. The crowd shot from
+    the back of a hall where nobody at the club will ever name a single face.
+    Anything typed on it is discarded, because skipping IS the answer to who
+    these people are.
+
+  Closing matters more than it sounds, because the label queue is a fixed number
+  of photos - every crowd shot in it is a photo of people you could name that the
+  scanner never reached, and the client downloads and runs the detector over each
+  one before the browser opens. Closed photos are never sent again, on this
+  machine or any other; the decision lives in WordPress, not in `faces.db`. Undo
+  is in bulk, at *Email CRM -> Photos -> Face suggestions*, which counts the two
+  kinds separately and can reopen them all; names already saved are untouched. It
+  is bulk because a photo the queue no longer offers cannot be reached from the
+  labeler that closed it.
 - The label gallery keeps its existing filters and adds optional **Active learning**. It ranks a bounded top subset using unresolved-cluster size, corpus weakness, boundary uncertainty, appearance novelty, crop quality, and underrepresented dates when known. The score and every embedding stay local.
 - In discovery mode, each contact sheet is a conservative, engine-isolated cluster from the current date/limit preparation scope. Open it, deselect mistakes, type one known or new person name, and confirm. That one name applies to every selected face. Unselected faces remain unknown and are reclustered; **Dismiss selected locally** suppresses the same local face using its rectangle and embedding, even if detector order changes, without changing or deleting the WordPress photo.
 - Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).

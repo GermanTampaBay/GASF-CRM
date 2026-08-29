@@ -799,29 +799,46 @@ function gasf_crm_face_unignore( $attachment_id, array $box, $iw, $ih ) {
  * so "offer them all again" is one button rather than an archaeology project.
  * ------------------------------------------------------------------------ */
 
-/** Has a volunteer said this whole photo is not worth being asked about? */
+/** Has a volunteer said this whole photo is not to be asked about again? */
 function gasf_crm_face_photo_skipped( $attachment_id ) {
 	$raw = get_post_meta( (int) $attachment_id, '_gasf_face_photo_skipped', true );
 	return is_array( $raw ) && ! empty( $raw['at'] );
 }
 
+/** Why it is closed: 'done' if names were taken off it first, else 'passed'. */
+function gasf_crm_face_photo_skip_reason( $attachment_id ) {
+	$raw = get_post_meta( (int) $attachment_id, '_gasf_face_photo_skipped', true );
+	if ( ! is_array( $raw ) || empty( $raw['at'] ) ) { return ''; }
+	return 'done' === ( $raw['reason'] ?? '' ) ? 'done' : 'passed';
+}
+
 /**
- * Pass a photo over, or put it back.
+ * Close a photo for labelling, or reopen it.
  *
- * @param int  $attachment_id The photo.
- * @param bool $on            True to pass over, false to offer it again.
+ * TWO reasons, one mechanism. 'passed' is the crowd of strangers, where nothing
+ * was learned and nothing was lost. 'done' is the far commoner one: two members
+ * named, and a stranger at the back who will never be named, so the photo is
+ * finished with even though it is not fully tagged. Both leave the queue by the
+ * same route; they are told apart so the admin panel can say which is which
+ * rather than reporting three hundred photos as thrown away when most of them
+ * were worked properly.
+ *
+ * @param int    $attachment_id The photo.
+ * @param bool   $on            True to close it, false to offer it again.
+ * @param string $reason        'done' or 'passed'.
  * @return true|WP_Error True whether or not this was already the case: asking
  *                       twice is a double-click, not an error.
  */
-function gasf_crm_face_photo_skip( $attachment_id, $on = true ) {
+function gasf_crm_face_photo_skip( $attachment_id, $on = true, $reason = 'passed' ) {
 	$id = (int) $attachment_id;
 	if ( ! $id ) {
 		return new WP_Error( 'gasf_crm_bad', 'A photo is required.', array( 'status' => 400 ) );
 	}
 	if ( $on ) {
 		update_post_meta( $id, '_gasf_face_photo_skipped', array(
-			'at' => current_time( 'mysql', true ),
-			'by' => get_current_user_id(),
+			'at'     => current_time( 'mysql', true ),
+			'by'     => get_current_user_id(),
+			'reason' => 'done' === $reason ? 'done' : 'passed',
 		) );
 		// Verified rather than assumed: this codebase has been bitten by writes
 		// that reported success having done nothing.
@@ -834,12 +851,37 @@ function gasf_crm_face_photo_skip( $attachment_id, $on = true ) {
 	return true;
 }
 
-/** How many photos are being passed over, for the admin panel to own up to. */
+/** How many photos are closed for labelling. The cheap question. */
 function gasf_crm_face_photos_skipped_count() {
 	global $wpdb;
 	return (int) $wpdb->get_var( // phpcs:ignore WordPress.DB
 		"SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_photo_skipped'"
 	);
+}
+
+/**
+ * The same question broken down by reason, for the panel.
+ *
+ * Read row by row rather than counted in SQL: the reason lives inside a
+ * serialized array, and a LIKE against serialized PHP is the kind of clever
+ * that breaks silently the first time a value changes length. A few hundred
+ * rows on one admin screen is not worth being clever about.
+ */
+function gasf_crm_face_photos_skipped_counts() {
+	global $wpdb;
+	$rows = $wpdb->get_col( // phpcs:ignore WordPress.DB
+		"SELECT meta_value FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_photo_skipped'"
+	);
+	$out = array( 'total' => 0, 'done' => 0, 'passed' => 0 );
+	foreach ( (array) $rows as $raw ) {
+		$v = maybe_unserialize( $raw );
+		if ( ! is_array( $v ) || empty( $v['at'] ) ) { continue; }
+		$out['total']++;
+		// Anything closed before the reason existed reads as 'passed', which is
+		// what it was: the only button at the time threw the photo away.
+		if ( 'done' === ( $v['reason'] ?? '' ) ) { $out['done']++; } else { $out['passed']++; }
+	}
+	return $out;
 }
 
 /** Offer every passed-over photo again. Returns how many were put back. */
@@ -2200,7 +2242,7 @@ add_action( 'rest_api_init', function () {
 	) );
 
 	/**
-	 * Pass a whole photo over, or put it back.
+	 * Close a whole photo for labelling, or reopen it.
 	 *
 	 * Takes the scanner key or a volunteer session, like /ignore does: this is
 	 * pressed in the labeler, which holds the key, but it is an ordinary
@@ -2211,20 +2253,23 @@ add_action( 'rest_api_init', function () {
 		'methods'             => 'POST',
 		'permission_callback' => $either_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			$id    = (int) $req->get_param( 'photo' );
-			$clear = (bool) $req->get_param( 'clear' );
+			$id     = (int) $req->get_param( 'photo' );
+			$clear  = (bool) $req->get_param( 'clear' );
+			$reason = 'done' === (string) $req->get_param( 'reason' ) ? 'done' : 'passed';
 
 			if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
 
-			$done = gasf_crm_face_photo_skip( $id, ! $clear );
-			if ( is_wp_error( $done ) ) { return $done; }
+			$ok = gasf_crm_face_photo_skip( $id, ! $clear, $reason );
+			if ( is_wp_error( $ok ) ) { return $ok; }
 
 			gasf_crm_log( sprintf(
 				'CRM faces: photo #%d %s — user %d',
 				$id,
-				$clear ? 'put back in the labelling queue' : 'passed over for labelling',
+				$clear
+					? 'put back in the labelling queue'
+					: ( 'done' === $reason ? 'finished with for labelling' : 'passed over for labelling' ),
 				get_current_user_id()
 			) );
 
@@ -2232,6 +2277,7 @@ add_action( 'rest_api_init', function () {
 				'ok'      => true,
 				'photo'   => $id,
 				'skipped' => gasf_crm_face_photo_skipped( $id ),
+				'reason'  => gasf_crm_face_photo_skip_reason( $id ),
 			);
 		},
 	) );
@@ -2627,10 +2673,10 @@ function gasf_crm_faces_admin_handle( $act ) {
 
 	if ( 'faces_unskip_all' === $act ) {
 		$n = gasf_crm_face_photos_unskip_all();
-		gasf_crm_log( sprintf( 'CRM faces: %d passed-over photo(s) put back by %s',
+		gasf_crm_log( sprintf( 'CRM faces: %d closed photo(s) put back by %s',
 			$n, gasf_crm_display_name( get_current_user_id() ) ) );
 		return '<div class="notice notice-success"><p>' . (int) $n . ' photo(s) put back in the labelling queue. '
-			. 'The scanner will offer them again on its next run.</p></div>';
+			. 'The scanner will offer them again on its next run. Names already saved on them are untouched.</p></div>';
 	}
 
 	if ( 'faces_rescan' === $act ) {
@@ -2675,7 +2721,8 @@ function gasf_crm_faces_admin_section() {
 	global $wpdb;
 	$scanned = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
 	$sugg    = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_suggestions'" ); // phpcs:ignore WordPress.DB
-	$skipped = gasf_crm_face_photos_skipped_count();
+	$skip_counts = gasf_crm_face_photos_skipped_counts();
+	$skipped     = (int) $skip_counts['total'];
 
 	echo '<h3>Face suggestions</h3>';
 	echo '<p class="description" style="max-width:820px">A machine at home scans library photos and suggests who is in them. '
@@ -2692,7 +2739,7 @@ function gasf_crm_faces_admin_section() {
 		. '<tr><td>Waiting to be scanned</td><td>%d</td></tr>'
 		. '<tr><td>Learn-eligible photos</td><td>%d</td></tr>'
 		. '<tr><td>Learn-marked photos</td><td>%d</td></tr>'
-		. '<tr><td>Passed over for labelling</td><td>%d</td></tr>'
+		. '<tr><td>Closed for labelling</td><td>%s</td></tr>'
 		. '</tbody></table>',
 		$has
 			? '<span style="color:#2c7a3f">&#10003; issued</span>' . ( $made ? ' <span class="description">' . esc_html( $made ) . ' UTC</span>' : '' )
@@ -2702,6 +2749,11 @@ function gasf_crm_faces_admin_section() {
 		(int) ( $metrics['eligible'] ?? 0 ),
 		(int) ( $metrics['learned'] ?? 0 ),
 		$skipped
+			? sprintf(
+				'%d &mdash; %d finished with, %d passed over',
+				(int) $skip_counts['total'], (int) $skip_counts['done'], (int) $skip_counts['passed']
+			)
+			: '0'
 	);
 
 	echo '<form method="post" style="max-width:820px;margin:0 0 12px;padding:10px;border:1px solid #dcdcde;background:#fff">'
@@ -2761,10 +2813,10 @@ function gasf_crm_faces_admin_section() {
 		'faces_key_make'   => array( $has ? 'Issue a new key' : 'Issue a scanner key', $has ? 'Issue a new key? The current one stops working immediately.' : '' ),
 		'faces_key_revoke' => array( 'Revoke the key', 'Revoke the scanner key? The home scanner will stop being able to poll.' ),
 		'faces_rescan'     => array( 'Rescan everything', 'Clear every scan stamp so the whole library is looked at again?' ),
-		'faces_unskip_all' => array( 'Offer passed-over photos again', 'Put every passed-over photo back in the labelling queue?' ),
+		'faces_unskip_all' => array( 'Offer closed photos again', 'Put every closed photo back in the labelling queue, both the finished ones and the passed-over ones?' ),
 	) as $act => $bits ) {
 		if ( 'faces_key_revoke' === $act && ! $has ) { continue; }
-		// Nothing has been passed over, so the button would be a puzzle.
+		// Nothing is closed, so the button would be a puzzle.
 		if ( 'faces_unskip_all' === $act && ! $skipped ) { continue; }
 		printf( '<form method="post" style="display:inline-block;margin:0 6px 6px 0"%s>',
 			$bits[1] ? ' onsubmit="return confirm(' . "'" . esc_js( $bits[1] ) . "'" . ')"' : '' );

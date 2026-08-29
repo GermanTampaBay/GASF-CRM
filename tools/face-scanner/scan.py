@@ -2946,8 +2946,10 @@ display:flex;gap:12px;align-items:center;justify-content:space-between}
 .gbtn.on{border-color:#60a5fa;box-shadow:0 0 0 1px #60a5fa inset}
 .gbtn img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:6px;display:block;background:#0b1220}
 .gph{display:block;width:100%;aspect-ratio:1/1;border-radius:6px;background:#0b1220;border:1px dashed #334155}
-/* Set apart from Back/Next/Save. It is the one button here that decides
-   something rather than moving about, and it is not undoable from this page. */
+/* Set apart from Back/Next/Save. These two decide something rather than move
+   about, and neither is undoable from this page. Green keeps its work, amber
+   throws it away; the pair should never be misread for each other at speed. */
+.donephoto{border-color:#166534;color:#86efac}
 .skipphoto{border-color:#7c2d12;color:#fdba74}
 .gmeta{display:block;font-size:12px;padding:6px 2px 2px 2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .detail{display:grid;grid-template-columns:minmax(0,1fr) clamp(300px,34vw,430px);gap:14px;align-items:start}
@@ -3065,6 +3067,7 @@ border:1px solid #26324a;border-radius:6px;background:#0b1220}
         <button id="back">Back</button>
         <button id="next">Next</button>
         <button id="save" class="pri">Save & Next</button>
+        <button id="done" class="donephoto" title="Save the names typed here, then close this photo for good. For when you have named everyone you can and the faces left over are strangers nobody will ever tag.">Done with this photo</button>
         <button id="skip" class="skipphoto" title="Nobody here is worth naming - a crowd of strangers, a hall from the back. This photo will not be offered for labelling again, on this machine or any other. Anything typed on it is discarded.">Skip this photo</button>
         <button id="exit">Exit to gallery</button>
       </div>
@@ -3483,6 +3486,57 @@ async function saveAndNext(){
     setText('sub', e && e.message ? e.message : String(e));
   }
 }
+/* Take a photo out of this batch and open whatever follows it.
+   Shared by both ways of closing one, because the difference between them is
+   entirely in what happens BEFORE this - whether the names were saved first. */
+async function dropFromBatch(id, wasPos, note){
+  allGallery = allGallery.filter(g=>Number(g.id)!==Number(id));
+  const at = activeGallery.findIndex(g=>Number(g.id)===Number(id));
+  if(at>=0){ activeGallery.splice(at,1); }
+  count = activeGallery.length;
+  paintGallery();
+  if(!count){
+    pos=0;
+    showGallery();
+    setText('title','Nothing left in this view');
+    setText('sub','Every photo here has been labeled or closed.');
+    setText('stat','');
+    return;
+  }
+  // The next photo has slid into the position this one just left, so staying
+  // put IS moving on. Clamped for the last photo in the batch.
+  await openByPos(Math.min(at>=0?at:wasPos, count-1));
+  setText('sub', note);
+}
+
+/* Finished with this photograph: keep the names, close the photo.
+   The common ending, and the one that had no button. Two members named and a
+   stranger three tables back who will never be named leaves a photo that is
+   correctly tagged and permanently incomplete - so it came round again every
+   run, looking exactly like work nobody had started.
+
+   Names are saved FIRST and the photo is only closed once they are stored. The
+   other order can close a photo whose labels never landed, and losing work
+   somebody actually did is the one outcome here worth engineering against. */
+async function donePhoto(){
+  if(!current || saving || finishing){return;}
+  const id=current.id;
+  const btn=document.getElementById('done');
+  const wasPos=pos;
+  btn.disabled=true; btn.textContent='Saving...';
+  try{
+    await saveCurrentOnly();
+    await j('/api/skip',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({photo:id, reason:'done'})});
+    dirty=false;
+    await dropFromBatch(id, wasPos, 'Saved, and finished with. It will not be offered again.');
+  }catch(e){
+    setText('sub', e && e.message ? e.message : String(e));
+  } finally {
+    btn.disabled=false; btn.textContent='Done with this photo';
+  }
+}
+
 /* Pass this whole photograph over, for good.
    A different answer from "not a person": that one is for a poster on the wall
    or a reflection, and there is nothing to point at here. This is the crowd
@@ -3506,23 +3560,7 @@ async function skipPhoto(){
     // these people", so saving a half-typed name on the way out would be
     // filing the opposite of what was just decided.
     dirty=false;
-    allGallery = allGallery.filter(g=>Number(g.id)!==Number(id));
-    const at = activeGallery.findIndex(g=>Number(g.id)===Number(id));
-    if(at>=0){ activeGallery.splice(at,1); }
-    count = activeGallery.length;
-    paintGallery();
-    if(!count){
-      pos=0;
-      showGallery();
-      setText('title','Nothing left in this view');
-      setText('sub','Every photo here has been labeled or passed over.');
-      setText('stat','');
-      return;
-    }
-    // The next photo has slid into the position this one just left, so staying
-    // put IS moving on. Clamped for the last photo in the batch.
-    await openByPos(Math.min(at>=0?at:wasPos, count-1));
-    setText('sub','Passed over. It will not be offered again.');
+    await dropFromBatch(id, wasPos, 'Passed over. It will not be offered again.');
   }catch(e){
     setText('sub', e && e.message ? e.message : String(e));
   } finally {
@@ -3638,6 +3676,7 @@ document.getElementById('boxesall').onclick=()=>{
   const total=(current&&current.boxes)?current.boxes.length:0;
   setAllBoxes(!(total>0 && hiddenBoxes.size>=total));
 };
+document.getElementById('done').onclick=donePhoto;
 document.getElementById('skip').onclick=skipPhoto;
 document.getElementById('back').onclick=async()=>{ await saveAndOpen(pos - 1); };
 document.getElementById('next').onclick=async()=>{ await saveAndOpen(pos + 1); };
@@ -3881,18 +3920,25 @@ def local_label(
                 return self._write(200, json.dumps({"ok": True}))
 
             if u.path == "/api/skip":
-                # A whole photo passed over, sent straight to WordPress for the
-                # same reason an ignored face is: it has to survive this
+                # A whole photo closed for labelling, sent straight to WordPress
+                # for the same reason an ignored face is: it has to survive this
                 # machine. The queue that decides what gets downloaded next run
                 # is built there, so this is also the only place it can matter.
+                # The reason travels with it so the admin panel can tell a photo
+                # that was worked properly from one that was thrown away.
                 try:
                     photo = int(data.get("photo") or 0)
                 except (TypeError, ValueError):
                     return self._write(400, json.dumps({"error": "Invalid photo id"}))
                 if photo < 1:
                     return self._write(400, json.dumps({"error": "Missing photo id"}))
+                reason = "done" if str(data.get("reason") or "") == "done" else "passed"
                 try:
-                    api.post("/skip", {"photo": photo, "clear": bool(data.get("clear"))})
+                    api.post("/skip", {
+                        "photo": photo,
+                        "clear": bool(data.get("clear")),
+                        "reason": reason,
+                    })
                 except (requests.RequestException, RuntimeError, ValueError, SystemExit) as e:
                     return self._write(502, json.dumps({"error": f"Could not pass that photo over: {e}"}))
                 return self._write(200, json.dumps({"ok": True}))

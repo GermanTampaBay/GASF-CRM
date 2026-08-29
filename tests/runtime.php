@@ -618,12 +618,44 @@ final class GASF_CRM_Selftest {
 		// Asking twice is a volunteer double-clicking, not an error.
 		$this->ok( true === gasf_crm_face_photo_skip( $id ), 'face skip: passing it over twice is not an error' );
 
+		/*
+		 * The other reason, and the commoner one: two members named, a stranger
+		 * at the back who never will be, so the photo is finished with while
+		 * being permanently short of a full set of names.
+		 *
+		 * Both reasons close the photo the same way. They are told apart only so
+		 * the panel can say which is which — reporting three hundred photos as
+		 * thrown away when most of them were worked properly is the kind of
+		 * number that gets a working feature turned off.
+		 */
+		$done = $this->library_photo( 'st-face-done' );
+		$this->ok( true === gasf_crm_face_photo_skip( $done, true, 'done' ), 'face done: a worked photo can be finished with' );
+		$this->ok( ! in_array( $done, $ask(), true ), 'face done: and it stops being offered, like a passed-over one' );
+		$this->ok( 'done' === gasf_crm_face_photo_skip_reason( $done ), 'face done: recorded as finished with, not thrown away' );
+		$this->ok( 'passed' === gasf_crm_face_photo_skip_reason( $id ), 'face done: and the passed-over one still reads as passed over' );
+
+		$counts = gasf_crm_face_photos_skipped_counts();
+		$this->ok(
+			$counts['total'] === $counts['done'] + $counts['passed']
+			&& $counts['done'] >= 1 && $counts['passed'] >= 1,
+			'face done: the panel can count the two apart'
+		);
+		$this->ok(
+			$counts['total'] === gasf_crm_face_photos_skipped_count(),
+			'face done: and the cheap count agrees with the broken-down one'
+		);
+
 		// The undo. Bulk in the admin panel, because a photo the queue no
-		// longer offers cannot be reached from the labeler that passed it over.
+		// longer offers cannot be reached from the labeler that closed it.
 		gasf_crm_face_photo_skip( $id, false );
+		gasf_crm_face_photo_skip( $done, false );
 		$this->ok(
 			! gasf_crm_face_photo_skipped( $id ) && in_array( $id, $ask(), true ),
 			'face skip: and it can be put back in the queue'
+		);
+		$this->ok(
+			'' === gasf_crm_face_photo_skip_reason( $done ) && in_array( $done, $ask(), true ),
+			'face done: a finished photo can be reopened too'
 		);
 	}
 
