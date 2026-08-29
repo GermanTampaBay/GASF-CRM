@@ -386,17 +386,73 @@ class Api:
         self.s.headers["User-Agent"] = USER_AGENT
         self.s.headers["Accept"] = "application/json"
 
+    # How many times a refusal that looks like the HOST rather than the CRM is
+    # tried again before giving up, and how long to wait between attempts.
+    AUTH_RETRIES = 4
+    AUTH_BACKOFF = 2.0
+
+    def _auth_verdict(self, r, url):
+        """
+        Tell a wrong key from a doorman having a moment.
+
+        Both arrive as 403. The CRM answers with its own JSON - a code and a
+        message - and that genuinely means the key is not accepted, so there is
+        no point trying again. The shared host answers with an HTML page when
+        mod_security or a rate limiter decides it has seen enough requests, and
+        that IS worth trying again: it says nothing about the key, and a run of
+        five hundred photos should not die on the hundred and seventy-sixth
+        because a doorman blinked.
+
+        Before the key moved into headers, a 401/403/406 quietly retried with
+        the key in the query string, which absorbed these without anybody
+        noticing. Taking that out - rightly, a key in a URL lands in the access
+        log - left every transient refusal fatal. This is the part that should
+        have replaced it.
+
+        Returns "fatal", or "retry".
+        """
+        body = (r.text or "").strip()
+        looks_ours = body.startswith("{") and ("gasf" in body or "rest_" in body)
+        if looks_ours:
+            return "fatal"
+        return "retry"
+
+    def _send(self, method, url, **kw):
+        """One request, retried when the host is the one saying no."""
+        last = ""
+        for attempt in range(1, self.AUTH_RETRIES + 1):
+            r = self.s.request(method, url, **kw)
+            if r.status_code not in (401, 403, 406):
+                return r
+
+            verdict = self._auth_verdict(r, url)
+            snippet = " ".join((r.text or "").split())[:220]
+            if verdict == "fatal":
+                sys.exit(
+                    "The server refused the key (HTTP %d).\n  %s\n"
+                    "Issue a new key in wp-admin -> Email CRM -> Photos -> Face suggestions "
+                    "and put it in config.json." % (r.status_code, snippet or "no message")
+                )
+
+            last = "HTTP %d from %s: %s" % (r.status_code, url, snippet or "no body")
+            if attempt < self.AUTH_RETRIES:
+                # Longer each time. A rate limiter wants to be left alone, and
+                # hammering it is how a pause becomes a ban.
+                time.sleep(self.AUTH_BACKOFF * attempt)
+
+        sys.exit(
+            "The server kept refusing requests, and not because of the key: %s\n"
+            "That is the host (mod_security or a rate limit), not WordPress. "
+            "Wait a few minutes and run again - work already saved is kept." % last
+        )
+
     def get(self, path, **params):
-        r = self.s.get(self.base + path, params=params, timeout=60)
-        if r.status_code == 403:
-            sys.exit("The server refused the key. Issue a new one in wp-admin and update the config.")
+        r = self._send("GET", self.base + path, params=params, timeout=60)
         r.raise_for_status()
         return r.json()
 
     def post(self, path, payload):
-        r = self.s.post(self.base + path, json=payload, timeout=120)
-        if r.status_code == 403:
-            sys.exit("The server refused the key.")
+        r = self._send("POST", self.base + path, json=payload, timeout=120)
         r.raise_for_status()
         return r.json()
 
@@ -410,9 +466,9 @@ class Api:
         attempts = 4
         for attempt in range(1, attempts + 1):
             try:
-                r = self.s.get(url, timeout=120)
-                if r.status_code == 403:
-                    sys.exit("The server refused the key.")
+                # Same treatment as the JSON routes: a refusal from the host
+                # is retried, a refusal from the CRM stops the run.
+                r = self._send("GET", url, timeout=120)
                 if r.status_code in RETRYABLE_HTTP:
                     raise requests.HTTPError(
                         f"{r.status_code} {r.reason}",
@@ -4753,6 +4809,20 @@ def selftest():
     check_that(
         "hidden_small" in _discovery_ui_html("selftest-token"),
         "discovery: the board says how many groups it is holding back",
+    )
+    # A wrong key and a doorman having a moment both arrive as 403. Telling them
+    # apart is the difference between "stop, this cannot work" and "wait a
+    # moment and carry on" - and getting it wrong killed a 500-photo run on the
+    # 176th request, having already done the work for the first 175.
+    class _FakeResp:
+        def __init__(self, text):
+            self.text = text
+    _api_probe = Api.__new__(Api)
+    check_that(
+        _api_probe._auth_verdict(_FakeResp('{"code":"gasf_crm_403","message":"no"}'), "u") == "fatal"
+        and _api_probe._auth_verdict(_FakeResp("<html><body>Not Acceptable</body></html>"), "u") == "retry"
+        and _api_probe._auth_verdict(_FakeResp(""), "u") == "retry",
+        "scanner: a refusal from the CRM stops the run, one from the host is retried",
     )
     check_that(
         _caption_error_line(requests.exceptions.ConnectionError("boom")).startswith("the local captioner is not running")
