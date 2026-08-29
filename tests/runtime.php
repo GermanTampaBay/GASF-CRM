@@ -828,8 +828,14 @@ final class GASF_CRM_Selftest {
 			isset( $routes['/gasf/v1/crm/photos/google/list'] ) && isset( $routes['/gasf/v1/crm/photos/google/fetch'] ),
 			'google photos: picking lists what was chosen, and Upload fetches it one at a time'
 		);
+		// A CALL, not a mention: the header docblock names the function too, and
+		// counting that made this fail on the first run for a reason that had
+		// nothing to do with the promise being tested. Prose writes the empty
+		// parentheses; a call that writes a photo always has arguments.
+		$calls = substr_count( $src, 'gasf_crm_photo_upload_one(' )
+			- substr_count( $src, 'gasf_crm_photo_upload_one()' );
 		$this->ok(
-			1 === substr_count( $src, 'gasf_crm_photo_upload_one' ),
+			1 === $calls,
 			'google photos: exactly one place here can write a photo, and it is the one Upload calls'
 		);
 
