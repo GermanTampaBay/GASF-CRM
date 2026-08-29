@@ -27,16 +27,34 @@ https://www.googleapis.com/auth/photospicker.mediaitems.readonly
 Nothing else. The sign-in scopes (`openid`, `email`, `profile`) stay as they
 are: this asks separately, only when somebody presses the button.
 
-## 3. Add the redirect URI
+## 3. Add the JavaScript origin (NOT a redirect URI)
 
 **APIs & Services → Credentials →** the existing OAuth 2.0 Client ID → under
-**Authorised redirect URIs**, add:
+**Authorised JavaScript origins**, add:
 
 ```
-https://germantampabay.com/wp-json/gasf/v1/crm/photos/google/callback
+https://germantampabay.com
 ```
 
-It must match exactly, including https and no trailing slash.
+Origin only — no path, no trailing slash.
+
+**There is no redirect URI to add, and an earlier version of this file was wrong
+to ask for one.** The obvious build sends the volunteer to Google and takes a
+code back at a callback URL, and that cannot work on this host: Google returns
+`scope=https://www.googleapis.com/auth/...` on the callback, and a full URL in a
+query string trips this server mod_security rule, which answers **406 Not
+Acceptable** before WordPress is reached. Measured, not guessed - the same
+callback answers 200 with a code and a state, and 406 the moment the scope is
+added. Sign-in is unaffected only because its scopes (`openid email profile`)
+are bare words rather than URLs.
+
+mod_security cannot be relaxed for one path here either: `SecRuleEngine` in
+.htaccess makes the server answer 500 on this host.
+
+So the token is obtained in the browser with Google Identity Services and
+posted to the site, which checks with Google that it belongs to this client and
+covers only the picker scope before storing it. Nothing travels in a query
+string, so there is nothing for mod_security to refuse.
 
 ## Verification: stay in Testing
 

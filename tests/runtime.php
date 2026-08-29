@@ -776,9 +776,19 @@ final class GASF_CRM_Selftest {
 			'google photos: never asks for library access, which Google withdrew in 2025'
 		);
 		$this->ok(
-			false !== strpos( $src, "'access_type'   => 'online'" )
-			&& false === strpos( $src, 'refresh_token' ),
+			false === strpos( $src, 'refresh_token' ),
 			'google photos: no refresh token, so a click today cannot reach the library tomorrow'
+		);
+		/*
+		 * The token now arrives from a browser rather than from a redirect, so
+		 * it is checked before it is kept: Google is asked whose it is, it must
+		 * belong to THIS client, and it must carry the picker scope. Without
+		 * that, any signed-in volunteer could post any string and the server
+		 * would store it and fail confusingly later.
+		 */
+		$this->ok(
+			false !== strpos( $src, 'tokeninfo' ) && false !== strpos( $src, 'hash_equals' ),
+			'google photos: a browser-supplied token is verified with Google before it is trusted'
 		);
 
 		// A stored grant must expire on its own, whoever forgets to tidy up.

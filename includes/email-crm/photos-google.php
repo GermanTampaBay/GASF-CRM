@@ -24,6 +24,9 @@
  * import — no refresh token, so the club cannot reach a volunteer's photos
  * tomorrow on the strength of a click today.
  *
+ * Setup needs an Authorised JavaScript origin rather than a redirect URI -
+ * see docs/GOOGLE-PHOTOS-SETUP.md and the note above the consent section.
+ *
  * Everything picked lands through gasf_crm_photo_upload_one(), so it arrives
  * with the same byte cap, the same decompression-bomb guard, the same HEIC
  * conversion, the same duplicate fingerprint, the same consent record, and the
@@ -45,11 +48,6 @@ define( 'GASF_CRM_GPHOTOS_MAX', 60 );
 function gasf_crm_gphotos_ready() {
 	$c = gasf_crm_cfg();
 	return ! empty( $c['google_id'] ) && ! empty( $c['google_secret'] );
-}
-
-/** Where Google returns after the extra consent. */
-function gasf_crm_gphotos_redirect_uri() {
-	return rest_url( 'gasf/v1/crm/photos/google/callback' );
 }
 
 /** Per-volunteer token store. Transient, so it expires whether or not anybody tidies up. */
@@ -114,7 +112,30 @@ function gasf_crm_gphotos_api( $method, $url, $token, $body = null ) {
 }
 
 /* ---------------------------------------------------------------------------
- * Consent, asked separately and only when wanted
+ * Consent, asked in the browser rather than through a redirect
+ *
+ * The obvious build is a server redirect: send the volunteer to Google, take
+ * the code back at a callback URL, swap it for a token. That cannot work on
+ * this host. Google returns `scope=https://www.googleapis.com/auth/...` on the
+ * callback, and a full URL in a query string trips the shared server's
+ * mod_security remote-file-inclusion rule, which answers 406 before WordPress
+ * is reached. Proven, not guessed: the same callback returns 200 with a code
+ * and a state, and 406 the moment the scope is added. Sign-in survives only
+ * because its scopes - openid, email, profile - are bare words rather than
+ * URLs, and mod_security cannot be turned off per-path here (SecRuleEngine in
+ * .htaccess answers 500 on this host; tested in a throwaway directory rather
+ * than on the live site).
+ *
+ * So the token is fetched in the BROWSER, with Google's own Identity Services
+ * token client, and posted here. Nothing arrives through a query string, so
+ * there is nothing for mod_security to object to. It also happens to be what
+ * Google recommends for a browser app that wants one short-lived token, and it
+ * needs an Authorised JavaScript origin instead of a redirect URI.
+ *
+ * A token arriving from a browser is checked before it is trusted: it must be
+ * OUR client's token, and it must carry the picker scope and nothing else. A
+ * signed-in volunteer could otherwise post any string, and the server would
+ * cheerfully store it and then fail in a confusing way later.
  * ------------------------------------------------------------------------ */
 
 add_action( 'rest_api_init', function () {
@@ -125,13 +146,7 @@ add_action( 'rest_api_init', function () {
 		return gasf_crm_user_can_stream( 'photos' );
 	};
 
-	/*
-	 * Step 1 — where to send the volunteer.
-	 *
-	 * Returns a URL rather than redirecting, because the caller is a fetch from
-	 * the CRM and a 302 to accounts.google.com from an XHR is a CORS error
-	 * wearing a helpful hat.
-	 */
+	/** What the browser needs to ask Google, and whether it needs to ask at all. */
 	register_rest_route( 'gasf/v1', '/crm/photos/google/start', array(
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
@@ -141,92 +156,62 @@ add_action( 'rest_api_init', function () {
 					'Google sign-in is not configured, so there is nothing to connect to.',
 					array( 'status' => 503 ) );
 			}
-			// Already holding a usable grant: skip the round trip.
-			if ( gasf_crm_gphotos_token() ) {
-				return array( 'ok' => true, 'connected' => true );
-			}
-
-			$state = wp_generate_password( 32, false );
-			set_transient( 'gasf_gph_state_' . $state, get_current_user_id(), 10 * MINUTE_IN_SECONDS );
-
 			$c = gasf_crm_cfg();
 			return array(
 				'ok'        => true,
-				'connected' => false,
-				'url'       => add_query_arg( array(
-					'client_id'     => rawurlencode( $c['google_id'] ),
-					'redirect_uri'  => rawurlencode( gasf_crm_gphotos_redirect_uri() ),
-					'response_type' => 'code',
-					'scope'         => rawurlencode( GASF_CRM_GPHOTOS_SCOPE ),
-					// online, not offline: no refresh token is issued, so the
-					// club cannot reach somebody's photos tomorrow on the
-					// strength of a button pressed today.
-					'access_type'   => 'online',
-					'include_granted_scopes' => 'false',
-					'prompt'        => 'consent',
-					'state'         => rawurlencode( $state ),
-				), 'https://accounts.google.com/o/oauth2/v2/auth' ),
+				'connected' => '' !== gasf_crm_gphotos_token(),
+				'client_id' => (string) $c['google_id'],
+				'scope'     => GASF_CRM_GPHOTOS_SCOPE,
 			);
 		},
 	) );
 
-	/*
-	 * Step 2 — Google comes back here. A browser redirect, not a fetch, so it
-	 * answers with a page that closes itself rather than JSON nobody reads.
+	/**
+	 * Take a token the browser obtained, once it proves to be the right one.
 	 */
-	register_rest_route( 'gasf/v1', '/crm/photos/google/callback', array(
-		'methods'             => 'GET',
-		'permission_callback' => '__return_true',   // state + the transient are the check
+	register_rest_route( 'gasf/v1', '/crm/photos/google/token', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
-			$done = function ( $message, $ok ) {
-				status_header( 200 );
-				header( 'Content-Type: text/html; charset=utf-8' );
-				nocache_headers();
-				echo '<!doctype html><meta charset="utf-8"><title>Google Photos</title>'
-					. '<body style="font:15px system-ui;padding:28px;max-width:34em">'
-					. '<p>' . esc_html( $message ) . '</p>'
-					. ( $ok ? '<p>You can close this tab and go back to the club inbox.</p>' : '' )
-					. '<script>try{if(window.opener){window.opener.postMessage('
-					. wp_json_encode( array( 'gasfGooglePhotos' => $ok ? 'ok' : 'failed' ) )
-					. ',window.location.origin);window.close();}}catch(e){}</script>';
-				exit;
-			};
-
-			$state = (string) $req->get_param( 'state' );
-			$key   = 'gasf_gph_state_' . preg_replace( '~[^A-Za-z0-9]~', '', $state );
-			$user  = (int) get_transient( $key );
-			delete_transient( $key );   // single use, whatever happens next
-
-			if ( ! $user ) {
-				$done( 'That connection attempt has expired. Start it again from the club inbox.', false );
-			}
-			if ( $req->get_param( 'error' ) ) {
-				$done( 'Google did not grant access, so nothing was connected.', false );
+			$token = trim( (string) $req->get_param( 'access_token' ) );
+			if ( '' === $token || strlen( $token ) > 4096 ) {
+				return new WP_Error( 'gasf_crm_bad', 'No usable permission was returned by Google.', array( 'status' => 400 ) );
 			}
 
-			$c   = gasf_crm_cfg();
-			$res = wp_remote_post( 'https://oauth2.googleapis.com/token', array(
-				'timeout' => 30,
-				'body'    => array(
-					'code'          => (string) $req->get_param( 'code' ),
-					'client_id'     => $c['google_id'],
-					'client_secret' => $c['google_secret'],
-					'redirect_uri'  => gasf_crm_gphotos_redirect_uri(),
-					'grant_type'    => 'authorization_code',
-				),
-			) );
+			/*
+			 * Ask Google whose token this is before storing it.
+			 *
+			 * Outbound, so mod_security is not involved. Two things matter: that
+			 * it was issued to THIS club's client, and that it carries the
+			 * picker scope. A token for somebody else's app, or one carrying
+			 * scopes nobody here asked for, is refused rather than kept.
+			 */
+			$res = wp_remote_get(
+				add_query_arg( 'access_token', rawurlencode( $token ), 'https://oauth2.googleapis.com/tokeninfo' ),
+				array( 'timeout' => 20 )
+			);
 			if ( is_wp_error( $res ) ) {
-				$done( 'Could not reach Google to finish connecting. Try again in a moment.', false );
+				return new WP_Error( 'gasf_crm_gph', 'Could not check that permission with Google. Try again.', array( 'status' => 502 ) );
 			}
-			$body = json_decode( (string) wp_remote_retrieve_body( $res ), true );
-			if ( empty( $body['access_token'] ) ) {
-				gasf_crm_log( 'CRM Google Photos: token exchange failed for user ' . $user );
-				$done( 'Google did not return a usable permission. Try again.', false );
+			$info = json_decode( (string) wp_remote_retrieve_body( $res ), true );
+			if ( ! is_array( $info ) || empty( $info['aud'] ) ) {
+				return new WP_Error( 'gasf_crm_gph', 'Google did not recognise that permission.', array( 'status' => 400 ) );
 			}
 
-			gasf_crm_gphotos_token_set( $body['access_token'], (int) ( $body['expires_in'] ?? 3600 ), $user );
-			gasf_crm_log( 'CRM Google Photos: user ' . $user . ' connected for one import' );
-			$done( 'Connected to Google Photos.', true );
+			$c = gasf_crm_cfg();
+			if ( ! hash_equals( (string) $c['google_id'], (string) $info['aud'] ) ) {
+				gasf_crm_log( 'CRM Google Photos: refused a token issued to another application' );
+				return new WP_Error( 'gasf_crm_gph', 'That permission belongs to a different application.', array( 'status' => 403 ) );
+			}
+
+			$granted = preg_split( '~\s+~', (string) ( $info['scope'] ?? '' ), -1, PREG_SPLIT_NO_EMPTY );
+			if ( ! in_array( GASF_CRM_GPHOTOS_SCOPE, (array) $granted, true ) ) {
+				return new WP_Error( 'gasf_crm_gph', 'That permission does not cover picking photos.', array( 'status' => 403 ) );
+			}
+
+			gasf_crm_gphotos_token_set( $token, (int) ( $info['expires_in'] ?? 3600 ) );
+			gasf_crm_log( 'CRM Google Photos: user ' . get_current_user_id() . ' connected for one import' );
+			return array( 'ok' => true, 'connected' => true );
 		},
 	) );
 } );

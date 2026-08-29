@@ -3743,22 +3743,65 @@ function gasf_crm_render_inbox_script() {
 			setTimeout(tick, Math.max(2, every) * 1000);
 		};
 
+		/* Google's own script, loaded once and only when somebody actually
+		   wants it — there is no reason for every visit to /email to fetch a
+		   library it will not use. */
+		var gphLoad = function(){
+			return new Promise(function(resolve, reject){
+				if (window.google && window.google.accounts && window.google.accounts.oauth2) { resolve(); return; }
+				var el = document.getElementById('gsiscript');
+				if (!el) {
+					el = document.createElement('script');
+					el.id = 'gsiscript';
+					el.src = 'https://accounts.google.com/gsi/client';
+					el.async = true;
+					document.head.appendChild(el);
+				}
+				var waited = 0;
+				var poll = setInterval(function(){
+					if (window.google && window.google.accounts && window.google.accounts.oauth2) { clearInterval(poll); resolve(); return; }
+					if ((waited += 200) > 10000) { clearInterval(poll); reject(new Error('Google\'s sign-in library did not load. Check the connection and try again.')); }
+				}, 200);
+			});
+		};
+
 		gphgo.onclick = function(){
 			gphBusy(true, 'Connecting…');
 			gphSay('Asking Google for permission to receive the photos you pick.');
 			api('/photos/google/start', { method:'POST', body: JSON.stringify({}) })
 				.then(function(r){
 					if (r.connected) { return gphOpenPicker(); }
-					// A popup, so the half-filled upload form behind it survives.
-					var w = window.open(r.url, 'gasfgoogle', 'width=520,height=680');
-					if (!w) { gphBusy(false); gphSay('Your browser blocked the Google window. Allow popups for this site and try again.'); return; }
-					var onMsg = function(ev){
-						if (ev.origin !== window.location.origin || !ev.data || !ev.data.gasfGooglePhotos) { return; }
-						window.removeEventListener('message', onMsg);
-						if (ev.data.gasfGooglePhotos !== 'ok') { gphBusy(false); gphSay('Google did not grant access, so nothing was connected.'); return; }
-						gphOpenPicker();
-					};
-					window.addEventListener('message', onMsg);
+					return gphLoad().then(function(){
+						/* The token is fetched HERE, in the browser, rather than
+						   through a redirect back to this site. Google returns
+						   the granted scope on a redirect, and a full URL in a
+						   query string is refused by the shared server's
+						   mod_security before WordPress sees it — so the
+						   redirect flow cannot work on this host at all. This
+						   way nothing arrives through a query string. */
+						var client = window.google.accounts.oauth2.initTokenClient({
+							client_id: r.client_id,
+							scope: r.scope,
+							callback: function(resp){
+								if (!resp || !resp.access_token) {
+									gphBusy(false);
+									gphSay('Google did not grant access, so nothing was connected.');
+									return;
+								}
+								// Handed to the server, which checks with Google
+								// that it is ours and covers only the picker
+								// before storing it.
+								api('/photos/google/token', { method:'POST', body: JSON.stringify({ access_token: resp.access_token }) })
+									.then(function(){ gphOpenPicker(); })
+									.catch(function(e){ gphBusy(false); gphSay(e.message); });
+							},
+							error_callback: function(){
+								gphBusy(false);
+								gphSay('The Google window was closed before anything was granted.');
+							}
+						});
+						client.requestAccessToken();
+					});
 				})
 				.catch(function(e){ gphBusy(false); gphSay(e.message); });
 		};
