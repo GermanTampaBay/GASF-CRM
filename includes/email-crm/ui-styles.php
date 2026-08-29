@@ -232,9 +232,10 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .fwdhand{display:block;margin:8px 0 0;font-size:13px}
 .fwdhand .muted{display:block;margin:3px 0 0 22px;font-size:12px;line-height:1.45}
 
-/* The other way in. Ruled off from the drag-and-drop panel above it, because
-   the two are alternatives and the Upload button belongs to only one of them. */
-.gphblock{margin:18px 0 0;padding:14px 0 0;border-top:1px solid var(--gasf-border)}
+/* The other way in. Ruled off from the drop zone above it because they are
+   alternatives, but on the same side of the Upload button, because Upload is
+   what commits whatever either one of them put in the list. */
+.gphblock{margin:14px 0 0;padding:14px 0 0;border-top:1px solid var(--gasf-border)}
 .gphblock h4{margin:0 0 4px;font-size:14px}
 .gphblock>.muted{display:block;margin:0 0 10px;font-size:12px;line-height:1.5;max-width:62ch}
 .gphrow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}

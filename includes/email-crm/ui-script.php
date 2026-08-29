@@ -2371,6 +2371,10 @@ function gasf_crm_render_inbox_script() {
 
 	function upEventId(){ return parseInt(upEl('upeventid').value, 10) || 0; }
 
+	/* A row carries its own name and size rather than reaching into a File for
+	   them, because not every row has one: a photo picked in Google Photos is a
+	   reference the server will fetch, and it waits in this same list, under
+	   this same Upload button, for exactly the same reasons. */
 	function upAdd(files){
 		Array.prototype.forEach.call(files, function(f){
 			// A dragged folder, a PDF, a .zip of the evening — skipped rather than
@@ -2378,12 +2382,47 @@ function gasf_crm_render_inbox_script() {
 			if (!/^(image|video)\//.test(f.type)) { return; }
 			upQueue.push({
 				file: f,
+				name: f.name,
+				size: f.size,
 				state: 'waiting',
 				msg: '',
 				opId: nextOpId('upload-' + String(f && f.name ? f.name : 'file') + '-' + String(f && f.size ? f.size : 0))
 			});
 		});
 		upPaint();
+	}
+
+	/* Photos chosen in Google's picker, HELD rather than imported.
+	   Nothing has been downloaded when these appear: a row is a reference Google
+	   honours for an hour, and pressing Upload is what goes and fetches it. That
+	   is the point — the batch form is filled in while things wait in the list,
+	   so importing on the spot described every photo with an empty form. */
+	function upAddGoogle(items, session){
+		var added = 0;
+		(items || []).forEach(function(m){
+			// Picking the same set twice is the commonest way to end up here, and
+			// two identical rows would both be fetched and the second refused.
+			var already = upQueue.some(function(x){
+				return x.google && x.google.session === session && x.google.key === m.key;
+			});
+			if (already) { return; }
+			upQueue.push({
+				file: null,
+				google: { session: session, key: m.key },
+				name: m.name || 'Google photo',
+				size: 0,
+				// Size is the one thing the picker does not report, so the row
+				// shows what it does know: the date the camera recorded. Which is
+				// the thing worth checking before committing an evening's worth.
+				hint: 'Google Photos' + (m.taken ? ' · ' + m.taken : ''),
+				state: 'waiting',
+				msg: '',
+				opId: nextOpId('gphoto-' + session + '-' + m.key)
+			});
+			added++;
+		});
+		upPaint();
+		return added;
 	}
 
 	function upKB(n){
@@ -2426,8 +2465,8 @@ function gasf_crm_render_inbox_script() {
 			}
 
 			return '<div class="uprow ' + u.state + '">' +
-				'<span class="upname">' + esc(u.file.name) + '</span>' +
-				'<span class="upsize">' + upKB(u.file.size) + '</span>' +
+				'<span class="upname">' + esc(u.name) + '</span>' +
+				'<span class="upsize">' + esc(u.hint || upKB(u.size)) + '</span>' +
 				bar +
 				(detail ? '<span class="uprate">' + esc(detail) + '</span>' : '') +
 				'<span class="upstate">' + esc(u.msg || word) + '</span>' +
@@ -2451,26 +2490,58 @@ function gasf_crm_render_inbox_script() {
 		}
 	}
 
+	/* The batch form, read at the moment Upload is pressed rather than at the
+	   moment the file joined the list. That is what holding things in a list is
+	   FOR: the description gets filled in while they wait. */
+	function upFields(){
+		return {
+			consent:  upEl('upconsent').checked ? '1' : '0',
+			note:     upEl('upnote').value,
+			taken:    upEl('update').value,
+			group:    upEl('upgroup').value,
+			place:    upEl('upplace').value,
+			event:    upEl('upevent').value,
+			event_id: String(upEventId()),
+			flyer:    upEl('upflyer').checked ? '1' : '0'
+		};
+	}
+
 	function upSend(u, onProgress){
-		var fd = new FormData();
-		fd.append('file', u.file);
-		fd.append('op_id', String(u.opId || (u.opId = nextOpId('upload'))));
-		fd.append('consent', upEl('upconsent').checked ? '1' : '0');
-		fd.append('note', upEl('upnote').value);
-		fd.append('taken', upEl('update').value);
-		fd.append('group', upEl('upgroup').value);
-		fd.append('place', upEl('upplace').value);
-		fd.append('event', upEl('upevent').value);
-		fd.append('event_id', String(upEventId()));
-		fd.append('flyer', upEl('upflyer').checked ? '1' : '0');
+		var fields = upFields(), k;
+		var opId = String(u.opId || (u.opId = nextOpId('upload')));
+		var url, body, json = false;
+
+		if (u.google) {
+			// Nothing to upload: the bytes are still at Google and the server
+			// goes and gets them. Same destination, same guards, same one photo
+			// per request so a single refusal names its own photo — only the
+			// transport differs, and the wait is longer at the far end.
+			json = true;
+			url  = API + '/photos/google/fetch';
+			fields.session = u.google.session;
+			fields.key     = u.google.key;
+			fields.op_id   = opId;
+			body = JSON.stringify(fields);
+		} else {
+			url  = API + '/photos/upload';
+			body = new FormData();
+			body.append('file', u.file);
+			body.append('op_id', opId);
+			for (k in fields) {
+				if (Object.prototype.hasOwnProperty.call(fields, k)) { body.append(k, fields[k]); }
+			}
+		}
 
 		return new Promise(function(resolve, reject){
 			var xhr = new XMLHttpRequest();
 			u.xhr = xhr;                       // so Stop can abort it mid-flight
-			xhr.open('POST', API + '/photos/upload', true);
+			xhr.open('POST', url, true);
 			xhr.setRequestHeader('X-WP-Nonce', NONCE);
+			if (json) { xhr.setRequestHeader('Content-Type', 'application/json'); }
 			xhr.withCredentials = true;
-			xhr.timeout = 180000;
+			// A Google row waits on a download plus sixteen thumbnail sizes at
+			// the far end, which is a slower thing than sending bytes up a wire.
+			xhr.timeout = u.google ? 300000 : 180000;
 
 			function rejectWith(msg, transient, status, code){
 				var e = new Error(msg);
@@ -2486,7 +2557,7 @@ function gasf_crm_render_inbox_script() {
 			// Bytes are all up; from here the wait is the server's, and how long
 			// that takes is not knowable from out here. Said in words rather than
 			// left as a bar sitting at 100% looking stuck.
-			xhr.upload.onload = function(){ onProgress(u.file.size, u.file.size, true); };
+			xhr.upload.onload = function(){ onProgress(u.size, u.size, true); };
 
 			xhr.onload = function(){
 				var b = null;
@@ -2516,7 +2587,7 @@ function gasf_crm_render_inbox_script() {
 			xhr.ontimeout = function(){ rejectWith('timed out on the way up.', true); };
 			xhr.onabort   = function(){ rejectWith('was stopped.', false); };
 
-			xhr.send(fd);
+			xhr.send(body);
 		});
 	}
 
@@ -2566,7 +2637,7 @@ function gasf_crm_render_inbox_script() {
 				return;
 			}
 
-			u.state = 'going'; u.msg = ''; u.sent = 0; u.total = u.file.size;
+			u.state = 'going'; u.msg = ''; u.sent = 0; u.total = u.size;
 			u.rate = 0; u.eta = 0;
 			var t0 = Date.now(), lastPaint = 0;
 			upPaint();
@@ -2590,7 +2661,7 @@ function gasf_crm_render_inbox_script() {
 			}).catch(function(e){
 				u.state = 'failed';
 				// The messages read as a sentence continuing the filename.
-				u.msg = u.file.name + ' ' + e.message;
+				u.msg = u.name + ' ' + e.message;
 				failed++;
 			}).then(function(){
 				u.xhr = null;
@@ -2640,7 +2711,7 @@ function gasf_crm_render_inbox_script() {
 				u.state = 'going';
 				u.msg = '';
 				u.sent = 0;
-				u.total = u.file.size;
+				u.total = u.size;
 				u.rate = 0;
 				u.eta = 0;
 				(function(u){
@@ -2661,7 +2732,7 @@ function gasf_crm_render_inbox_script() {
 						added++;
 					}).catch(function(e){
 						u.state = 'failed';
-						u.msg = u.file.name + ' ' + (e && e.message ? e.message : 'failed.');
+						u.msg = u.name + ' ' + (e && e.message ? e.message : 'failed.');
 						failed++;
 					}).then(function(){
 						u.xhr = null;
@@ -3707,39 +3778,30 @@ function gasf_crm_render_inbox_script() {
 			gphgo.textContent = label || 'Import from Google Photos…';
 		};
 
-		var gphImport = function(session){
-			gphBusy(true, 'Bringing them in…');
-			gphSay('Downloading the photos you chose. This can take a minute.');
-			return api('/photos/google/import', { method:'POST', body: JSON.stringify({
-				session: session,
-				// The batch fields from the upload form above, so an import is
-				// described exactly like a drag-and-drop and lands with the same
-				// date, place and permission rather than as untagged strangers.
-				taken: upEl('update').value,
-				place: upEl('upplace').value,
-				event: upEl('upevent').value,
-				event_id: upEventId(),
-				group: upEl('upgroup').value,
-				flyer: upEl('upflyer').checked ? '1' : '0',
-				note: upEl('upnote').value,
-				consent_scope: upEl('upconsent').checked ? 'full' : 'limited',
-				op_id: nextOpId('gphotos-' + session)
-			}) }).then(function(r){
-				var bits = [];
-				if (r.added)   { bits.push(r.added + (r.added === 1 ? ' photo saved' : ' photos saved')); }
-				// Said, not swallowed: re-picking a set imported last week is
-				// the commonest thing to do, and silence would read as failure.
-				if (r.skipped) { bits.push(r.skipped + ' already here'); }
-				if (r.errors && r.errors.length) { bits.push(r.errors.length + ' could not be taken'); }
-				var done = bits.length ? bits.join(', ') + '.' : 'Nothing came back.';
-				// "Saved" on its own still leaves somebody looking at a greyed-out
-				// Upload button wondering whether they have finished. Say so.
-				if (r.added) { done += ' They are in the library now — nothing else to press.'; }
-				if (r.errors && r.errors.length) { done += ' ' + r.errors[0]; }
-				gphSay(done);
-				gphBusy(false);
-				if (r.added && typeof loadPhotos === 'function') { loadPhotos(); }
-			});
+		/* Picking ENDS here. What comes back is a list of descriptions, which
+		   go into the same waiting list as dragged files; the bytes stay at
+		   Google until Upload sends for them one at a time. */
+		var gphStage = function(session){
+			gphBusy(true, 'Fetching your choices…');
+			gphSay('Reading the list of what you picked.');
+			return api('/photos/google/list', { method:'POST', body: JSON.stringify({ session: session }) })
+				.then(function(r){
+					var got = (r.items || []).length;
+					var n   = upAddGoogle(r.items || [], session);
+					gphBusy(false);
+					if (!n) {
+						// Re-picking a set is the commonest thing to do, so the
+						// difference between "already listed" and "you picked
+						// nothing" is worth spending a sentence on.
+						gphSay(got ? 'Those are already waiting in the list.' : 'Nothing was chosen.');
+						return;
+					}
+					// This used to save them outright. Somebody who used it that
+					// way will assume it has again unless it says otherwise.
+					gphSay(n + (n === 1 ? ' photo is' : ' photos are') +
+						' waiting in the list. Fill in the date, place, and event, then press Upload' +
+						' — nothing is saved until you do.');
+				});
 		};
 
 		var gphWait = function(session, every){
@@ -3754,7 +3816,7 @@ function gasf_crm_render_inbox_script() {
 				}
 				api('/photos/google/poll?session=' + encodeURIComponent(session))
 					.then(function(r){
-						if (r.picked) { gphImport(session).catch(function(e){ gphBusy(false); gphSay(e.message); }); return; }
+						if (r.picked) { gphStage(session).catch(function(e){ gphBusy(false); gphSay(e.message); }); return; }
 						setTimeout(tick, Math.max(2, every) * 1000);
 					})
 					.catch(function(e){ gphBusy(false); gphSay(e.message); });

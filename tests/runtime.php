@@ -802,6 +802,45 @@ final class GASF_CRM_Selftest {
 		);
 		gasf_crm_gphotos_token_clear();
 		$this->ok( '' === gasf_crm_gphotos_token(), 'google photos: disconnecting really drops it' );
+
+		/*
+		 * Picking holds; only Upload saves.
+		 *
+		 * The first build imported on the spot: the volunteer chose in Google's
+		 * window and the photos were in the library a minute later, described by
+		 * whatever was in the batch form at the moment the button was pressed -
+		 * which was usually nothing, because the form is what you fill in WHILE
+		 * things wait in the list.
+		 *
+		 * That is a promise about behaviour, and the honest way to pin it is to
+		 * pin the STRUCTURE it rests on rather than a scenario: the route that
+		 * saved without being asked is gone, the two that replaced it are there,
+		 * and exactly one place in this file can write a photo into the library.
+		 * A "simplification" that restores the old one-shot import cannot pass
+		 * this quietly.
+		 */
+		$routes = rest_get_server()->get_routes();
+		$this->ok(
+			! isset( $routes['/gasf/v1/crm/photos/google/import'] ),
+			'google photos: the route that saved without being asked is gone'
+		);
+		$this->ok(
+			isset( $routes['/gasf/v1/crm/photos/google/list'] ) && isset( $routes['/gasf/v1/crm/photos/google/fetch'] ),
+			'google photos: picking lists what was chosen, and Upload fetches it one at a time'
+		);
+		$this->ok(
+			1 === substr_count( $src, 'gasf_crm_photo_upload_one' ),
+			'google photos: exactly one place here can write a photo, and it is the one Upload calls'
+		);
+
+		// A held pick is a list of URLs the server will fetch on request, so it
+		// must belong to the volunteer who picked it and to nobody else.
+		$uid = get_current_user_id();
+		$this->ok(
+			gasf_crm_gphotos_pick_key( 'abc' ) === 'gasf_gph_pick_' . $uid . '_' . md5( 'abc' )
+			&& gasf_crm_gphotos_pick_key( 'abc' ) !== 'gasf_gph_pick_' . ( $uid + 1 ) . '_' . md5( 'abc' ),
+			'google photos: a held pick is keyed to its volunteer, so another cannot fetch from it'
+		);
 	}
 
 	/** The zip export obeys the policy, and says how many it left out. */

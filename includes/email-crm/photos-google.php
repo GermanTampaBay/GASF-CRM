@@ -265,6 +265,97 @@ add_action( 'rest_api_init', function () {
 } );
 
 /* ---------------------------------------------------------------------------
+ * What was picked, held rather than swallowed
+ *
+ * Picking used to import: the volunteer chose in Google's window and the photos
+ * appeared in the library a minute later, already saved, described by whatever
+ * happened to be in the batch form at the moment the button was pressed. Which
+ * was usually nothing, because the form is what you fill in WHILE the files sit
+ * in the list waiting.
+ *
+ * So a pick now stops where a drag-and-drop stops. This holds the chosen items
+ * as a LIST OF REFERENCES - a name, a type, a date, and the URL to fetch them
+ * from later - and nothing is downloaded, nothing is written, and nothing
+ * reaches the library until Upload is pressed, one photo at a time, described
+ * by the form as it reads then.
+ *
+ * The baseUrls are kept HERE and never handed to the browser. A volunteer who
+ * could name the URL to fetch could name any URL, and the server would
+ * obediently go and get it; the browser gets an index into this list instead.
+ * The list is keyed by user as well as session, so one volunteer's pick is not
+ * reachable from another's browser.
+ *
+ * An hour, because that is how long Google honours a baseUrl. A volunteer who
+ * stages photos and goes to lunch gets a plain refusal rather than a silence.
+ * ------------------------------------------------------------------------ */
+
+/** Where one volunteer's picked-but-not-yet-uploaded list lives. */
+function gasf_crm_gphotos_pick_key( $session ) {
+	return 'gasf_gph_pick_' . get_current_user_id() . '_' . md5( (string) $session );
+}
+
+/**
+ * Fetch one picked item to a temporary file.
+ *
+ * Streamed by hand rather than with download_url(), which takes
+ * ( $url, $timeout, $signature_verification ) and no request args - so an
+ * Authorization header passed as a fourth argument was accepted by PHP and
+ * quietly dropped. Google requires a bearer token on a baseUrl and answered
+ * 403, which arrived as the single word "Forbidden": true, and giving no hint
+ * that the request had gone out naked.
+ *
+ * Returns a path, or a WP_Error whose message finishes the sentence
+ * "<filename> ...".
+ */
+function gasf_crm_gphotos_fetch_tmp( array $d, $token ) {
+	require_once ABSPATH . 'wp-admin/includes/file.php';   // wp_tempnam() is not loaded for REST
+
+	$base = (string) ( $d['base'] ?? '' );
+	if ( '' === $base ) {
+		return new WP_Error( 'gasf_crm_gph', 'is no longer available from Google.' );
+	}
+
+	// =d for a still, =dv for a clip: the download forms, which keep the
+	// original rather than a display-sized copy. Google strips the location
+	// from these, which suits a catalogue that scrubs GPS at publish anyway.
+	$fetch = $base . ( ! empty( $d['video'] ) ? '=dv' : '=d' );
+
+	$tmp = wp_tempnam( (string) ( $d['name'] ?? 'photo' ) );
+	if ( ! $tmp ) {
+		return new WP_Error( 'gasf_crm_gph', 'could not be given room on the server.' );
+	}
+
+	$got = wp_safe_remote_get( $fetch, array(
+		'timeout'  => 120,
+		'stream'   => true,
+		'filename' => $tmp,
+		'headers'  => array( 'Authorization' => 'Bearer ' . $token ),
+	) );
+	if ( is_wp_error( $got ) ) {
+		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return new WP_Error( 'gasf_crm_gph', $got->get_error_message() );
+	}
+
+	$code = (int) wp_remote_retrieve_response_code( $got );
+	if ( $code < 200 || $code >= 300 ) {
+		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		gasf_crm_log( 'CRM Google Photos: ' . $code . ' fetching a picked photo' );
+		// 401 and 403 here are the hour running out, which is the one failure a
+		// volunteer can actually do something about, so it says what to do.
+		if ( 401 === $code || 403 === $code ) {
+			return new WP_Error( 'gasf_crm_gph_auth', 'could not be fetched: the Google permission has expired. Press Import from Google Photos again.' );
+		}
+		return new WP_Error( 'gasf_crm_gph', sprintf( 'was refused by Google (%d).', $code ) );
+	}
+
+	if ( ! @filesize( $tmp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return new WP_Error( 'gasf_crm_gph', 'arrived empty.' );
+	}
+	return $tmp;
+}
+
+/* ---------------------------------------------------------------------------
  * The picker session, and bringing back what was chosen
  * ------------------------------------------------------------------------ */
 
@@ -320,14 +411,13 @@ add_action( 'rest_api_init', function () {
 	) );
 
 	/**
-	 * Bring the chosen photos in.
+	 * List what was picked. Downloads nothing, saves nothing.
 	 *
-	 * Everything goes through gasf_crm_photo_upload_one() so an import is
-	 * treated exactly like a drag-and-drop: same limits, same duplicate check,
-	 * same consent record, same review folder. The only difference is where the
-	 * bytes came from, and that is this function's whole job.
+	 * The answer is descriptions only - a name, a type, and the date the camera
+	 * recorded - which is exactly what a volunteer needs in order to check they
+	 * picked the right evening before committing any of it.
 	 */
-	register_rest_route( 'gasf/v1', '/crm/photos/google/import', array(
+	register_rest_route( 'gasf/v1', '/crm/photos/google/list', array(
 		'methods'             => 'POST',
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
@@ -337,13 +427,6 @@ add_action( 'rest_api_init', function () {
 			}
 			$id = preg_replace( '~[^A-Za-z0-9_-]~', '', (string) $req->get_param( 'session' ) );
 			if ( '' === $id ) { return new WP_Error( 'gasf_crm_bad', 'No session.', array( 'status' => 400 ) ); }
-
-			$op = gasf_crm_op_start( 'gphotos-import:' . $id, $req, 20 * MINUTE_IN_SECONDS );
-			if ( is_wp_error( $op ) ) { return $op; }
-			if ( ! empty( $op['duplicate'] ) ) {
-				$cached = get_transient( $op['key'] . ':result' );
-				if ( is_array( $cached ) ) { return $cached; }
-			}
 
 			// Everything the volunteer picked, a page at a time.
 			$items = array();
@@ -355,150 +438,148 @@ add_action( 'rest_api_init', function () {
 					'pageToken' => $page ? $page : null,
 				) ), 'https://photospicker.googleapis.com/v1/mediaItems' );
 				$list = gasf_crm_gphotos_api( 'GET', $url, $token );
-				if ( is_wp_error( $list ) ) { gasf_crm_op_finish( $op, false ); return $list; }
+				if ( is_wp_error( $list ) ) { return $list; }
 				foreach ( (array) ( $list['mediaItems'] ?? array() ) as $m ) { $items[] = $m; }
 				$page = (string) ( $list['nextPageToken'] ?? '' );
 			} while ( $page && count( $items ) < GASF_CRM_GPHOTOS_MAX + 1 );
 
 			if ( ! $items ) {
-				gasf_crm_op_finish( $op, true, MINUTE_IN_SECONDS );
-				return array( 'ok' => true, 'added' => 0, 'skipped' => 0, 'errors' => array( 'Nothing was chosen.' ) );
+				return array( 'ok' => true, 'items' => array() );
 			}
 			if ( count( $items ) > GASF_CRM_GPHOTOS_MAX ) {
-				gasf_crm_op_finish( $op, false );
 				return new WP_Error( 'gasf_crm_gph_many', sprintf(
-					'That is %d photos; %d is the most in one import. Choose fewer and go again.',
+					'That is %d photos; %d is the most in one go. Choose fewer and go again.',
 					count( $items ), GASF_CRM_GPHOTOS_MAX
 				), array( 'status' => 413 ) );
 			}
 
-			/*
-			 * wp_tempnam() lives in wp-admin/includes/file.php, which a REST
-			 * request does not load. Without this the import fataled on the
-			 * first photo and WordPress answered with an HTML error page, which
-			 * the browser reported as "Unexpected token '<'" - a complaint about
-			 * parsing that named nothing. Required here rather than at the top
-			 * of the file so the cost lands on the one request that needs it.
-			 */
-			require_once ABSPATH . 'wp-admin/includes/file.php';
-
-			// This can take a while - sixteen sizes per photo, plus the fetch.
-			if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
-
-			$in = array(
-				'taken'         => (string) $req->get_param( 'taken' ),
-				'place'         => (string) $req->get_param( 'place' ),
-				'event'         => (string) $req->get_param( 'event' ),
-				'event_id'      => (int) $req->get_param( 'event_id' ),
-				'caption'       => (string) $req->get_param( 'caption' ),
-				'group'         => (string) $req->get_param( 'group' ),
-				'flyer'         => (string) $req->get_param( 'flyer' ),
-				'people'        => (array) $req->get_param( 'people' ),
-				'note'          => (string) $req->get_param( 'note' ),
-				'consent_scope' => (string) $req->get_param( 'consent_scope' ),
-				'sideload'      => true,   // the bytes are ours, not a browser's
-			);
-
-			$added   = 0;
-			$skipped = 0;
-			$errors  = array();
+			$store = array();
+			$out   = array();
 			foreach ( $items as $m ) {
 				$file = (array) ( $m['mediaFile'] ?? array() );
 				$base = (string) ( $file['baseUrl'] ?? '' );
-				$mime = (string) ( $file['mimeType'] ?? '' );
-				$name = sanitize_file_name( (string) ( $file['filename'] ?? '' ) );
-				if ( '' === $base ) { $skipped++; continue; }
+				if ( '' === $base ) { continue; }
 
-				// =d for a still, =dv for a clip: the download forms, which keep
-				// the original rather than a display-sized copy. Google strips
-				// the location from these, which suits a catalogue that scrubs
-				// GPS at publish anyway.
-				$is_video = 0 === strpos( $mime, 'video/' );
-				$fetch    = $base . ( $is_video ? '=dv' : '=d' );
-
-				/*
-				 * Streamed by hand rather than with download_url().
-				 *
-				 * download_url( $url, $timeout, $signature_verification ) takes
-				 * three arguments and no request args, so the Authorization
-				 * header passed as a fourth was accepted by PHP and quietly
-				 * dropped. Google requires a bearer token on a baseUrl and
-				 * answered 403, which arrived as the single word "Forbidden" -
-				 * true, and giving no hint that the request had gone out naked.
-				 * wp_safe_remote_get streams to a file the same way and does
-				 * take headers.
-				 */
-				$tmp = wp_tempnam( $name );
-				if ( ! $tmp ) {
-					$errors[] = ( $name ? $name : 'A photo' ) . ': the server could not make room for it.';
-					continue;
-				}
-				$got = wp_safe_remote_get( $fetch, array(
-					'timeout'  => 120,
-					'stream'   => true,
-					'filename' => $tmp,
-					'headers'  => array( 'Authorization' => 'Bearer ' . $token ),
-				) );
-				if ( is_wp_error( $got ) ) {
-					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					$errors[] = ( $name ? $name : 'A photo' ) . ': ' . $got->get_error_message();
-					continue;
-				}
-				$got_code = (int) wp_remote_retrieve_response_code( $got );
-				if ( $got_code < 200 || $got_code >= 300 ) {
-					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					gasf_crm_log( 'CRM Google Photos: ' . $got_code . ' fetching a picked photo' );
-					$errors[] = ( $name ? $name : 'A photo' ) . ': Google refused the download (' . $got_code . ').';
-					continue;
-				}
-				if ( ! @filesize( $tmp ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					$errors[] = ( $name ? $name : 'A photo' ) . ': arrived empty.';
-					continue;
-				}
-
+				$mime  = (string) ( $file['mimeType'] ?? '' );
+				$video = 0 === strpos( $mime, 'video/' );
+				$name  = sanitize_file_name( (string) ( $file['filename'] ?? '' ) );
 				if ( '' === $name ) {
-					$name = 'google-photo-' . substr( md5( $base ), 0, 8 ) . ( $is_video ? '.mp4' : '.jpg' );
+					$name = 'google-photo-' . substr( md5( $base ), 0, 8 ) . ( $video ? '.mp4' : '.jpg' );
 				}
 
-				$res = gasf_crm_photo_upload_one(
-					array(
-						'name'     => $name,
-						'type'     => $mime,
-						'tmp_name' => $tmp,
-						'error'    => 0,
-						'size'     => (int) @filesize( $tmp ), // phpcs:ignore WordPress.PHP.NoSilencedErrors
-					),
-					$in
+				// The camera's date, read defensively: the Picker has moved it
+				// once already, and a missing date should show as a blank rather
+				// than take the panel down with it.
+				$meta  = (array) ( $file['mediaFileMetadata'] ?? array() );
+				$when  = (string) ( $m['createTime'] ?? ( $meta['creationTime'] ?? '' ) );
+				$taken = $when ? substr( $when, 0, 10 ) : '';
+
+				$key = count( $store );
+				$store[] = array( 'base' => $base, 'mime' => $mime, 'name' => $name, 'video' => $video );
+				$out[]   = array(
+					'key'   => $key,
+					'name'  => $name,
+					'mime'  => $mime,
+					'video' => $video,
+					'taken' => $taken,
+					'w'     => (int) ( $meta['width'] ?? 0 ),
+					'h'     => (int) ( $meta['height'] ?? 0 ),
 				);
-				@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- gone already on success
-
-				if ( is_wp_error( $res ) ) {
-					// A duplicate is not a failure: it is the answer to "have we
-					// already got this one", and it is the commonest outcome when
-					// somebody re-picks a set they imported last week.
-					if ( 'gasf_crm_dupe' === $res->get_error_code() ) { $skipped++; continue; }
-					$errors[] = $name . ': ' . $res->get_error_message();
-					continue;
-				}
-				$added++;
 			}
 
+			set_transient( gasf_crm_gphotos_pick_key( $id ), $store, HOUR_IN_SECONDS );
 			gasf_crm_log( sprintf(
-				'CRM Google Photos: user %d imported %d photo(s), %d already here, %d refused',
-				get_current_user_id(), $added, $skipped, count( $errors )
+				'CRM Google Photos: user %d staged %d picked item(s) for review',
+				get_current_user_id(), count( $out )
 			) );
+			return array( 'ok' => true, 'items' => $out );
+		},
+	) );
 
-			$out = array(
-				'ok'      => true,
-				'added'   => $added,
-				'skipped' => $skipped,
-				'errors'  => array_slice( $errors, 0, 8 ),
+	/**
+	 * Bring in ONE staged photo, now that Upload has been pressed.
+	 *
+	 * Everything goes through gasf_crm_photo_upload_one(), so this arrives with
+	 * the same byte cap, the same decompression-bomb guard, the same HEIC
+	 * conversion, the same duplicate fingerprint, the same consent record and
+	 * the same held-for-review folder as a drag-and-drop. The fields are read
+	 * from THIS request, so a photo is described by the form as it stands when
+	 * the volunteer commits it rather than as it stood when they picked.
+	 *
+	 * One at a time on purpose: it is the drag-and-drop shape, so a single
+	 * refusal names its own photo and leaves the rest of the batch alone.
+	 */
+	register_rest_route( 'gasf/v1', '/crm/photos/google/fetch', array(
+		'methods'             => 'POST',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$token = gasf_crm_gphotos_token();
+			if ( '' === $token ) {
+				return new WP_Error( 'gasf_crm_gph_auth',
+					'The Google permission has expired. Press Import from Google Photos again.',
+					array( 'status' => 401 ) );
+			}
+			$id = preg_replace( '~[^A-Za-z0-9_-]~', '', (string) $req->get_param( 'session' ) );
+			if ( '' === $id ) { return new WP_Error( 'gasf_crm_bad', 'No session.', array( 'status' => 400 ) ); }
+
+			$store = get_transient( gasf_crm_gphotos_pick_key( $id ) );
+			if ( ! is_array( $store ) ) {
+				return new WP_Error( 'gasf_crm_gph_stale',
+					'That pick is no longer held — it is over an hour old. Press Import from Google Photos again.',
+					array( 'status' => 409 ) );
+			}
+			$key = (int) $req->get_param( 'key' );
+			if ( ! isset( $store[ $key ] ) ) {
+				return new WP_Error( 'gasf_crm_bad', 'That photo is not in the picked list.', array( 'status' => 400 ) );
+			}
+			$d = (array) $store[ $key ];
+
+			$op = gasf_crm_op_start( 'gphotos-fetch:' . md5( $id . '|' . $key ), $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				return array( 'ok' => true, 'duplicate' => true );
+			}
+
+			// A fetch plus sixteen thumbnail sizes is not a two-second request.
+			if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
+
+			$tmp = gasf_crm_gphotos_fetch_tmp( $d, $token );
+			if ( is_wp_error( $tmp ) ) {
+				gasf_crm_op_finish( $op, false );
+				$tmp->add_data( array( 'status' => 'gasf_crm_gph_auth' === $tmp->get_error_code() ? 401 : 409 ) );
+				return $tmp;
+			}
+
+			$card = gasf_crm_photo_upload_one(
+				array(
+					'name'     => (string) $d['name'],
+					'type'     => (string) $d['mime'],
+					'tmp_name' => $tmp,
+					'error'    => 0,
+					'size'     => (int) @filesize( $tmp ), // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				),
+				array(
+					'taken'    => (string) $req->get_param( 'taken' ),
+					'group'    => (string) $req->get_param( 'group' ),
+					'groups'   => (array) $req->get_param( 'groups' ),
+					'place'    => (string) $req->get_param( 'place' ),
+					'event'    => (string) $req->get_param( 'event' ),
+					'event_id' => (int) $req->get_param( 'event_id' ),
+					'flyer'    => (string) $req->get_param( 'flyer' ),
+					'consent_scope' => ( '1' === (string) $req->get_param( 'consent' ) ) ? 'full' : 'limited',
+					'note'     => (string) $req->get_param( 'note' ),
+					'sideload' => true,   // the bytes are ours, not a browser's
+				)
 			);
-			set_transient( $op['key'] . ':result', $out, HOUR_IN_SECONDS );
-			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
-			return $out;
+			@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- gone already on success
+
+			if ( is_wp_error( $card ) ) {
+				gasf_crm_op_finish( $op, false );
+				return $card;
+			}
+			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
+			return array( 'ok' => true, 'photo' => $card );
 		},
 	) );
 } );

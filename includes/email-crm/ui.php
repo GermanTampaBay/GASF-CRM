@@ -686,27 +686,29 @@ function gasf_crm_render_inbox() {
 			         the phone had just dumped it into. */ ?>
 			<input type="file" id="upinput" accept="image/jpeg,image/png,image/gif,image/webp,image/heic,image/heif,image/avif,.heic,.heif,.avif,video/mp4,video/quicktime" multiple hidden>
 		</div>
+		<?php /* The OTHER way to fill the list below, sitting beside the drop
+		         zone because that is what it now is.
+		         It used to save the photos outright, which is why it spent a
+		         while banished under the Upload row: an import finished, nothing
+		         was queued, Upload stayed correctly greyed out, and the panel
+		         read as broken. Picking now stops where dragging stops - the
+		         chosen photos wait in the list, the form gets filled in, and
+		         Upload commits them - so the two routes belong next to each
+		         other again, above the one button that saves anything. */ ?>
+		<div class="gphblock">
+			<h4>Or choose them from Google Photos</h4>
+			<p class="muted">You pick in Google's own picker and they land in the list below, waiting, exactly like files you drag in. Nothing is saved until you press Upload. The club never browses your library; it only receives what you hand over.</p>
+			<div class="gphrow">
+				<button class="btn sec" id="gphgo" type="button">Import from Google Photos&hellip;</button>
+				<span class="muted" id="gphmsg"></span>
+			</div>
+		</div>
 		<div id="uplist" class="uplist"></div>
 		<div class="actions" style="margin-top:14px">
 			<button class="btn" id="upgo" type="button" disabled>Upload</button>
 			<button class="btn sec" id="upclear" type="button" hidden>Reset form</button>
 			<button class="btn warn" id="upstop" type="button" hidden>Stop</button>
 			<span class="muted" id="upstatus"></span>
-		</div>
-		<?php /* A SECOND way in, not a step in the first one.
-		         It sat between the dropzone and the file list, which read as
-		         part of dragging files in - so an import finished, nothing was
-		         queued, Upload stayed correctly greyed out, and the whole panel
-		         looked broken. Below the Upload row, under its own heading, it
-		         is what it actually is: the other route, which needs no Upload
-		         because the photos are already here when it finishes. */ ?>
-		<div class="gphblock">
-			<h4>Or bring them straight from Google Photos</h4>
-			<p class="muted">You pick them in Google's own picker and they arrive here already saved &mdash; there is no need to press Upload. The club never browses your library; it only receives what you hand over.</p>
-			<div class="gphrow">
-				<button class="btn sec" id="gphgo" type="button">Import from Google Photos&hellip;</button>
-				<span class="muted" id="gphmsg"></span>
-			</div>
 		</div>
 	</div>
 </div>

@@ -83,11 +83,31 @@ screen with "access blocked". That is the symptom to look for.
 - Google strips **location** from the downloaded copies, so no home addresses
   arrive with the pictures.
 - Everything imported lands in the same held-for-review queue as any other
-  upload, with the same duplicate check, consent record and limits.
+  upload, with the same duplicate check, consent record, and limits.
+
+## Picking holds; Upload saves
+
+Choosing photos in Google's picker does **not** save them. They arrive in the
+same waiting list as files dragged in, and nothing is downloaded or written
+until **Upload** is pressed — at which point the server fetches them one at a
+time and files each one under the date, place, event, and permission the form
+says *then*.
+
+That ordering is the point. The batch form is what you fill in while things sit
+in the list, so a version that saved on the spot described every photo with an
+empty form, and gave no chance to notice that a picked date was the wrong
+evening.
+
+The held list is a set of references Google honours for about an hour, kept on
+the server and keyed to the volunteer who picked them. After that, Upload
+reports that the permission has expired and the button asks Google again.
 
 ## Checking it works
 
 Sign in at `/email`, go to **Add photos**, press **Import from Google
-Photos…**. Expect: a Google window asking for "See the photos you select",
-then Google's picker, then a count of what came in. A second import of the same
-photos should report them as *already here* rather than adding twins.
+Photos…**. Expect: a Google window asking for "See the photos you select", then
+Google's picker, then rows appearing in the list marked *Google Photos* with the
+date each was taken — and **Upload** becoming available. Nothing should be in
+the library until you press it. Picking the same photos twice should report them
+as *already waiting in the list*; uploading them twice should report them as
+duplicates rather than adding twins.
