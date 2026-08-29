@@ -349,6 +349,17 @@ add_action( 'rest_api_init', function () {
 				), array( 'status' => 413 ) );
 			}
 
+			/*
+			 * download_url() lives in wp-admin/includes/file.php, which a REST
+			 * request does not load. Without this the import fataled the moment
+			 * it reached the first photo, and WordPress answered with an HTML
+			 * error page - which the browser then tried to read as JSON and
+			 * reported as "Unexpected token '<'". The real error never reached
+			 * anybody. Required here rather than at the top of the file so the
+			 * cost lands on the one request that needs it.
+			 */
+			require_once ABSPATH . 'wp-admin/includes/file.php';
+
 			// This can take a while - sixteen sizes per photo, plus the fetch.
 			if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
 			@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet

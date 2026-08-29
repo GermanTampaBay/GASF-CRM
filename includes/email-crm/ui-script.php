@@ -75,7 +75,22 @@ function gasf_crm_render_inbox_script() {
 		opts.headers = Object.assign({'X-WP-Nonce': NONCE, 'Content-Type':'application/json'}, opts.headers||{});
 		opts.credentials = 'same-origin';
 		return fetch(API + path, opts).then(function(r){
-			return r.json().then(function(b){
+			/* Not every answer is JSON, and pretending otherwise hides the ones
+			   that matter most. A PHP fatal, a mod_security refusal, or a host
+			   error page all arrive as HTML, and r.json() then rejects with
+			   "Unexpected token '<'" — a message about parsing that says nothing
+			   about what actually went wrong, and buries the status code that
+			   would have. Read the text first, then decide. */
+			return r.text().then(function(raw){
+				var b = null;
+				try { b = raw ? JSON.parse(raw) : null; } catch (e) { b = null; }
+				if (b === null && raw) {
+					var looksHtml = /^\s*</.test(raw);
+					throw new Error(looksHtml
+						? ('The server returned an error page instead of an answer (HTTP ' + r.status + '). ' +
+						   'If this keeps happening the details are in the site log.')
+						: ('Unreadable answer from the server (HTTP ' + r.status + ').'));
+				}
 				if(!r.ok){ throw new Error((b && b.message) || ('Error ' + r.status)); }
 				return b;
 			});
