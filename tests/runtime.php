@@ -1880,6 +1880,55 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * The kiosk card says whether a photo is a flyer.
+	 *
+	 * The kiosk cannot tell a poster from a photograph on its own: the card is
+	 * the whole of what it knows, and across two hundred live photos nothing
+	 * else distinguished the two except an upload filename the card does not
+	 * send. So the club's own answer has to travel.
+	 *
+	 * The assertion that earns its place is the FALSE one. Unticking the box
+	 * deletes the meta row rather than writing 0, and the kiosk's response
+	 * schema drops fields it was not told about - so "absent" and "false" mean
+	 * different things at the far end: one is "not a flyer", the other is
+	 * "this build has no flyer support at all", which would silently un-filter
+	 * a column rather than fail.
+	 */
+	public function test_kiosk_card_flyer() {
+		$id = $this->library_photo( 'st-kiosk-flyer' );
+
+		$card = gasf_kiosk_photo_card( $id );
+		$this->ok( is_array( $card ), 'kiosk: a library photo produces a card' );
+		$this->ok(
+			array_key_exists( 'is_flyer', (array) $card ) && false === $card['is_flyer'],
+			'kiosk: an ordinary photo carries the flag, saying no'
+		);
+
+		// Exactly how the library editor writes it: the integer 1.
+		update_post_meta( $id, '_gasf_photo_flyer', 1 );
+		$card = gasf_kiosk_photo_card( $id );
+		$this->ok( true === $card['is_flyer'], 'kiosk: a flyer says so' );
+
+		// And exactly how it un-writes it: the row goes, it is not set to 0.
+		delete_post_meta( $id, '_gasf_photo_flyer' );
+		$card = gasf_kiosk_photo_card( $id );
+		$this->ok(
+			array_key_exists( 'is_flyer', (array) $card ) && false === $card['is_flyer'],
+			'kiosk: unticking gives a real false rather than a missing key'
+		);
+
+		// The same key the rest of the plugin already filters on. If these ever
+		// part company, the scanner would skip a photo the kiosk still showed
+		// as a photograph, and nothing would report a problem.
+		update_post_meta( $id, '_gasf_photo_flyer', 1 );
+		$this->ok(
+			(bool) get_post_meta( $id, '_gasf_photo_flyer', true ) === gasf_kiosk_photo_card( $id )['is_flyer'],
+			'kiosk: and it reads the same meta the face scanner skips on'
+		);
+		delete_post_meta( $id, '_gasf_photo_flyer' );
+	}
+
 	/** Origin telemetry expires; fresh records and the latch survive. */
 	public function test_origin_prune() {
 		$old = $this->library_photo( 'st-origin-old' );

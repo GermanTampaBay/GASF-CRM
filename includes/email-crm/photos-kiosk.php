@@ -64,7 +64,8 @@ function gasf_kiosk_photo_ids( array $f = array() ) {
  *
  * `rev` + `modified` are the kiosk's cache keys: edited photos keep
  * stable filenames, so the NUC must re-download when either changes.
- * `kind` lets the kiosk skip videos in v1.
+ * `kind` lets the kiosk skip videos in v1, and `is_flyer` lets it tell a
+ * poster from a photograph without guessing at the filename.
  */
 function gasf_kiosk_photo_card( $id ) {
     $id = (int) $id;
@@ -99,6 +100,21 @@ function gasf_kiosk_photo_card( $id ) {
         'places'   => $names( 'gasf_photo_place' ),
         'events'   => $names( 'gasf_photo_event' ),
         'kind'     => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
+        /*
+         * Poster or photograph. The kiosk's two columns want opposite halves
+         * of the same library - the photo wall must keep flyers and adverts
+         * out, while the event column deliberately reaches for one when an
+         * event has no large image of its own. A ?flyer=0 filter could only
+         * ever serve one of them, so the flag rides on every card and the
+         * kiosk sorts per column off a single pull.
+         *
+         * Unticking the box DELETES the row rather than writing 0, so this
+         * must stay a cast and not an isset(): the key is absent far more
+         * often than it is present. Called `flyer` on the library card; the
+         * kiosk contract named it `is_flyer` first and its pipeline is built
+         * on that, so the name differs on purpose rather than by accident.
+         */
+        'is_flyer' => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
         'w'        => (int) ( $meta['width'] ?? 0 ),
         'h'        => (int) ( $meta['height'] ?? 0 ),
         'rev'      => (int) get_post_meta( $id, '_gasf_photo_rev', true ),
