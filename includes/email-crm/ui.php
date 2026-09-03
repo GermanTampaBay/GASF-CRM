@@ -67,6 +67,15 @@ add_action( 'template_redirect', function () {
 			wp_safe_redirect( home_url( '/email' ) );
 			exit;
 
+		case 'coi':
+			// Guarded inside the handler, not here: it is the only caller, and a
+			// permission check that lives next to the thing it protects cannot be
+			// left behind when a second route appears.
+			if ( function_exists( 'gasf_crm_vendor_serve_coi' ) ) {
+				gasf_crm_vendor_serve_coi( (int) get_query_var( 'gasf_crm_id' ) );
+			}
+			return;
+
 		case 'app':
 			gasf_crm_render_app();
 			exit;
@@ -313,6 +322,12 @@ function gasf_crm_render_inbox() {
 	// switcher fills it in, and "All" leaves it blank because no single address
 	// applies to a mixed list.
 	$one_box = ( 1 === count( $my_streams ) ) ? gasf_crm_stream_mailbox( $my_streams[0] ) : '';
+
+	// Somebody granted contracts and no mailbox at all. This whole page is a
+	// mail client with other things bolted beside it, so without this they
+	// would land on an inbox that is empty because they hold none of it --
+	// indistinguishable, to them, from the tool being broken.
+	$gv_only = function_exists( 'gasf_crm_vendor_may_read' ) && gasf_crm_vendor_may_read() && ! $my_streams;
 	?>
 <header class="bar"><div class="wrap">
 	<h1>Club inbox<span class="box" id="hbox"><?php echo $one_box ? ' &mdash; ' . esc_html( $one_box ) : ''; ?></span></h1>
@@ -328,6 +343,15 @@ function gasf_crm_render_inbox() {
 			<button class="hbtn nav" data-view="photos">Photos</button>
 			<button class="hbtn nav" data-view="library">Photo library</button>
 			<button class="hbtn nav" data-view="upload">Add photos</button>
+		<?php endif; ?>
+		<?php if ( function_exists( 'gasf_crm_vendor_may_read' ) && gasf_crm_vendor_may_read() ) : ?>
+			<?php
+			// Deliberately outside the photos block above. Contracts is the first
+			// grant that has nothing to do with a mailbox or the catalogue, so a
+			// person can hold it and nothing else -- and for them this is the only
+			// button on the bar.
+			?>
+			<button class="hbtn nav<?php echo $gv_only ? ' on' : ''; ?>" data-view="contracts">Contracts</button>
 		<?php endif; ?>
 		<button class="hbtn" id="checkmail">Check for new mail</button>
 		<button class="hbtn" onclick="var h=document.getElementById('help');h.style.display=h.style.display==='none'?'block':'none';window.scrollTo(0,0)">Help</button>
@@ -733,7 +757,9 @@ function gasf_crm_render_inbox() {
 </div>
 <?php endif; ?>
 
-<div class="wrap" id="mailview"><div class="layout">
+<?php if ( function_exists( 'gasf_crm_vendor_render_section' ) ) { gasf_crm_vendor_render_section( ! $gv_only ); } ?>
+
+<div class="wrap" id="mailview"<?php echo $gv_only ? ' hidden' : ''; ?>><div class="layout">
 	<div class="card">
 		<?php
 		// The mailbox switcher only appears for somebody who holds more than one

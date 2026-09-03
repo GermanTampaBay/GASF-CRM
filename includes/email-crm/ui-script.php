@@ -2219,9 +2219,13 @@ function gasf_crm_render_inbox_script() {
 			mail:    document.getElementById('mailview'),
 			photos:  document.getElementById('photoview'),
 			library: document.getElementById('libview'),
-			upload:  document.getElementById('uploadview')
+			upload:  document.getElementById('uploadview'),
+			contracts: document.getElementById('contractsview')
 		};
-		if (!panes.photos) { return; } // no photos stream: mail is the only view
+		// Bail only when there is genuinely nothing to switch BETWEEN. This used
+		// to test the photos pane alone, which was the same question right up
+		// until a grant existed that brings a pane without bringing photos.
+		if (!panes.photos && !panes.contracts) { return; }
 
 		Object.keys(panes).forEach(function(k){ if (panes[k]) { panes[k].hidden = (k !== which); } });
 		Array.prototype.forEach.call(document.querySelectorAll('header .hbtn.nav'), function(b){
@@ -2995,11 +2999,12 @@ function gasf_crm_render_inbox_script() {
 		if (p === APP_BASE_PATH + '/photos') { return 'photos'; }
 		if (p === APP_BASE_PATH + '/library') { return 'library'; }
 		if (p === APP_BASE_PATH + '/upload') { return 'upload'; }
+		if (p === APP_BASE_PATH + '/contracts') { return 'contracts'; }
 		return '';
 	}
 
 	function routePathForView(view){
-		if (view === 'photos' || view === 'library' || view === 'upload') {
+		if (view === 'photos' || view === 'library' || view === 'upload' || view === 'contracts') {
 			return APP_BASE_PATH + '/' + view;
 		}
 		return APP_BASE_PATH;

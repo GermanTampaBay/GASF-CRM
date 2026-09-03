@@ -367,6 +367,59 @@ function gasf_crm_install_tables() {
 		PRIMARY KEY  (id),
 		KEY case_time (case_id, created_at)
 	) {$charset};" );
+
+	/*
+	 * Vendor applications - the online half of the club's paper Vendor Agreement.
+	 *
+	 * Its own table rather than a post type, deliberately. These rows carry a
+	 * legal acceptance, a signer's contact details, and a pointer to an insurance
+	 * certificate; wp_posts is the one place in WordPress where a stray archive
+	 * template, a REST route somebody enables, or a plugin's "recent content"
+	 * widget can put a record in front of a reader nobody vetted. A table has no
+	 * such surface, and the CRM already keeps the inbox here for the same reason.
+	 *
+	 * The event is stored BOTH ways on purpose: event_id points at the GASF
+	 * Events post when the vendor picked one from the list, and event_text keeps
+	 * what they actually chose, as text, forever. An event post can be renamed,
+	 * re-dated, or deleted years before anybody re-reads this agreement, and the
+	 * document has to keep saying which event it was signed for.
+	 *
+	 * agreed_* is the click-wrap record and carries the whole legal weight of the
+	 * row: the name typed, when, from where, and WHICH TEXT was on screen at the
+	 * time (terms_version). Without that last field an accepted agreement cannot
+	 * be told apart from one accepted under different terms, which would leave
+	 * the acceptance worth very little.
+	 */
+	dbDelta( "CREATE TABLE " . gasf_crm_table( 'vendor_apps' ) . " (
+		id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+		created_at DATETIME NOT NULL,
+		status VARCHAR(16) NOT NULL DEFAULT 'new',
+		event_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+		event_text VARCHAR(191) NULL,
+		vendor_name VARCHAR(191) NOT NULL,
+		vendor_address VARCHAR(191) NULL,
+		vendor_city VARCHAR(96) NULL,
+		vendor_state VARCHAR(32) NULL,
+		vendor_zip VARCHAR(16) NULL,
+		poc_name VARCHAR(191) NULL,
+		poc_mobile VARCHAR(32) NULL,
+		poc_email VARCHAR(191) NULL,
+		products LONGTEXT NULL,
+		tax_exempt VARCHAR(64) NULL,
+		coi_path VARCHAR(255) NULL,
+		coi_name VARCHAR(191) NULL,
+		coi_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+		terms_version VARCHAR(32) NULL,
+		agreed_name VARCHAR(191) NULL,
+		agreed_at DATETIME NULL,
+		agreed_ip VARCHAR(45) NULL,
+		agreed_ua VARCHAR(255) NULL,
+		notes LONGTEXT NULL,
+		PRIMARY KEY  (id),
+		KEY created (created_at),
+		KEY status_time (status, created_at),
+		KEY event (event_id)
+	) {$charset};" );
 }
 
 /**

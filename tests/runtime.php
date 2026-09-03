@@ -1942,6 +1942,144 @@ final class GASF_CRM_Selftest {
 		delete_transient( 'gasf_crm_origin_pruned' );
 	}
 
+	/* ------------------------------------------------------- vendor contracts */
+
+	/**
+	 * An area is not a stream, and a grant fails closed.
+	 *
+	 * The second assertion is the load-bearing one. Half this plugin reads a
+	 * stream key as a mailbox address -- sync polls it, Graph fetches it, a
+	 * reply goes out from it -- so the day somebody "tidies" contracts into the
+	 * stream list to save a function, the mail sync starts asking Microsoft for
+	 * an inbox that does not exist. That would be a quiet failure in a nightly
+	 * job, which is the worst kind this codebase has.
+	 */
+	public function test_vendor_area_grants() {
+		$this->ok( array_key_exists( 'contracts', gasf_crm_areas() ), 'areas: contracts is registered' );
+		$this->ok( ! array_key_exists( 'contracts', gasf_crm_streams() ), 'areas: contracts is NOT a stream' );
+
+		$rand = wp_generate_password( 10, false );
+		$uid  = wp_insert_user( array(
+			'user_login' => 'gasf-selftest-' . $rand,
+			'user_pass'  => wp_generate_password( 24 ),
+			'user_email' => 'selftest-' . $rand . '@invalid.local',
+			'role'       => '',
+		) );
+		if ( is_wp_error( $uid ) ) {
+			$this->ok( false, 'areas: could not create a synthetic account' );
+			return;
+		}
+
+		try {
+			update_user_meta( $uid, 'gasf_crm_provider', 'google' );
+
+			// A tick on an unapproved account must not carry access by itself.
+			gasf_crm_set_user_areas( $uid, array( 'contracts' ) );
+			$this->ok( ! gasf_crm_user_can_area( 'contracts', $uid ), 'areas: an unapproved account holds nothing' );
+
+			update_user_meta( $uid, 'gasf_crm_status', 'approved' );
+			$this->ok( gasf_crm_user_can_area( 'contracts', $uid ), 'areas: an approved, ticked account holds contracts' );
+
+			// No legacy fallback, unlike streams: untick means gone.
+			gasf_crm_set_user_areas( $uid, array() );
+			$this->ok( ! gasf_crm_user_can_area( 'contracts', $uid ), 'areas: unticking removes access with no fallback' );
+
+			gasf_crm_set_user_areas( $uid, array( 'contracts', 'not-a-real-area' ) );
+			$this->ok( array( 'contracts' ) === gasf_crm_user_areas( $uid ), 'areas: an unknown key is refused, not stored' );
+
+			// Notification reads EXPLICIT grants, so this account appears and an
+			// administrator who merely inherits everything does not.
+			$addrs = gasf_crm_area_notify_addresses( 'contracts' );
+			$this->ok( is_array( $addrs ) && in_array( 'selftest-' . $rand . '@invalid.local', $addrs, true ),
+				'areas: an explicitly ticked account is on the notify list' );
+		} finally {
+			require_once ABSPATH . 'wp-admin/includes/user.php';
+			wp_delete_user( $uid );
+		}
+	}
+
+	/**
+	 * A stored certificate cannot be talked out of its own directory.
+	 *
+	 * coi_path is written only by this plugin, so today the column cannot hold
+	 * a traversal -- but it is a database column that reaches the filesystem,
+	 * and "nothing writes anything bad to it" is a property of the current code
+	 * rather than of the reader. basename() is what makes it true regardless.
+	 */
+	public function test_vendor_coi_path_contained() {
+		$root = trailingslashit( gasf_crm_vendor_coi_root() );
+
+		$evil = gasf_crm_vendor_coi_path( array( 'coi_path' => '../../wp-config.php' ) );
+		$this->ok( $evil === $root . 'wp-config.php', 'vendor: a traversal in coi_path is flattened to the store' );
+
+		$none = gasf_crm_vendor_coi_path( array( 'coi_path' => '' ) );
+		$this->ok( '' === $none, 'vendor: a row with no certificate resolves to no path' );
+
+		// The store must not be reachable over HTTP at all. Being under ABSPATH
+		// would make it servable by any misconfiguration, which is precisely the
+		// posture the photo review store was moved away from.
+		$inside = 0 === strpos( gasf_crm_vendor_coi_root(), untrailingslashit( ABSPATH ) );
+		$this->ok( ! $inside, 'vendor: the certificate store sits outside the web root' );
+	}
+
+	/**
+	 * The acceptance record survives a round trip intact.
+	 *
+	 * terms_version is the field being pinned. Without it an accepted agreement
+	 * cannot be told apart from one accepted under different terms, and the
+	 * click-wrap is worth very little -- so a change that drops it must fail
+	 * here rather than be discovered when somebody asks what a vendor signed.
+	 */
+	public function test_vendor_row_roundtrip() {
+		global $wpdb;
+
+		$id = gasf_crm_vendor_insert( array(
+			'event_text'    => 'Selftest Fest',
+			'vendor_name'   => 'Selftest Bratwurst GmbH',
+			'poc_email'     => 'selftest@invalid.local',
+			'products'      => 'Nothing. This is a test row.',
+			'terms_version' => 'selftest-v1',
+			'agreed_name'   => 'A Tester',
+			'agreed_ip'     => '203.0.113.7',
+		) );
+		$this->ok( is_int( $id ) && $id > 0, 'vendor: an application inserts and returns its own id' );
+		if ( ! is_int( $id ) ) { return; }
+
+		try {
+			$row = gasf_crm_vendor_get( $id );
+			$this->ok( $row && 'Selftest Bratwurst GmbH' === $row['vendor_name'], 'vendor: the row reads back' );
+			$this->ok( $row && 'selftest-v1' === $row['terms_version'], 'vendor: the terms version is stamped on the acceptance' );
+			$this->ok( $row && 'A Tester' === $row['agreed_name'], 'vendor: the signed name is kept' );
+			$this->ok( $row && 'new' === $row['status'], 'vendor: a new application starts unreviewed' );
+
+			// The id came back from insert_id, which is per-connection rather than
+			// per-table. This codebase has already filed a fortnight of email under
+			// another table's ids by reading it one insert too late.
+			$newest = (int) $wpdb->get_var( 'SELECT MAX(id) FROM ' . gasf_crm_vendor_table() ); // phpcs:ignore WordPress.DB
+			$this->ok( $newest === $id, 'vendor: the returned id is this table row, not another table' );
+		} finally {
+			$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+		}
+	}
+
+	/** The public form refuses to appear until there is an agreement to agree to. */
+	public function test_vendor_form_needs_terms() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => '', 'terms_version' => '' ), false );
+		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: no agreement configured means no form' );
+
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => '' ), false );
+		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: a document with no version is still not ready' );
+
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => '2026-07' ), false );
+		$this->ok( gasf_crm_vendor_ready(), 'vendor: a document and a version together open the form' );
+
+		$html = gasf_crm_vendor_shortcode();
+		$this->ok( false !== strpos( $html, 'gasf_vendor_nonce' ), 'vendor: the form carries a nonce' );
+		$this->ok( false !== strpos( $html, 'gasf_vendor_website' ), 'vendor: the form carries its honeypot' );
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

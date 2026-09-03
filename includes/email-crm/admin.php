@@ -120,6 +120,25 @@ function gasf_crm_admin_tab() {
 				if ( ! empty( $_POST[ $f . '_clear' ] ) ) { $cfg[ $f ] = ''; }
 			}
 
+			/*
+			 * Vendor contract settings live in their own option, not in $cfg.
+			 *
+			 * $cfg is the mail and Graph configuration and is read on nearly every
+			 * request; the contract settings are read on one public page and one
+			 * pane. Keeping them apart is also the honest shape -- contracts are
+			 * not part of the inbox, and the day somebody wants this without the
+			 * CRM, one option moves rather than a handful of keys being untangled.
+			 *
+			 * Changing terms_version is the act of publishing new terms: every
+			 * acceptance already recorded keeps pointing at the version that was
+			 * actually on screen when it was given.
+			 */
+			$vendor = gasf_crm_vendor_cfg();
+			$vendor['terms_url']     = esc_url_raw( wp_unslash( $_POST['vendor_terms_url'] ?? '' ) );
+			$vendor['addenda_url']   = esc_url_raw( wp_unslash( $_POST['vendor_addenda_url'] ?? '' ) );
+			$vendor['terms_version'] = sanitize_text_field( wp_unslash( $_POST['vendor_terms_version'] ?? '' ) );
+			update_option( 'gasf_crm_vendor', $vendor, false );
+
 			gasf_crm_save_cfg( $cfg );
 			delete_transient( 'gasf_crm_graph_token' ); // credentials may have changed
 			$notice = '<div class="notice notice-success"><p>Saved.</p></div>';
@@ -239,11 +258,17 @@ function gasf_crm_admin_tab() {
 			// no streams means an approved account that can see nothing. That is
 			// the correct way to suspend somebody without deleting their history.
 			$streams = array_map( 'sanitize_key', (array) ( $_POST['streams'] ?? array() ) );
+			$areas   = array_map( 'sanitize_key', (array) ( $_POST['areas'] ?? array() ) );
 			if ( $uid ) {
-				$set    = gasf_crm_set_user_streams( $uid, $streams );
+				$set     = gasf_crm_set_user_streams( $uid, $streams );
+				$set_a   = gasf_crm_set_user_areas( $uid, $areas );
+				$granted = array_merge(
+					array_map( 'gasf_crm_stream_label', $set ),
+					array_map( 'gasf_crm_area_label', $set_a )
+				);
 				$notice = '<div class="notice notice-success"><p>' . esc_html(
-					$set
-						? 'Access set to: ' . implode( ', ', array_map( 'gasf_crm_stream_label', $set ) )
+					$granted
+						? 'Access set to: ' . implode( ', ', $granted )
 						: 'Access removed — that account is approved but can now see nothing.'
 				) . '</p></div>';
 			}
@@ -404,6 +429,20 @@ function gasf_crm_admin_tab() {
 			<tr><th scope="row">Also notify</th>
 				<td><input type="text" class="large-text" name="notify_extra" value="<?php echo esc_attr( $cfg['notify_extra'] ); ?>" placeholder="you@germantampabay.com, someone-else@example.com">
 					<p class="description">Comma-separated. Approved volunteers are notified automatically, but only once they have signed in at <code>/email</code> — an administrator is approved by default and never has to, so without an address here the person running this is the one person never told about new mail.</p></td></tr>
+		</table>
+
+		<h3>Vendor contracts</h3>
+		<?php $vendor_cfg = gasf_crm_vendor_cfg(); ?>
+		<table class="form-table" role="presentation">
+			<tr><th scope="row">Vendor Agreement</th>
+				<td><input type="url" class="large-text" name="vendor_terms_url" value="<?php echo esc_attr( $vendor_cfg['terms_url'] ); ?>" placeholder="https://germantampabay.com/wp-content/uploads/vendor-agreement.pdf">
+					<p class="description">A link to the agreement as published &mdash; upload the PDF to the Media Library and paste its URL. The form links this, and the vendor is asked to confirm they have read it. <strong>The form will not appear until this and the version below are both filled in</strong>, because a person cannot agree to a document that is not there.</p></td></tr>
+			<tr><th scope="row">Addenda</th>
+				<td><input type="url" class="large-text" name="vendor_addenda_url" value="<?php echo esc_attr( $vendor_cfg['addenda_url'] ); ?>">
+					<p class="description">Optional. The Vendor Addendum and the Rules and Regulations, if they exist as a document. Left blank, the form simply does not mention them.</p></td></tr>
+			<tr><th scope="row">Terms version</th>
+				<td><input type="text" class="regular-text" name="vendor_terms_version" value="<?php echo esc_attr( $vendor_cfg['terms_version'] ); ?>" placeholder="2026-07">
+					<p class="description">Anything you will recognise later &mdash; a date or a revision letter. It is stamped onto every acceptance, so <strong>change it whenever the agreement itself changes</strong>. Applications already accepted keep the version they were signed under, which is the only thing that makes the acceptance mean anything a year from now.</p></td></tr>
 		</table>
 
 		<?php submit_button( 'Save' ); ?>
@@ -815,6 +854,19 @@ function gasf_crm_admin_tab() {
 						esc_attr( $key ),
 						checked( in_array( $key, $has, true ), true, false ),
 						esc_html( $s['label'] )
+					);
+				}
+
+				// Areas ride in the same form and save on the same button — from
+				// this screen a mailbox and an area are both just "what may this
+				// person see". Only the storage behind them differs.
+				$has_a = gasf_crm_user_areas( $u->ID );
+				foreach ( gasf_crm_areas() as $key => $a ) {
+					printf(
+						'<label style="white-space:nowrap"><input type="checkbox" name="areas[]" value="%s" %s> %s</label>',
+						esc_attr( $key ),
+						checked( in_array( $key, $has_a, true ), true, false ),
+						esc_html( $a['label'] )
 					);
 				}
 				echo '<button class="button button-small">Save access</button></form>';

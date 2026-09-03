@@ -683,6 +683,101 @@ function gasf_crm_set_user_streams( $user_id, array $streams ) {
 	return $valid;
 }
 
+/**
+ * Which areas this user may see. @see gasf_crm_areas()
+ *
+ * Administrators get everything, for the same reason they do with streams.
+ *
+ * Everyone else gets exactly what was ticked — and unlike streams there is
+ * deliberately NO fallback for accounts that predate the grant. The streams
+ * fallback was safe because "general" was all there had ever been to see;
+ * an area that nobody has ticked is an area nobody should be holding.
+ */
+function gasf_crm_user_areas( $user_id = 0 ) {
+	$user_id = $user_id ? (int) $user_id : get_current_user_id();
+	if ( ! $user_id || ! gasf_crm_user_approved( $user_id ) ) { return array(); }
+
+	$all = array_keys( gasf_crm_areas() );
+	if ( user_can( $user_id, 'manage_options' ) ) { return $all; }
+
+	$granted = (array) get_user_meta( $user_id, 'gasf_crm_areas', true );
+
+	return array_values( array_intersect( $all, array_map( 'strval', $granted ) ) );
+}
+
+function gasf_crm_user_can_area( $area, $user_id = 0 ) {
+	return in_array( (string) $area, gasf_crm_user_areas( $user_id ), true );
+}
+
+/** Set a user's area grants. */
+function gasf_crm_set_user_areas( $user_id, array $areas ) {
+	$valid = array_values( array_intersect( array_keys( gasf_crm_areas() ), array_map( 'strval', $areas ) ) );
+	update_user_meta( (int) $user_id, 'gasf_crm_areas', $valid );
+	gasf_crm_log( 'CRM: user ' . (int) $user_id . ' area grants set to [' . implode( ',', $valid ) . '] by ' . get_current_user_id() );
+
+	// Same history as the stream grants, for the same reason: after an incident
+	// "who could open the contracts" is asked in the same breath as "who got in".
+	$u = get_userdata( (int) $user_id );
+	gasf_crm_auth_log( 'access', 'ok', array(
+		'user_id' => (int) $user_id,
+		'email'   => $u ? $u->user_email : '',
+		'reason'  => 'areas: ' . ( $valid ? implode( ',', $valid ) : 'nothing' ) . ' — set by user ' . get_current_user_id(),
+	) );
+
+	return $valid;
+}
+
+/**
+ * Accounts EXPLICITLY granted an area, ignoring the administrator's implicit
+ * hold on everything.
+ *
+ * gasf_crm_user_areas() answers "may this person open it", and an administrator
+ * always may. This answers a different question — "who did somebody choose for
+ * this" — and that is the one notification must ask. Conflating them would mail
+ * every administrator on the site every time a vendor signed, with no way to
+ * stop it from the screen where access is actually managed.
+ */
+function gasf_crm_area_grantees( $area ) {
+	$area = (string) $area;
+	$out  = array();
+
+	// Walked in PHP rather than queried: the grant is a serialised array, so a
+	// meta_value match would be a LIKE against 'contracts' and would just as
+	// happily match a future area whose name contains it. There are a couple of
+	// dozen CRM accounts.
+	foreach ( gasf_crm_all_users() as $u ) {
+		if ( ! gasf_crm_user_approved( $u->ID ) ) { continue; }
+		$granted = array_map( 'strval', (array) get_user_meta( $u->ID, 'gasf_crm_areas', true ) );
+		if ( in_array( $area, $granted, true ) ) { $out[] = $u; }
+	}
+
+	return $out;
+}
+
+/**
+ * Where to send word that something landed in an area.
+ *
+ * Falls back to the site's admin address when nobody holds the area yet, so a
+ * vendor agreement submitted before anybody was ticked is not silently filed
+ * where no one is looking. A contract nobody reads is worse than no form.
+ */
+function gasf_crm_area_notify_addresses( $area ) {
+	$to = array();
+	foreach ( gasf_crm_area_grantees( $area ) as $u ) {
+		$addr = (string) get_user_meta( $u->ID, 'gasf_crm_email', true );
+		if ( '' === $addr ) { $addr = (string) $u->user_email; }
+		if ( is_email( $addr ) ) { $to[] = $addr; }
+	}
+
+	$to = array_values( array_unique( $to ) );
+	if ( ! $to ) {
+		$fallback = (string) get_option( 'admin_email', '' );
+		if ( is_email( $fallback ) ) { $to[] = $fallback; }
+	}
+
+	return $to;
+}
+
 /** Every CRM account, for the approval screen. */
 function gasf_crm_all_users() {
 	return get_users( array(

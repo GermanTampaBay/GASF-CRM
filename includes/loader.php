@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.20.0' );
+	define( 'GASF_CRM_SCHEMA', '1.21.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -105,6 +105,10 @@ if ( true ) {
 	require_once GASF_CRM_DIR . '/photos-faces.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
+	// After auth.php and db.php: vendor contracts are granted through the area
+	// helpers in auth.php and stored in the table db.php creates. Nothing else
+	// calls into it, so it loads last.
+	require_once GASF_CRM_DIR . '/contracts.php';
 
 	/**
 	 * Module config. The client SECRET lives here too — this file is in a public
@@ -157,6 +161,34 @@ if ( true ) {
 	function gasf_crm_stream_label( $stream ) {
 		$s = gasf_crm_streams();
 		return isset( $s[ $stream ] ) ? (string) $s[ $stream ]['label'] : $stream;
+	}
+
+	/**
+	 * Areas: parts of this tool that are NOT a mailbox.
+	 *
+	 * A stream answers "which inbox is this thread in", and half the CRM reads
+	 * it as an address — sync polls it, Graph fetches it, a reply goes out FROM
+	 * it. Vendor contracts have no mailbox and never will, so granting them as a
+	 * stream would put a key with no address in front of every one of those
+	 * callers. They are granted as an AREA instead: the same per-person tick on
+	 * the same approval screen, stored beside the stream grants, and invisible
+	 * to every code path that expects to poll or reply from something.
+	 *
+	 * Areas fail closed, with no fallback for accounts that predate them. A
+	 * contract carries a signer's name, address and insurance; "everyone who
+	 * happened to be approved already" is not a defensible answer to the
+	 * question of who could read those.
+	 */
+	function gasf_crm_areas() {
+		return (array) apply_filters( 'gasf_crm_areas', array(
+			'contracts' => array( 'label' => __( 'Vendor contracts', 'gasf' ) ),
+		) );
+	}
+
+	/** Human label for an area key. */
+	function gasf_crm_area_label( $area ) {
+		$a = gasf_crm_areas();
+		return isset( $a[ $area ] ) ? (string) $a[ $area ]['label'] : $area;
 	}
 
 	function gasf_crm_cfg() {
@@ -232,12 +264,18 @@ if ( true ) {
 		add_rewrite_rule( '^email/auth/([a-z]+)/?$', 'index.php?gasf_crm=start&gasf_crm_provider=$matches[1]', 'top' );
 		add_rewrite_rule( '^email/auth/([a-z]+)/callback/?$', 'index.php?gasf_crm=callback&gasf_crm_provider=$matches[1]', 'top' );
 		add_rewrite_rule( '^email/logout/?$', 'index.php?gasf_crm=logout', 'top' );
-		add_rewrite_rule( '^email/(mail|photos|library|upload)/?$', 'index.php?gasf_crm=app', 'top' );
+		// The certificate route is registered BEFORE the view alternation so it
+		// reads in the order it is matched. They cannot collide in any case --
+		// the alternation ends at one path segment -- but a reader should not
+		// have to work that out.
+		add_rewrite_rule( '^email/contracts/coi/([0-9]+)/?$', 'index.php?gasf_crm=coi&gasf_crm_id=$matches[1]', 'top' );
+		add_rewrite_rule( '^email/(mail|photos|library|upload|contracts)/?$', 'index.php?gasf_crm=app', 'top' );
 	} );
 
 	add_filter( 'query_vars', function ( $vars ) {
 		$vars[] = 'gasf_crm';
 		$vars[] = 'gasf_crm_provider';
+		$vars[] = 'gasf_crm_id';
 		return $vars;
 	} );
 
@@ -394,6 +432,7 @@ if ( true ) {
 		$tables = array(
 			'threads', 'messages', 'contacts', 'events', 'attachments',
 			'photo_submissions', 'photo_items', 'photo_invite_items', 'photo_invites', 'auth_log',
+			'vendor_apps',
 		);
 		foreach ( $tables as $t ) {
 			$name = gasf_crm_table( $t );
