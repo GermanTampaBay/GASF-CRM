@@ -533,7 +533,7 @@ function gasf_crm_vendor_craft_types() {
  */
 function gasf_crm_vendor_booths() {
 	return array(
-		'10x10_outside' => __( '10x10 outside -- no electricity, and you must bring your own lighting for evening events', 'gasf' ),
+		'10x10_outside' => __( '10x10 outside (no electricity, and you must bring your own lighting for evening events)', 'gasf' ),
 		'8ft_inside'    => __( '8 foot table inside', 'gasf' ),
 	);
 }
