@@ -417,6 +417,8 @@ function gasf_crm_install_tables() {
 		fields_json LONGTEXT NULL,
 		contract_snapshot LONGTEXT NULL,
 		vendor_type VARCHAR(16) NULL,
+		fee_quoted VARCHAR(32) NULL,
+		paid_json LONGTEXT NULL,
 		files_json LONGTEXT NULL,
 		photo_consent TINYINT(1) NOT NULL DEFAULT 0,
 		notes LONGTEXT NULL,

@@ -64,25 +64,78 @@ function gasf_crm_vendor_cfg() {
 		'terms_url'     => '',
 		'terms_version' => '',
 		'addenda_url'   => '',
+		// What the organiser fixes in advance. A vendor should not be typing the
+		// name of the event they are applying to, guessing its date, or writing
+		// down what they think the pitch costs.
+		'event_name'    => '',
+		'event_date'    => '',
+		'fee'           => '',
 	) );
 }
 
 /**
  * Is there enough configuration to put the form in front of the public?
  *
- * The VERSION alone, deliberately. Until the agreement lived on the page, this
- * also demanded a link to the PDF, because the PDF was the thing being agreed
- * to and a click-wrap pointing at nothing is worth nothing. The words are here
- * now, so that requirement had become a gate with no purpose behind it -- the
- * form refusing to appear until somebody pasted a URL nobody would ever follow.
+ * Always, now. This gate has been wrong twice: first it demanded a PDF that
+ * nothing rendered, then a version string that the code can perfectly well work
+ * out for itself. The agreement is complete on the page without either, and a
+ * form that hides until somebody fills in a box whose purpose they cannot see
+ * is a worse failure than one with a plain default.
  *
- * The version is still required, and always will be: it is stamped onto every
- * signature, and an agreement signed under a version that says nothing cannot
- * be told apart later from one signed under different terms.
+ * Kept as a function rather than deleted so that a real precondition -- if one
+ * ever appears -- has an obvious home, and so callers do not need changing.
  */
 function gasf_crm_vendor_ready() {
+	return true;
+}
+
+/**
+ * Which wording a signature was given under.
+ *
+ * The configured label if there is one, because "2026-Krampus Market" means
+ * something to a person reading the file in two years. Failing that, a short
+ * hash OF THE AGREEMENT ITSELF -- the words, plus the organiser's presets that
+ * appear inside them.
+ *
+ * That fallback is the reason the setting is now optional. The version exists to
+ * answer "was this signed under the terms we have now, or different ones", and a
+ * hash answers it exactly and without anybody remembering to change a box. A
+ * hand-typed label answers it only when somebody remembers, which is precisely
+ * when it is least likely to happen -- amending the wording in a hurry.
+ */
+function gasf_crm_vendor_terms_version() {
+	$cfg   = gasf_crm_vendor_cfg();
+	$label = trim( (string) $cfg['terms_version'] );
+	if ( '' !== $label ) { return $label; }
+
+	static $auto = null;
+	if ( null === $auto ) {
+		ob_start();
+		gasf_crm_vendor_contract( 'record', gasf_crm_vendor_locked_values() );
+		$auto = 'auto-' . substr( md5( ob_get_clean() ), 0, 8 );
+	}
+
+	return $auto;
+}
+
+/**
+ * The blanks the organiser fills once, in settings, rather than every vendor
+ * filling in for themselves.
+ *
+ * Returned only where actually configured: an empty setting leaves the blank
+ * as a blank, so a club that has not set an event still gets a working form
+ * with the vendor writing the event name in by hand.
+ */
+function gasf_crm_vendor_locked_values() {
 	$cfg = gasf_crm_vendor_cfg();
-	return '' !== trim( (string) $cfg['terms_version'] );
+	$out = array();
+
+	foreach ( array( 'event_name' => 'event_name', 'event_date' => 'event_date', 'fee' => 'fee_amount' ) as $setting => $blank ) {
+		$v = trim( (string) $cfg[ $setting ] );
+		if ( '' !== $v ) { $out[ $blank ] = $v; }
+	}
+
+	return $out;
 }
 
 /* --------------------------------------------------------------------------
@@ -261,6 +314,7 @@ function gasf_crm_vendor_insert( array $d ) {
 		'fields_json'       => (string) ( $d['fields_json'] ?? '' ),
 		'contract_snapshot' => (string) ( $d['contract_snapshot'] ?? '' ),
 		'vendor_type'       => (string) ( $d['vendor_type'] ?? '' ),
+		'fee_quoted'        => (string) ( $d['fee_quoted'] ?? '' ),
 		'files_json'        => (string) ( $d['files_json'] ?? '' ),
 		// Stored as its own column rather than inside the JSON blob: whether the
 		// club may publish somebody's photographs is a permission, and a
@@ -443,7 +497,7 @@ function gasf_crm_vendor_required_fields() {
 
 /** Render context for gasf_crm_vendor_blank(), set by gasf_crm_vendor_contract(). */
 function gasf_crm_vendor_ctx( $set = null ) {
-	static $ctx = array( 'mode' => 'form', 'values' => array() );
+	static $ctx = array( 'mode' => 'form', 'values' => array(), 'locked' => array() );
 	if ( is_array( $set ) ) { $ctx = $set; }
 	return $ctx;
 }
@@ -470,6 +524,14 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 		}
 		$cls = empty( $args['sig'] ) ? 'gv-val' : 'gv-val gv-sig';
 		echo '<span class="' . esc_attr( $cls . ' ' . $w ) . '">' . esc_html( $val ) . '</span>';
+		return;
+	}
+
+	// Fixed by the organiser before anybody applied. Printed as a value in both
+	// modes: it is not the vendor's to change, and showing it as an empty box
+	// would invite them to try.
+	if ( array_key_exists( $key, (array) $ctx['locked'] ) ) {
+		echo '<span class="gv-val gv-fixed ' . esc_attr( $w ) . '">' . esc_html( (string) $ctx['locked'][ $key ] ) . '</span>';
 		return;
 	}
 
@@ -853,12 +915,30 @@ function gasf_crm_vendor_styles() {
 .gv-auto { font-style: italic; color: #666; }
 .gv-branch[hidden] { display: none; }
 .gv-files dt { font-weight: 700; margin-top: 0.6rem; }
+.gv-pay { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1rem 1.25rem; margin: 1rem 0; }
+.gv-pay h4 { margin: 0 0 0.75rem; }
+.gv-pay label { display: block; }
+.gv-pay input, .gv-pay textarea { width: 100%; box-sizing: border-box; }
+.gv-paygrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem 1rem; }
 .gv-pick { background: #fbf6ea; color: #111; border: 1px solid #EF9F27; padding: 1rem; margin-bottom: 1.25rem; }
 .gv-pick label { font-weight: 700; display: block; margin-bottom: 0.4rem; }
 .gv-pick select { max-width: 100%; }
 .gasf-vendor-errs { background: #fdeceb; color: #111; border-left: 4px solid #c0392b; padding: 0.75rem 1rem; margin-bottom: 1.25rem; }
 .gasf-vendor-done { background: #eef7ee; color: #111; border-left: 4px solid #2e7d32; padding: 1rem 1.25rem; }
-.gv-submit { margin-top: 1.5rem; }
+/*
+ * The closing strip paints itself, like every other panel here.
+ *
+ * It had no background at all, so it sat directly on the club's dark theme --
+ * and the blanket colour rule above, which fixed white-on-white inside the
+ * panels, made it black-on-dark out here. Forcing a text colour without owning
+ * the surface underneath only moves the problem.
+ */
+.gv-submit { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1.25rem 1.5rem; margin-top: 1.25rem; }
+.gv-callout { background: #fff6e0; color: #111; border: 2px solid #EF9F27; border-radius: 4px; padding: 1rem 1.25rem; margin: 0 0 1.25rem; }
+.gv-callout h4 { margin: 0 0 0.5rem; font-size: 1.1rem; color: #7a4a00; }
+.gv-callout p { margin: 0 0 0.6rem; }
+.gv-callout p:last-child { margin-bottom: 0; }
+.gv-fixed { font-weight: 700; border-bottom-style: solid; }
 .gv-go { background: #EF9F27; border: 0; color: #1a1a1a; font-weight: 700; padding: 0.7rem 1.6rem; font-size: 1rem; cursor: pointer; }
 .gv-go:hover { background: #d98d1c; }
 .gasf-vendor .gv-legend { color: #555; font-size: 0.9rem; }
@@ -905,6 +985,7 @@ function gasf_crm_vendor_shortcode() {
 	$type   = gasf_crm_vendor_posted_type();
 	$crafts = gasf_crm_vendor_posted_crafts();
 	$booth  = gasf_crm_vendor_posted_booth();
+	$locked = gasf_crm_vendor_locked_values();
 
 	gasf_crm_vendor_styles();
 	?>
@@ -926,7 +1007,7 @@ function gasf_crm_vendor_shortcode() {
 				<label>Company website<input type="text" name="gasf_vendor_website" tabindex="-1" autocomplete="off"></label>
 			</div>
 
-			<?php if ( $events ) : ?>
+			<?php if ( $events && ! isset( $locked['event_name'] ) ) : ?>
 				<div class="gv-pick">
 					<label for="gv-event">Which event is this for?</label>
 					<select name="event_id" id="gv-event">
@@ -953,16 +1034,25 @@ function gasf_crm_vendor_shortcode() {
 			<?php gasf_crm_vendor_contract( 'form', $values ); ?>
 
 			<div class="gv-submit">
-				<p><strong>Certificate of insurance</strong> &mdash; PDF or a photograph, up to 10 MB.
-					<span class="gv-legend">Food vendors must attach this now. Craft vendors may send it later,
-					but the agreement requires it at least 30 days before the event.</span><br>
-					<input type="file" name="coi" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,application/pdf,image/jpeg,image/png,image/webp,image/heic">
-				</p>
+				<div class="gv-callout">
+					<h4>Certificate of insurance</h4>
+					<p>The agreement above requires general liability cover of <strong>$1,000,000 per occurrence
+						and $2,000,000 aggregate</strong>, naming the German-American Society as an additional
+						insured, with proof provided <strong>at least 30 days before the event</strong>.</p>
+					<p><strong>Food vendors must attach it now.</strong> Craft vendors may send it later, but no
+						vendor sets up without it.</p>
+					<p><label for="gv-coi">Attach it here &mdash; PDF or a photograph, up to 10 MB.</label><br>
+						<input type="file" name="coi" id="gv-coi" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,application/pdf,image/jpeg,image/png,image/webp,image/heic">
+					</p>
+				</div>
 
 				<?php
 				$keys = function_exists( 'gasf_crm_turnstile_keys' ) ? gasf_crm_turnstile_keys() : null;
 				if ( $keys ) :
 					?>
+					<p class="gv-legend">A quick automated check that you are a person, run by Cloudflare.
+						There is nothing for you to do &mdash; if it does not tick, submit anyway and we will
+						still receive your application.</p>
 					<div class="cf-turnstile" data-sitekey="<?php echo esc_attr( $keys['site'] ); ?>"></div>
 					<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 				<?php endif; ?>
@@ -1078,6 +1168,7 @@ function gasf_crm_vendor_handle() {
 	}
 
 	$values = gasf_crm_vendor_submitted_fields();
+	$locked = gasf_crm_vendor_locked_values();
 	$app    = gasf_crm_vendor_posted_app();
 	$type   = gasf_crm_vendor_posted_type();
 	$crafts = gasf_crm_vendor_posted_crafts();
@@ -1123,7 +1214,11 @@ function gasf_crm_vendor_handle() {
 	// A chosen event is authoritative over the typed blanks: the club knows its
 	// own calendar better than a vendor reading it off a poster, and the two
 	// disagreeing is a booking nobody can reconcile later.
-	$event_id = gasf_crm_vendor_posted_event_id();
+	// A preset event wins over anything posted. It is the organiser's answer,
+	// and the picker is not even rendered when one is set -- so a POST carrying
+	// an event is either stale or crafted, and neither should decide which event
+	// an agreement is for.
+	$event_id = isset( $locked['event_name'] ) ? 0 : gasf_crm_vendor_posted_event_id();
 	if ( $event_id > 0 ) {
 		$post = get_post( $event_id );
 		if ( ! $post || 'gasf_event' !== $post->post_type ) {
@@ -1227,6 +1322,10 @@ function gasf_crm_vendor_handle() {
 	// they are approved to sell.
 	$values['desc_full'] = (string) ( $app['description'] ?? '' );
 
+	// Whatever the organiser fixed overrides whatever arrived, before the
+	// snapshot is taken, so the signed document carries the club's numbers.
+	foreach ( $locked as $k => $v ) { $values[ $k ] = $v; }
+
 	/*
 	 * Snapshot the agreement AS RENDERED, not merely its version string.
 	 *
@@ -1236,7 +1335,7 @@ function gasf_crm_vendor_handle() {
 	 * is the difference between a record and an assertion.
 	 */
 	ob_start();
-	gasf_crm_vendor_contract( 'record', $values );
+	gasf_crm_vendor_contract( 'record', $values, $locked );
 	$snapshot = ob_get_clean();
 
 	$cfg = gasf_crm_vendor_cfg();
@@ -1244,6 +1343,7 @@ function gasf_crm_vendor_handle() {
 	$id = gasf_crm_vendor_insert( array(
 		'event_id'          => $event_id,
 		'event_text'        => (string) ( $values['event_name'] ?? '' ),
+		'fee_quoted'        => (string) ( $locked['fee_amount'] ?? '' ),
 		'vendor_name'       => (string) ( $values['vendor_legal'] ?? '' ),
 		'vendor_address'    => (string) ( $values['vendor_address'] ?? '' ),
 		'vendor_city'       => (string) ( $values['vendor_city'] ?? '' ),
@@ -1257,7 +1357,7 @@ function gasf_crm_vendor_handle() {
 		'coi_path'          => $coi['path'],
 		'coi_name'          => $coi['name'],
 		'coi_bytes'         => $coi['bytes'],
-		'terms_version'     => (string) $cfg['terms_version'],
+		'terms_version'     => gasf_crm_vendor_terms_version(),
 		'agreed_name'       => (string) ( $values['sign_vendor'] ?? '' ),
 		'agreed_at'         => current_time( 'mysql' ),
 		'agreed_ip'         => function_exists( 'gasf_crm_client_ip' ) ? gasf_crm_client_ip() : '',
@@ -1399,6 +1499,84 @@ function gasf_crm_vendor_serve_file( $id, $n ) {
 	readfile( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 	exit;
 }
+
+/** The bookkeeping the paper form carried, which no vendor ever fills in. */
+function gasf_crm_vendor_payment_fields() {
+	return array(
+		'deposit_amount' => 'Deposit received',
+		'deposit_date'   => 'Deposit date',
+		'balance_amount' => 'Balance owed',
+		'balance_date'   => 'Balance due by',
+		'other1_amount'  => 'Other monies',
+		'other1_for'     => 'For',
+		'other2_amount'  => 'Other monies',
+		'other2_for'     => 'For',
+		'poi_date'       => 'Proof of insurance received',
+		'poi_by'         => 'Received by',
+		'notes'          => 'Notes',
+	);
+}
+
+/**
+ * Record what has been paid against one agreement.
+ *
+ * Writes ONLY the bookkeeping columns. The signed contract -- its snapshot, the
+ * blanks the vendor typed, the signature record -- is never touched by this, and
+ * that separation is the whole reason payment tracking is a column beside the
+ * agreement rather than an edit to it. A treasurer updating a deposit six weeks
+ * later must not be able to alter what somebody signed.
+ */
+function gasf_crm_vendor_handle_payment() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified immediately below.
+	if ( empty( $_POST['gasf_vendor_pay'] ) ) { return; }
+
+	if ( ! gasf_crm_vendor_may_read() ) {
+		status_header( 403 );
+		wp_die( esc_html__( 'You do not have access to that.', 'gasf' ), '', array( 'response' => 403 ) );
+	}
+
+	$id = (int) $_POST['gasf_vendor_pay'];
+	if ( ! isset( $_POST['gasf_vendor_pay_nonce'] )
+		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_pay_nonce'] ) ), 'gasf_vendor_pay_' . $id ) ) {
+		wp_safe_redirect( home_url( '/email/contracts/' ) );
+		exit;
+	}
+
+	$row = gasf_crm_vendor_get( $id );
+	if ( ! $row ) {
+		wp_safe_redirect( home_url( '/email/contracts/' ) );
+		exit;
+	}
+
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+	$raw  = isset( $_POST['pay'] ) && is_array( $_POST['pay'] ) ? wp_unslash( $_POST['pay'] ) : array();
+	$paid = array();
+	foreach ( gasf_crm_vendor_payment_fields() as $key => $label ) {
+		if ( ! isset( $raw[ $key ] ) || ! is_scalar( $raw[ $key ] ) ) { continue; }
+		$v = 'notes' === $key
+			? sanitize_textarea_field( (string) $raw[ $key ] )
+			: sanitize_text_field( (string) $raw[ $key ] );
+		$paid[ $key ] = function_exists( 'mb_substr' ) ? mb_substr( $v, 0, 500 ) : substr( $v, 0, 500 );
+	}
+
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+	$fee = isset( $_POST['fee_quoted'] ) ? sanitize_text_field( wp_unslash( $_POST['fee_quoted'] ) ) : '';
+
+	global $wpdb;
+	$wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		gasf_crm_vendor_table(),
+		array( 'paid_json' => wp_json_encode( $paid ), 'fee_quoted' => substr( $fee, 0, 32 ) ),
+		array( 'id' => $id ),
+		array( '%s', '%s' ),
+		array( '%d' )
+	);
+
+	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' updated the payment record for agreement ' . $id );
+
+	wp_safe_redirect( home_url( '/email/contracts/' ) );
+	exit;
+}
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_payment', 4 );
 
 /**
  * The Contracts pane.
@@ -1551,6 +1729,38 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 						<?php endif; ?>
 					</dd>
 				</dl>
+
+				<?php
+				/*
+				 * The treasurer's rows, which used to sit unfillable on the
+				 * vendor's copy of the contract. They are an edit to the club's
+				 * record of an agreement, never to the agreement.
+				 */
+				$paid = json_decode( (string) $r['paid_json'], true );
+				if ( ! is_array( $paid ) ) { $paid = array(); }
+				?>
+				<form method="post" class="gv-pay">
+					<h4>Money and paperwork</h4>
+					<?php wp_nonce_field( 'gasf_vendor_pay_' . (int) $r['id'], 'gasf_vendor_pay_nonce' ); ?>
+					<input type="hidden" name="gasf_vendor_pay" value="<?php echo (int) $r['id']; ?>">
+
+					<p><label>Fee agreed $<input type="text" name="fee_quoted" value="<?php echo esc_attr( $r['fee_quoted'] ); ?>" size="8"></label>
+						<span class="muted">What the signed agreement says. Changing it here does not alter the contract below.</span></p>
+
+					<div class="gv-paygrid">
+						<?php foreach ( gasf_crm_vendor_payment_fields() as $key => $label ) : ?>
+							<?php if ( 'notes' === $key ) { continue; } ?>
+							<label><?php echo esc_html( $label ); ?>
+								<input type="text" name="pay[<?php echo esc_attr( $key ); ?>]" value="<?php echo esc_attr( $paid[ $key ] ?? '' ); ?>">
+							</label>
+						<?php endforeach; ?>
+					</div>
+
+					<p><label>Notes<br>
+						<textarea name="pay[notes]" rows="2"><?php echo esc_textarea( $paid['notes'] ?? '' ); ?></textarea></label></p>
+
+					<p><button class="btn">Save the money record</button></p>
+				</form>
 
 				<?php
 				if ( ! empty( $r['contract_snapshot'] ) ) {

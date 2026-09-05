@@ -2066,22 +2066,24 @@ final class GASF_CRM_Selftest {
 	public function test_vendor_form_needs_terms() {
 		$this->snapshot_option( 'gasf_crm_vendor' );
 
+		// Nothing gates the form any more. It gated on a PDF nothing rendered,
+		// then on a version string the code can work out itself; both were boxes
+		// whose purpose an administrator could not see from the screen.
 		update_option( 'gasf_crm_vendor', array( 'terms_url' => '', 'terms_version' => '' ), false );
-		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: no version means no form' );
+		$this->ok( gasf_crm_vendor_ready(), 'vendor: an unconfigured form still renders' );
 
-		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => '' ), false );
-		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: a PDF with no version is still not ready' );
+		// A blank version stamps a hash of the agreement instead, so a signature
+		// always records WHICH wording it was given under.
+		$auto = gasf_crm_vendor_terms_version();
+		$this->ok( 0 === strpos( $auto, 'auto-' ), 'vendor: a blank version falls back to a hash' );
+		$this->ok( strlen( $auto ) > 6, 'vendor: the fallback version is not empty' );
 
-		// The version ALONE is enough. The agreement is on the page; the PDF is a
-		// courtesy copy, and gating the form on it was a leftover from when the
-		// PDF was the thing being agreed to.
 		update_option( 'gasf_crm_vendor', array( 'terms_url' => '', 'terms_version' => '2026-07' ), false );
-		$this->ok( gasf_crm_vendor_ready(), 'vendor: a version alone opens the form' );
+		$this->ok( '2026-07' === gasf_crm_vendor_terms_version(), 'vendor: a configured label wins over the hash' );
 		$this->ok( false === strpos( gasf_crm_vendor_shortcode(), 'Download a PDF copy' ),
 			'vendor: no PDF configured means no download offered' );
 
 		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => '2026-07' ), false );
-		$this->ok( gasf_crm_vendor_ready(), 'vendor: a version and a PDF also open the form' );
 		$this->ok( false !== strpos( gasf_crm_vendor_shortcode(), 'Download a PDF copy' ),
 			'vendor: a configured PDF is offered as a download' );
 
@@ -2342,6 +2344,111 @@ final class GASF_CRM_Selftest {
 			foreach ( $ids as $id ) {
 				$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
 			}
+		}
+	}
+
+	/**
+	 * The organiser's numbers are printed, never offered as fields.
+	 *
+	 * A vendor typing the name of the event, guessing its date, or writing down
+	 * what they think the pitch costs is how a signed agreement ends up saying
+	 * something the club never agreed to. When a preset is set it is rendered as
+	 * a value, and the whitelist has no route for a posted one to replace it.
+	 */
+	public function test_vendor_presets_are_printed_not_editable() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array(
+			'terms_version' => 'selftest',
+			'event_name'    => 'Selftest Krampus Market',
+			'event_date'    => '5 December 2026',
+			'fee'           => '75',
+		), false );
+
+		$html = gasf_crm_vendor_shortcode();
+
+		$this->ok( false !== strpos( $html, 'Selftest Krampus Market' ), 'presets: the event name is printed on the agreement' );
+		$this->ok( false !== strpos( $html, '5 December 2026' ), 'presets: the event date is printed' );
+		$this->ok( false !== strpos( $html, '>75<' ), 'presets: the fee is printed' );
+
+		foreach ( array( 'event_name', 'event_date', 'fee_amount' ) as $key ) {
+			$this->ok( false === strpos( $html, 'name="f[' . $key . ']"' ),
+				'presets: ' . $key . ' is not an editable field once set' );
+		}
+
+		// The picker is redundant once the organiser has named the event, and two
+		// places to answer the same question is how they end up disagreeing.
+		$this->ok( false === strpos( $html, 'name="event_id"' ), 'presets: the event picker is withdrawn' );
+
+		// Unset, the blanks go back to being the vendor's to fill.
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
+		$html2 = gasf_crm_vendor_shortcode();
+		$this->ok( false !== strpos( $html2, 'name="f[event_name]"' ), 'presets: with none set the vendor types the event' );
+	}
+
+	/** The treasurer's rows are off the vendor's copy entirely. */
+	public function test_vendor_money_rows_are_not_public() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+		foreach ( array( 'DEPOSIT RECEIVED', 'Balance owed', 'OTHER MONIES RECEIVED' ) as $gone ) {
+			$this->ok( false === strpos( $html, $gone ), 'money: "' . $gone . '" is not on the vendor page' );
+		}
+
+		// They are fields a reviewer can actually fill, which is the point.
+		$fields = gasf_crm_vendor_payment_fields();
+		foreach ( array( 'deposit_amount', 'balance_amount', 'poi_date', 'notes' ) as $key ) {
+			$this->ok( array_key_exists( $key, $fields ), 'money: ' . $key . ' is a payment-record field' );
+		}
+	}
+
+	/**
+	 * Recording a payment cannot alter a signed agreement.
+	 *
+	 * This is the only UPDATE in the feature, and it exists beside a table whose
+	 * whole value is that its rows are immutable records of what somebody signed.
+	 * A treasurer entering a deposit six weeks later must not be able to touch
+	 * the contract, the blanks, or the signature -- so the update names its two
+	 * columns explicitly, and this proves the rest survived it.
+	 */
+	public function test_vendor_payment_does_not_touch_the_contract() {
+		global $wpdb;
+
+		ob_start();
+		gasf_crm_vendor_contract( 'record', array( 'vendor_legal' => 'Selftest Immutable', 'desc_full' => 'Original goods.' ) );
+		$snap = ob_get_clean();
+
+		$id = gasf_crm_vendor_insert( array(
+			'vendor_name'       => 'Selftest Immutable',
+			'terms_version'     => 'v-signed',
+			'agreed_name'       => 'A Tester',
+			'fields_json'       => wp_json_encode( array( 'contract' => array( 'vendor_legal' => 'Selftest Immutable' ) ) ),
+			'contract_snapshot' => $snap,
+			'fee_quoted'        => '75',
+		) );
+		$this->ok( is_int( $id ) && $id > 0, 'money: the agreement inserts' );
+		if ( ! is_int( $id ) ) { return; }
+
+		try {
+			// Exactly what the handler writes, without going through the request.
+			$wpdb->update( // phpcs:ignore WordPress.DB
+				gasf_crm_vendor_table(),
+				array( 'paid_json' => wp_json_encode( array( 'deposit_amount' => '37.50' ) ), 'fee_quoted' => '80' ),
+				array( 'id' => $id ),
+				array( '%s', '%s' ),
+				array( '%d' )
+			);
+
+			$row = gasf_crm_vendor_get( $id );
+			$this->ok( $row && $snap === $row['contract_snapshot'], 'money: the signed contract is byte-identical after a payment edit' );
+			$this->ok( $row && 'v-signed' === $row['terms_version'], 'money: the version signed under is unchanged' );
+			$this->ok( $row && 'A Tester' === $row['agreed_name'], 'money: the signature is unchanged' );
+
+			$paid = json_decode( (string) $row['paid_json'], true );
+			$this->ok( is_array( $paid ) && '37.50' === ( $paid['deposit_amount'] ?? '' ), 'money: the deposit is recorded' );
+			$this->ok( $row && '80' === $row['fee_quoted'], 'money: the fee record is editable' );
+		} finally {
+			$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
 		}
 	}
 

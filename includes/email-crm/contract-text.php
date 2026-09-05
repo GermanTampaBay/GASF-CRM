@@ -42,9 +42,14 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
  *                       one back as it was signed.
  * @param array  $values Field values, keyed as below. Ignored in 'form' mode
  *                       except to repopulate a rejected submission.
+ * @param array  $locked Blanks the organiser fixed in advance. Printed as
+ *                       values in both modes, never as fields. Defaults to
+ *                       whatever settings say, so a caller that does not care
+ *                       still renders the right document.
  */
-function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
-	gasf_crm_vendor_ctx( array( 'mode' => $mode, 'values' => $values ) );
+function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $locked = null ) {
+	if ( ! is_array( $locked ) ) { $locked = gasf_crm_vendor_locked_values(); }
+	gasf_crm_vendor_ctx( array( 'mode' => $mode, 'values' => $values, 'locked' => $locked ) );
 	$b = 'gasf_crm_vendor_blank';
 	?>
 <div class="gv-contract">
@@ -119,25 +124,20 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 		County, FL as described above to the <strong>Vendor</strong> for the sum of
 		$<?php $b( 'fee_amount', array( 'w' => 'md', 'club' => true, 'aria' => 'Fee' ) ); ?> (see Vendor Addendum).</p>
 
-	<?php /* Page 2 of the paper. Money already taken is the Society's record, not the vendor's to assert. */ ?>
-	<dl class="gv-rows gv-money">
-		<dt>DEPOSIT RECEIVED:</dt>
-		<dd>$<?php $b( 'deposit_amount', array( 'w' => 'md', 'club' => true, 'aria' => 'Deposit received' ) ); ?>
-			on <?php $b( 'deposit_date', array( 'w' => 'md', 'club' => true, 'aria' => 'Deposit date' ) ); ?> (date)</dd>
-
-		<dt>Balance owed:</dt>
-		<dd>$<?php $b( 'balance_amount', array( 'w' => 'md', 'club' => true, 'aria' => 'Balance owed' ) ); ?>
-			by <?php $b( 'balance_date', array( 'w' => 'md', 'club' => true, 'aria' => 'Balance due date' ) ); ?> (date)</dd>
-
-		<dt>OTHER MONIES RECEIVED (If Applicable):</dt>
-		<dd>
-			$<?php $b( 'other1_amount', array( 'w' => 'sm', 'club' => true, 'aria' => 'Other monies, amount 1' ) ); ?>
-			FOR: <?php $b( 'other1_for', array( 'w' => 'lg', 'club' => true, 'aria' => 'Other monies, purpose 1' ) ); ?><br>
-			$<?php $b( 'other2_amount', array( 'w' => 'sm', 'club' => true, 'aria' => 'Other monies, amount 2' ) ); ?>
-			FOR: <?php $b( 'other2_for', array( 'w' => 'lg', 'club' => true, 'aria' => 'Other monies, purpose 2' ) ); ?>
-		</dd>
-	</dl>
-
+	<?php
+	/*
+	 * The paper's DEPOSIT RECEIVED / Balance owed / OTHER MONIES block is NOT
+	 * here, deliberately.
+	 *
+	 * Those lines are the treasurer's running record of what has been paid, and
+	 * they are filled in over weeks, after the vendor has signed and gone away.
+	 * On a page a stranger is reading they were four rows of grey boxes that
+	 * could never be filled and explained nothing. They live in the Contracts
+	 * pane instead, against the agreement they belong to, where somebody can
+	 * actually keep them up to date -- and where editing them cannot touch the
+	 * signed document.
+	 */
+	?>
 	<h3>TERMS</h3>
 	<p><strong>Vendor</strong> agrees to pay half the fee made payable to the <strong>German-American Society,</strong>
 		upon signing of this contract and the balance due plus damage and cleanup fee at least 30 days prior to the

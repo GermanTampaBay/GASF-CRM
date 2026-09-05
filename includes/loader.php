@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.23.0' );
+	define( 'GASF_CRM_SCHEMA', '1.24.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -468,7 +468,7 @@ if ( true ) {
 			'photo_submissions' => array( 'lease_owner', 'lease_until', 'next_attempt_at' ),
 			'photo_invites'     => array( 'remind_attempts' ),
 			'messages'          => array( 'stream' ),
-			'vendor_apps'       => array( 'fields_json', 'contract_snapshot', 'vendor_type', 'files_json', 'photo_consent' ),
+			'vendor_apps'       => array( 'fields_json', 'contract_snapshot', 'vendor_type', 'files_json', 'photo_consent', 'fee_quoted', 'paid_json' ),
 		) as $t => $cols ) {
 			$name = gasf_crm_table( $t );
 			if ( in_array( 'table ' . $t . ' is missing', $gaps, true ) ) { continue; }
