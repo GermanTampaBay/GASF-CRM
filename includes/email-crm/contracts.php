@@ -139,7 +139,22 @@ function gasf_crm_vendor_coi_dir() {
  *
  * @return array|WP_Error {path (relative), name (original), bytes}
  */
-function gasf_crm_vendor_store_coi( array $file ) {
+function gasf_crm_vendor_allowed_types( $kind ) {
+	$images = array(
+		'jpg'  => 'image/jpeg',
+		'jpeg' => 'image/jpeg',
+		'png'  => 'image/png',
+		'webp' => 'image/webp',
+		'heic' => 'image/heic',
+	);
+
+	// A certificate arrives as a PDF from a broker or as a photograph of a sheet
+	// of paper taken on a phone, in roughly equal measure. Both are the same
+	// document to a reader, so both are accepted.
+	return 'photo' === $kind ? $images : array_merge( array( 'pdf' => 'application/pdf' ), $images );
+}
+
+function gasf_crm_vendor_store_coi( array $file, $kind = 'coi' ) {
 	if ( ! isset( $file['tmp_name'] ) || ! is_uploaded_file( $file['tmp_name'] ) ) {
 		return new WP_Error( 'gasf_crm_vendor_coi', 'That upload did not arrive intact. Please try again.' );
 	}
@@ -155,23 +170,20 @@ function gasf_crm_vendor_store_coi( array $file ) {
 		return new WP_Error( 'gasf_crm_vendor_coi', 'That file is larger than 10 MB. Please send a smaller copy.' );
 	}
 
-	$allowed = array(
-		'pdf'  => 'application/pdf',
-		'jpg'  => 'image/jpeg',
-		'jpeg' => 'image/jpeg',
-		'png'  => 'image/png',
-	);
+	$allowed = gasf_crm_vendor_allowed_types( $kind );
 
 	$check = wp_check_filetype_and_ext( $file['tmp_name'], (string) ( $file['name'] ?? '' ), $allowed );
 	$ext   = strtolower( (string) ( $check['ext'] ?? '' ) );
 	if ( '' === $ext || ! isset( $allowed[ $ext ] ) ) {
-		return new WP_Error( 'gasf_crm_vendor_coi', 'Please attach the certificate as a PDF, a JPG, or a PNG.' );
+		return new WP_Error( 'gasf_crm_vendor_coi', 'photo' === $kind
+			? 'Please send photographs as JPG, PNG, WEBP, or HEIC.'
+			: 'Please attach the certificate as a PDF, JPG, PNG, WEBP, or HEIC.' );
 	}
 
 	$dir = gasf_crm_vendor_coi_dir();
 	if ( is_wp_error( $dir ) ) { return $dir; }
 
-	$name = 'coi-' . gmdate( 'Ymd' ) . '-' . bin2hex( random_bytes( 8 ) ) . '.' . $ext;
+	$name = ( 'photo' === $kind ? 'img-' : 'coi-' ) . gmdate( 'Ymd' ) . '-' . bin2hex( random_bytes( 8 ) ) . '.' . $ext;
 	$dest = trailingslashit( $dir ) . $name;
 
 	if ( ! @move_uploaded_file( $file['tmp_name'], $dest ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
@@ -183,6 +195,7 @@ function gasf_crm_vendor_store_coi( array $file ) {
 		'path'  => $name,
 		'name'  => sanitize_file_name( (string) ( $file['name'] ?? $name ) ),
 		'bytes' => $bytes,
+		'kind'  => (string) $kind,
 	);
 }
 
@@ -235,6 +248,13 @@ function gasf_crm_vendor_insert( array $d ) {
 		// is what they were looking at when they typed it.
 		'fields_json'       => (string) ( $d['fields_json'] ?? '' ),
 		'contract_snapshot' => (string) ( $d['contract_snapshot'] ?? '' ),
+		'vendor_type'       => (string) ( $d['vendor_type'] ?? '' ),
+		'files_json'        => (string) ( $d['files_json'] ?? '' ),
+		// Stored as its own column rather than inside the JSON blob: whether the
+		// club may publish somebody's photographs is a permission, and a
+		// permission that can only be found by parsing a text field is one
+		// nobody will check before publishing.
+		'photo_consent'     => empty( $d['photo_consent'] ) ? 0 : 1,
 	);
 
 	$ok = $wpdb->insert( gasf_crm_vendor_table(), $row ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
@@ -389,9 +409,6 @@ function gasf_crm_vendor_vendor_fields() {
 		'poc_name'          => 180,
 		'poc_mobile'        => 30,
 		'poc_email'         => 180,
-		'desc1'             => 200,
-		'desc2'             => 200,
-		'desc3'             => 200,
 		'tax_exempt'        => 60,
 		'sign_vendor'       => 180,
 		'sign_vendor_date'  => 40,
@@ -408,7 +425,6 @@ function gasf_crm_vendor_required_fields() {
 		'poc_name'     => 'the point of contact name',
 		'poc_mobile'   => 'a contact mobile number',
 		'poc_email'    => 'a contact email address',
-		'desc1'        => 'a description of the products or services',
 		'sign_vendor'  => 'your signature',
 	);
 }
@@ -450,6 +466,14 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 		return;
 	}
 
+	// Filled by the form from an answer given elsewhere. Rendered as a note so
+	// the vendor can see the clause is not blank by accident, and emitted as no
+	// field at all so there is nothing to disagree with what they typed above.
+	if ( ! empty( $args['auto'] ) ) {
+		echo '<span class="gv-auto ' . esc_attr( $w ) . '">' . esc_html( $args['auto'] ) . '</span>';
+		return;
+	}
+
 	$required = array_key_exists( $key, gasf_crm_vendor_required_fields() );
 	$max      = gasf_crm_vendor_vendor_fields();
 	$max      = isset( $max[ $key ] ) ? (int) $max[ $key ] : 180;
@@ -464,6 +488,286 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 		esc_attr( isset( $args['aria'] ) ? $args['aria'] : $key ),
 		$required ? ' required' : ''
 	);
+}
+
+/* --------------------------------------------------------------------------
+ * The application, which is not the agreement
+ *
+ * Everything in this block is the club deciding whether it wants a vendor:
+ * what they make, what it looks like, where they will stand, and -- for food --
+ * whether they are permitted to serve it. None of it is a term of the contract.
+ * The one place the two meet is the description of goods, which is a blank in
+ * the agreement and is filled from the answer given here rather than asked for
+ * twice, because two descriptions in one signed document is a dispute waiting
+ * to happen.
+ * -------------------------------------------------------------------------- */
+
+/** Craft or food. The whole form branches on this. */
+function gasf_crm_vendor_types() {
+	return array(
+		'craft' => __( 'Craft vendor', 'gasf' ),
+		'food'  => __( 'Food vendor', 'gasf' ),
+	);
+}
+
+/** What a craft vendor makes. A vendor may tick several. */
+function gasf_crm_vendor_craft_types() {
+	return array(
+		'wood'     => __( 'Wood', 'gasf' ),
+		'metal'    => __( 'Metal', 'gasf' ),
+		'glass'    => __( 'Glass', 'gasf' ),
+		'painting' => __( 'Painting art', 'gasf' ),
+		'photo'    => __( 'Photo', 'gasf' ),
+		'leather'  => __( 'Leather', 'gasf' ),
+		'other'    => __( 'Other', 'gasf' ),
+	);
+}
+
+/**
+ * Where a vendor stands.
+ *
+ * The outside pitch's conditions are stated in the option itself rather than in
+ * a note beside it: "no electricity, bring your own lighting" is the single
+ * thing a vendor most needs to have read before choosing, and a vendor who
+ * discovers it at a dark December event has been failed by the form.
+ */
+function gasf_crm_vendor_booths() {
+	return array(
+		'10x10_outside' => __( '10x10 outside -- no electricity, and you must bring your own lighting for evening events', 'gasf' ),
+		'8ft_inside'    => __( '8 foot table inside', 'gasf' ),
+	);
+}
+
+/** Free-text application answers, whitelisted and length-capped like the contract's blanks. */
+function gasf_crm_vendor_app_fields() {
+	return array(
+		'website'       => 200,
+		'facebook'      => 200,
+		'instagram'     => 200,
+		'craft_other'   => 90,
+		'description'   => 2000,
+		'health_permit' => 120,
+		'power_needs'   => 300,
+	);
+}
+
+/**
+ * How many photographs each kind of vendor must send, and what the first is of.
+ *
+ * The booth photograph is first for both because it is the one the club is
+ * really asking for -- a stall that will look wrong on the field is the thing
+ * you cannot fix on the day.
+ */
+function gasf_crm_vendor_photo_slots( $type ) {
+	if ( 'food' === $type ) {
+		return array(
+			__( 'Your set-up or stall', 'gasf' ),
+			__( 'Your set-up, second view', 'gasf' ),
+			__( 'Your set-up, third view', 'gasf' ),
+		);
+	}
+
+	return array(
+		__( 'Your booth set-up', 'gasf' ),
+		__( 'Your work', 'gasf' ),
+		__( 'Your work, another example', 'gasf' ),
+	);
+}
+
+/* --------------------------------------------------------------------------
+ * Reading the application back off the request
+ * -------------------------------------------------------------------------- */
+
+/** Which kind of vendor this submission is, or '' if they have not chosen. */
+function gasf_crm_vendor_posted_type() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- the caller that ACTS on this verifies first.
+	$t = isset( $_POST['vendor_type'] ) ? sanitize_key( wp_unslash( $_POST['vendor_type'] ) ) : '';
+	return array_key_exists( $t, gasf_crm_vendor_types() ) ? $t : '';
+}
+
+/** The free-text application answers, whitelisted, sanitised, and length-capped. */
+function gasf_crm_vendor_posted_app() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- the caller that ACTS on this verifies first.
+	$raw = isset( $_POST['a'] ) && is_array( $_POST['a'] ) ? wp_unslash( $_POST['a'] ) : array();
+
+	$out = array();
+	foreach ( gasf_crm_vendor_app_fields() as $key => $max ) {
+		if ( ! isset( $raw[ $key ] ) || ! is_scalar( $raw[ $key ] ) ) { continue; }
+		$v = 'description' === $key
+			? sanitize_textarea_field( (string) $raw[ $key ] )
+			: sanitize_text_field( (string) $raw[ $key ] );
+		$out[ $key ] = function_exists( 'mb_substr' ) ? mb_substr( $v, 0, $max ) : substr( $v, 0, $max );
+	}
+
+	// The three link fields are addresses, and an address that is not one should
+	// not be stored as though it were. Anything unparseable is kept as typed --
+	// a vendor writing "@ourshop" on Instagram is being helpful, not wrong --
+	// but it is never emitted as a link. See gasf_crm_vendor_link().
+	return $out;
+}
+
+/** Craft types ticked, filtered to ones that exist. */
+function gasf_crm_vendor_posted_crafts() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- the caller that ACTS on this verifies first.
+	$raw = isset( $_POST['crafts'] ) && is_array( $_POST['crafts'] ) ? wp_unslash( $_POST['crafts'] ) : array();
+	$raw = array_map( 'sanitize_key', $raw );
+
+	return array_values( array_intersect( array_keys( gasf_crm_vendor_craft_types() ), $raw ) );
+}
+
+/** The booth they asked for, or ''. */
+function gasf_crm_vendor_posted_booth() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- the caller that ACTS on this verifies first.
+	$b = isset( $_POST['booth'] ) ? sanitize_key( wp_unslash( $_POST['booth'] ) ) : '';
+	return array_key_exists( $b, gasf_crm_vendor_booths() ) ? $b : '';
+}
+
+/**
+ * A stored answer as a link, or as plain text if it is not one.
+ *
+ * Vendors type "@ourshop", "facebook.com/ourshop", and the full address in
+ * roughly equal measure. A bare host is promoted to https; anything with a
+ * scheme we do not serve, or no host at all, is shown as text and never
+ * becomes an href -- a reviewer clicking a vendor's answer should not be able
+ * to land somewhere a javascript: URI chose.
+ */
+function gasf_crm_vendor_link( $raw ) {
+	$raw = trim( (string) $raw );
+	if ( '' === $raw ) { return ''; }
+
+	$try = $raw;
+	if ( ! preg_match( '#^https?://#i', $try ) ) {
+		// A colon in something we are about to prepend a scheme to means it
+		// already carries one, and the only schemes allowed here are the two
+		// matched above. Without this, "javascript:alert(document.cookie)"
+		// becomes "https://javascript:alert(document.cookie)" -- which is a
+		// parseable https URL -- and the guard below would pass it.
+		if ( 0 === strpos( $try, '@' ) || false !== strpos( $try, ':' ) || false === strpos( $try, '.' ) ) {
+			return '<span>' . esc_html( $raw ) . '</span>';
+		}
+		$try = 'https://' . $try;
+	}
+
+	$url = esc_url( $try, array( 'http', 'https' ) );
+	if ( '' === $url ) { return '<span>' . esc_html( $raw ) . '</span>'; }
+
+	return '<a href="' . $url . '" target="_blank" rel="noopener nofollow">' . esc_html( $raw ) . '</a>';
+}
+
+/* --------------------------------------------------------------------------
+ * Rendering the application half
+ * -------------------------------------------------------------------------- */
+
+/**
+ * The questions above the agreement.
+ *
+ * Both branches are rendered and the script below hides the one that does not
+ * apply. Without JavaScript a vendor sees every question, which is untidy but
+ * works; the server decides what is required from the type they chose, never
+ * from what happened to be visible.
+ */
+function gasf_crm_vendor_application_section( array $app, $type, array $crafts, $booth ) {
+	$types = gasf_crm_vendor_types();
+	?>
+	<div class="gv-app">
+		<fieldset class="gv-kind">
+			<legend>What kind of vendor are you?</legend>
+			<?php foreach ( $types as $key => $label ) : ?>
+				<label class="gv-radio">
+					<input type="radio" name="vendor_type" value="<?php echo esc_attr( $key ); ?>" <?php checked( $type, $key ); ?> required>
+					<?php echo esc_html( $label ); ?>
+				</label>
+			<?php endforeach; ?>
+		</fieldset>
+
+		<fieldset>
+			<legend>Where we can see your work</legend>
+			<p class="gv-legend">We use these to help promote the event, and to see what you make.</p>
+			<p><label for="gv-website">Website</label>
+				<input type="text" name="a[website]" id="gv-website" maxlength="200" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['website'] ?? '' ); ?>" placeholder="ourshop.com"></p>
+			<p><label for="gv-facebook">Facebook</label>
+				<input type="text" name="a[facebook]" id="gv-facebook" maxlength="200" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['facebook'] ?? '' ); ?>"></p>
+			<p><label for="gv-instagram">Instagram</label>
+				<input type="text" name="a[instagram]" id="gv-instagram" maxlength="200" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['instagram'] ?? '' ); ?>"></p>
+		</fieldset>
+
+		<?php /* ---------------------------------------------------- craft */ ?>
+		<div class="gv-branch" data-for="craft">
+			<fieldset>
+				<legend>What you make</legend>
+				<p class="gv-legend">Tick everything that applies.</p>
+				<div class="gv-checks">
+					<?php foreach ( gasf_crm_vendor_craft_types() as $key => $label ) : ?>
+						<label class="gv-check">
+							<input type="checkbox" name="crafts[]" value="<?php echo esc_attr( $key ); ?>" <?php checked( in_array( $key, $crafts, true ) ); ?>>
+							<?php echo esc_html( $label ); ?>
+						</label>
+					<?php endforeach; ?>
+				</div>
+				<p><label for="gv-craftother">If you ticked Other, what is it?</label>
+					<input type="text" name="a[craft_other]" id="gv-craftother" maxlength="90" class="gv-in gv-w-lg" value="<?php echo esc_attr( $app['craft_other'] ?? '' ); ?>"></p>
+			</fieldset>
+
+			<fieldset>
+				<legend>Your space</legend>
+				<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
+					<label class="gv-radio gv-block">
+						<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" <?php checked( $booth, $key ); ?>>
+						<?php echo esc_html( $label ); ?>
+					</label>
+				<?php endforeach; ?>
+			</fieldset>
+		</div>
+
+		<?php /* ----------------------------------------------------- food */ ?>
+		<div class="gv-branch" data-for="food">
+			<fieldset>
+				<legend>Permits and power</legend>
+				<p><label for="gv-permit">Health permit number(s)</label>
+					<input type="text" name="a[health_permit]" id="gv-permit" maxlength="120" class="gv-in gv-w-lg" value="<?php echo esc_attr( $app['health_permit'] ?? '' ); ?>"></p>
+
+				<p class="gv-rule"><strong>Generators are not permitted at our events.</strong>
+					They are too loud for the evening programme. Tell us what power you need and we will
+					run a cord to you where we can.</p>
+
+				<p><label for="gv-power">What power do you need?</label>
+					<input type="text" name="a[power_needs]" id="gv-power" maxlength="300" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['power_needs'] ?? '' ); ?>" placeholder="e.g. one 20A outlet for a warmer"></p>
+			</fieldset>
+		</div>
+
+		<fieldset>
+			<legend>Tell us about what you are selling</legend>
+			<p class="gv-legend">In your own words. <strong>This goes into the agreement below</strong> as the
+				description of what you are approved to sell, so please be specific.</p>
+			<p><textarea name="a[description]" id="gv-description" rows="5" maxlength="2000" class="gv-in gv-w-full" required><?php echo esc_textarea( $app['description'] ?? '' ); ?></textarea></p>
+		</fieldset>
+
+		<fieldset>
+			<legend>Photographs</legend>
+			<p class="gv-legend">Three photographs, please. The first should be your set-up, so we can picture
+				where you will go.</p>
+			<?php foreach ( gasf_crm_vendor_photo_slots( $type ? $type : 'craft' ) as $i => $label ) : ?>
+				<p><label for="gv-photo<?php echo (int) $i; ?>"><?php echo esc_html( $label ); ?></label>
+					<input type="file" name="photos[]" id="gv-photo<?php echo (int) $i; ?>" accept="image/jpeg,image/png,image/webp,image/heic,.jpg,.jpeg,.png,.webp,.heic"></p>
+			<?php endforeach; ?>
+
+			<p class="gv-consent">
+				<label>
+					<input type="checkbox" name="photo_consent" value="1" <?php checked( gasf_crm_vendor_posted_consent() ); ?>>
+					The German-American Society may use these images publicly to help promote the event.
+				</label>
+			</p>
+			<p class="gv-legend">Ticking that is optional, and we will not use your photographs publicly if you
+				leave it blank. We still need them either way so we can review your application.</p>
+		</fieldset>
+	</div>
+	<?php
+}
+
+/** Did they agree we may use their photographs publicly? */
+function gasf_crm_vendor_posted_consent() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- the caller that ACTS on this verifies first.
+	return ! empty( $_POST['photo_consent'] );
 }
 
 /* --------------------------------------------------------------------------
@@ -502,6 +806,21 @@ function gasf_crm_vendor_styles() {
 .gv-w-lg { width: 20rem; max-width: 100%; }
 .gv-w-xl { width: 30rem; max-width: 100%; }
 .gv-w-full { width: 100%; }
+.gv-app { background: #fff; border: 1px solid #d8d8d8; padding: 1.5rem; margin-bottom: 1.25rem; }
+.gv-app fieldset { border: 0; border-top: 1px solid #e4e4e4; padding: 1rem 0 0; margin: 1.5rem 0 0; }
+.gv-app fieldset:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+.gv-app legend { font-weight: 700; font-size: 1.05rem; padding: 0; }
+.gv-app label { display: inline-block; margin-bottom: 0.2rem; }
+.gv-app textarea.gv-in { border: 1px solid #444; padding: 0.5rem; }
+.gv-kind .gv-radio { display: inline-block; margin-right: 1.5rem; font-weight: 700; font-size: 1.05rem; }
+.gv-radio.gv-block { display: block; margin: 0.4rem 0; font-weight: 400; }
+.gv-checks { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; margin-bottom: 0.8rem; }
+.gv-check { white-space: nowrap; }
+.gv-rule { background: #fdeceb; border-left: 4px solid #c0392b; padding: 0.6rem 0.9rem; }
+.gv-consent { background: #fbf6ea; border: 1px solid #EF9F27; padding: 0.7rem 0.9rem; }
+.gv-auto { font-style: italic; color: #666; }
+.gv-branch[hidden] { display: none; }
+.gv-files dt { font-weight: 700; margin-top: 0.6rem; }
 .gv-pick { background: #fbf6ea; border: 1px solid #EF9F27; padding: 1rem; margin-bottom: 1.25rem; }
 .gv-pick label { font-weight: 700; display: block; margin-bottom: 0.4rem; }
 .gv-pick select { max-width: 100%; }
@@ -547,6 +866,10 @@ function gasf_crm_vendor_shortcode() {
 	$errors = gasf_crm_vendor_last_errors();
 	$values = gasf_crm_vendor_submitted_fields();
 	$events = gasf_crm_vendor_events();
+	$app    = gasf_crm_vendor_posted_app();
+	$type   = gasf_crm_vendor_posted_type();
+	$crafts = gasf_crm_vendor_posted_crafts();
+	$booth  = gasf_crm_vendor_posted_booth();
 
 	gasf_crm_vendor_styles();
 	?>
@@ -581,13 +904,15 @@ function gasf_crm_vendor_shortcode() {
 				</div>
 			<?php endif; ?>
 
+			<?php gasf_crm_vendor_application_section( $app, $type, $crafts, $booth ); ?>
+
 			<?php gasf_crm_vendor_contract( 'form', $values ); ?>
 
 			<div class="gv-submit">
-				<p><strong>Certificate of insurance</strong> &mdash; PDF, JPG, or PNG, up to 10 MB.
-					You can attach it now or send it later, but the agreement requires it at least
-					30 days before the event.<br>
-					<input type="file" name="coi" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+				<p><strong>Certificate of insurance</strong> &mdash; PDF or a photograph, up to 10 MB.
+					<span class="gv-legend">Food vendors must attach this now. Craft vendors may send it later,
+					but the agreement requires it at least 30 days before the event.</span><br>
+					<input type="file" name="coi" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,application/pdf,image/jpeg,image/png,image/webp,image/heic">
 				</p>
 
 				<?php
@@ -599,6 +924,21 @@ function gasf_crm_vendor_shortcode() {
 				<?php endif; ?>
 
 				<p><button type="submit" class="gv-go">Sign and submit this agreement</button></p>
+				<script>
+				(function () {
+					var branches = document.querySelectorAll('.gv-branch');
+					var radios = document.querySelectorAll('input[name="vendor_type"]');
+					function sync() {
+						var chosen = '';
+						Array.prototype.forEach.call(radios, function (r) { if (r.checked) { chosen = r.value; } });
+						Array.prototype.forEach.call(branches, function (b) {
+							b.hidden = (chosen !== '' && b.getAttribute('data-for') !== chosen);
+						});
+					}
+					Array.prototype.forEach.call(radios, function (r) { r.addEventListener('change', sync); });
+					sync();
+				}());
+				</script>
 				<p class="gv-legend">Submitting this does not reserve a space, and does not put the agreement in
 					force. An officer of the Society countersigns it after reviewing your application.</p>
 			</div>
@@ -694,7 +1034,47 @@ function gasf_crm_vendor_handle() {
 	}
 
 	$values = gasf_crm_vendor_submitted_fields();
+	$app    = gasf_crm_vendor_posted_app();
+	$type   = gasf_crm_vendor_posted_type();
+	$crafts = gasf_crm_vendor_posted_crafts();
+	$booth  = gasf_crm_vendor_posted_booth();
 	$errors = array();
+
+	/*
+	 * What is required depends on what they said they are, and that decision is
+	 * made HERE rather than from what the page happened to show. The branch
+	 * script hides the questions that do not apply; a browser with no
+	 * JavaScript, or somebody posting directly, sees or sends all of them. Only
+	 * the server knows which answers count.
+	 */
+	if ( '' === $type ) {
+		$errors[] = 'Please say whether you are a craft vendor or a food vendor.';
+	}
+
+	if ( '' === trim( (string) ( $app['description'] ?? '' ) ) ) {
+		$errors[] = 'Please describe what you will be selling.';
+	}
+
+	if ( 'craft' === $type ) {
+		if ( ! $crafts ) {
+			$errors[] = 'Please tick at least one kind of craft.';
+		}
+		if ( in_array( 'other', $crafts, true ) && '' === trim( (string) ( $app['craft_other'] ?? '' ) ) ) {
+			$errors[] = 'You ticked Other -- please say what kind of craft that is.';
+		}
+		if ( '' === $booth ) {
+			$errors[] = 'Please choose whether you want a 10x10 space outside or an 8 foot table inside.';
+		}
+	}
+
+	if ( 'food' === $type ) {
+		if ( '' === trim( (string) ( $app['health_permit'] ?? '' ) ) ) {
+			$errors[] = 'Please give your health permit number.';
+		}
+		if ( '' === trim( (string) ( $app['power_needs'] ?? '' ) ) ) {
+			$errors[] = 'Please tell us what power you need, or write none.';
+		}
+	}
 
 	// A chosen event is authoritative over the typed blanks: the club knows its
 	// own calendar better than a vendor reading it off a poster, and the two
@@ -739,14 +1119,56 @@ function gasf_crm_vendor_handle() {
 			$coi = $stored;
 		}
 	}
+	if ( 'food' === $type && '' === $coi['path'] ) {
+		$errors[] = 'Please attach your certificate of insurance. Food vendors need it with the application.';
+	}
+
+	/*
+	 * The photographs.
+	 *
+	 * Taken one slot at a time rather than as a batch so that a vendor who sends
+	 * two good photographs and one that is too large is told which one, and
+	 * keeps the two. PHP's $_FILES for a multiple input is column-major -- one
+	 * array per PROPERTY, not per file -- so it is transposed before use; read
+	 * naively it silently hands the first file's name to every upload.
+	 */
+	$photos = array();
+	$slots  = gasf_crm_vendor_photo_slots( $type ? $type : 'craft' );
+	if ( isset( $_FILES['photos'] ) && is_array( $_FILES['photos']['name'] ) ) {
+		$count = count( $_FILES['photos']['name'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		for ( $i = 0; $i < $count && $i < 3; $i++ ) {
+			if ( empty( $_FILES['photos']['name'][ $i ] ) ) { continue; }
+			$one = array(
+				'name'     => $_FILES['photos']['name'][ $i ],     // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+				'type'     => $_FILES['photos']['type'][ $i ],     // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+				'tmp_name' => $_FILES['photos']['tmp_name'][ $i ], // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+				'error'    => $_FILES['photos']['error'][ $i ],    // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+				'size'     => $_FILES['photos']['size'][ $i ],     // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+			);
+			$stored = gasf_crm_vendor_store_coi( $one, 'photo' );
+			if ( is_wp_error( $stored ) ) {
+				$errors[] = ( isset( $slots[ $i ] ) ? $slots[ $i ] . ': ' : '' ) . $stored->get_error_message();
+				continue;
+			}
+			$stored['label'] = isset( $slots[ $i ] ) ? $slots[ $i ] : '';
+			$photos[]        = $stored;
+		}
+	}
+	if ( count( $photos ) < 3 ) {
+		$errors[] = 'Please send all three photographs. The first should be your set-up.';
+	}
 
 	if ( $errors ) {
 		// A certificate accepted on a submission that then failed validation is
 		// deleted rather than orphaned: they will attach it again on the retry,
 		// and an unreferenced file in a private store is something nobody will
 		// ever come back and reconcile.
-		if ( $coi['path'] ) {
-			@unlink( trailingslashit( gasf_crm_vendor_coi_root() ) . basename( $coi['path'] ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		$orphans = $photos;
+		if ( $coi['path'] ) { $orphans[] = $coi; }
+		foreach ( $orphans as $f ) {
+			if ( ! empty( $f['path'] ) ) {
+				@unlink( trailingslashit( gasf_crm_vendor_coi_root() ) . basename( $f['path'] ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			}
 		}
 		gasf_crm_vendor_last_errors( $errors );
 		return;
@@ -755,6 +1177,11 @@ function gasf_crm_vendor_handle() {
 	if ( '' === trim( (string) ( $values['sign_vendor_date'] ?? '' ) ) ) {
 		$values['sign_vendor_date'] = wp_date( 'j F Y' );
 	}
+
+	// The description they gave above IS the contract's description of goods.
+	// It is copied in before the snapshot is taken, so what they sign says what
+	// they are approved to sell.
+	$values['desc_full'] = (string) ( $app['description'] ?? '' );
 
 	/*
 	 * Snapshot the agreement AS RENDERED, not merely its version string.
@@ -781,11 +1208,7 @@ function gasf_crm_vendor_handle() {
 		'poc_name'          => (string) ( $values['poc_name'] ?? '' ),
 		'poc_mobile'        => (string) ( $values['poc_mobile'] ?? '' ),
 		'poc_email'         => (string) ( $values['poc_email'] ?? '' ),
-		'products'          => trim( implode( "\n", array_filter( array(
-			(string) ( $values['desc1'] ?? '' ),
-			(string) ( $values['desc2'] ?? '' ),
-			(string) ( $values['desc3'] ?? '' ),
-		) ) ) ),
+		'products'          => (string) ( $app['description'] ?? '' ),
 		'tax_exempt'        => (string) ( $values['tax_exempt'] ?? '' ),
 		'coi_path'          => $coi['path'],
 		'coi_name'          => $coi['name'],
@@ -797,8 +1220,16 @@ function gasf_crm_vendor_handle() {
 		'agreed_ua'         => isset( $_SERVER['HTTP_USER_AGENT'] )
 			? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 255 )
 			: '',
-		'fields_json'       => wp_json_encode( $values ),
+		'fields_json'       => wp_json_encode( array(
+			'contract'    => $values,
+			'application' => $app,
+			'crafts'      => $crafts,
+			'booth'       => $booth,
+		) ),
 		'contract_snapshot' => $snapshot,
+		'vendor_type'       => $type,
+		'files_json'        => wp_json_encode( $photos ),
+		'photo_consent'     => gasf_crm_vendor_posted_consent() ? 1 : 0,
 	) );
 
 	if ( is_wp_error( $id ) ) {
@@ -879,6 +1310,53 @@ function gasf_crm_vendor_serve_coi( $id ) {
 }
 
 /**
+ * Hand over one stored photograph.
+ *
+ * Same posture as the certificate: the file is above the document root, so a
+ * handler that checks the grant is the only way to it. The index is bounds
+ * checked against the row's own list rather than trusted -- files_json is the
+ * only thing that decides which files exist, and an index that is not in it
+ * resolves to nothing rather than to somebody else's photograph.
+ */
+function gasf_crm_vendor_serve_file( $id, $n ) {
+	if ( ! gasf_crm_vendor_may_read() ) {
+		status_header( 403 );
+		wp_die( esc_html__( 'You do not have access to that.', 'gasf' ), '', array( 'response' => 403 ) );
+	}
+
+	$row   = gasf_crm_vendor_get( $id );
+	$files = $row ? json_decode( (string) $row['files_json'], true ) : null;
+	$n     = (int) $n;
+
+	if ( ! is_array( $files ) || ! isset( $files[ $n ] ) || empty( $files[ $n ]['path'] ) ) {
+		status_header( 404 );
+		wp_die( esc_html__( 'That file is not here.', 'gasf' ), '', array( 'response' => 404 ) );
+	}
+
+	$path = trailingslashit( gasf_crm_vendor_coi_root() ) . basename( (string) $files[ $n ]['path'] );
+	if ( ! file_exists( $path ) ) {
+		gasf_crm_log( 'CRM vendor: photograph ' . $n . ' for application ' . (int) $id . ' is recorded but missing from disk.' );
+		status_header( 404 );
+		wp_die( esc_html__( 'That file is not here.', 'gasf' ), '', array( 'response' => 404 ) );
+	}
+
+	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' downloaded photograph ' . $n . ' for application ' . (int) $id );
+
+	$type = wp_check_filetype( $path );
+	$mime = $type['type'] ? $type['type'] : 'application/octet-stream';
+	$name = (string) ( $files[ $n ]['name'] ?? basename( $path ) );
+
+	nocache_headers();
+	header( 'Content-Type: ' . $mime );
+	header( 'Content-Length: ' . (int) filesize( $path ) );
+	header( 'Content-Disposition: attachment; filename="' . sanitize_file_name( $name ) . '"' );
+	header( 'X-Content-Type-Options: nosniff' );
+
+	readfile( $path ); // phpcs:ignore WordPress.WP.AlternativeFunctions
+	exit;
+}
+
+/**
  * The Contracts pane.
  *
  * Shows each agreement AS THE AGREEMENT -- the stored snapshot of the contract
@@ -942,6 +1420,93 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 						not supplied yet &mdash; the agreement asks for it at least 30 days before the event.
 					<?php endif; ?>
 				</p>
+
+				<?php
+				/*
+				 * The application, above the contract it is attached to.
+				 *
+				 * This is what the club is actually deciding on -- what they
+				 * make, where they will stand, whether they may serve food --
+				 * and it is deliberately not folded into the agreement, because
+				 * none of it is a term of the agreement. A reviewer reads the
+				 * application to decide, then the contract to check what was
+				 * signed.
+				 */
+				$fields = json_decode( (string) $r['fields_json'], true );
+				$app    = is_array( $fields ) && isset( $fields['application'] ) ? (array) $fields['application'] : array();
+				$crafts = is_array( $fields ) && isset( $fields['crafts'] ) ? (array) $fields['crafts'] : array();
+				$booth  = is_array( $fields ) && isset( $fields['booth'] ) ? (string) $fields['booth'] : '';
+				$files  = json_decode( (string) $r['files_json'], true );
+				$types  = gasf_crm_vendor_types();
+				$ctypes = gasf_crm_vendor_craft_types();
+				$booths = gasf_crm_vendor_booths();
+				?>
+
+				<dl class="gv-files">
+					<dt>Applying as</dt>
+					<dd><?php echo esc_html( $types[ $r['vendor_type'] ] ?? 'not stated' ); ?></dd>
+
+					<?php if ( $crafts ) : ?>
+						<dt>Makes</dt>
+						<dd>
+							<?php
+							$named = array();
+							foreach ( $crafts as $c ) { $named[] = $ctypes[ $c ] ?? $c; }
+							echo esc_html( implode( ', ', $named ) );
+							if ( ! empty( $app['craft_other'] ) ) {
+								echo ' &mdash; ' . esc_html( $app['craft_other'] );
+							}
+							?>
+						</dd>
+					<?php endif; ?>
+
+					<?php if ( $booth ) : ?>
+						<dt>Space asked for</dt>
+						<dd><?php echo esc_html( $booths[ $booth ] ?? $booth ); ?></dd>
+					<?php endif; ?>
+
+					<?php if ( ! empty( $app['health_permit'] ) ) : ?>
+						<dt>Health permit</dt>
+						<dd><?php echo esc_html( $app['health_permit'] ); ?></dd>
+					<?php endif; ?>
+
+					<?php if ( ! empty( $app['power_needs'] ) ) : ?>
+						<dt>Power needed</dt>
+						<dd><?php echo esc_html( $app['power_needs'] ); ?></dd>
+					<?php endif; ?>
+
+					<?php if ( ! empty( $app['website'] ) || ! empty( $app['facebook'] ) || ! empty( $app['instagram'] ) ) : ?>
+						<dt>Find them at</dt>
+						<dd>
+							<?php
+							foreach ( array( 'website' => 'Web', 'facebook' => 'Facebook', 'instagram' => 'Instagram' ) as $k => $lbl ) {
+								if ( empty( $app[ $k ] ) ) { continue; }
+								// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside the helper.
+								echo esc_html( $lbl ) . ': ' . gasf_crm_vendor_link( $app[ $k ] ) . '<br>';
+							}
+							?>
+						</dd>
+					<?php endif; ?>
+
+					<dt>Photographs</dt>
+					<dd>
+						<?php if ( is_array( $files ) && $files ) : ?>
+							<?php foreach ( $files as $i => $f ) : ?>
+								<a href="<?php echo esc_url( home_url( '/email/contracts/file/' . (int) $r['id'] . '/' . (int) $i ) ); ?>">
+									<?php echo esc_html( ! empty( $f['label'] ) ? $f['label'] : 'photograph ' . ( (int) $i + 1 ) ); ?></a>
+								<span class="muted">(<?php echo esc_html( size_format( (int) ( $f['bytes'] ?? 0 ) ) ); ?>)</span><br>
+							<?php endforeach; ?>
+							<?php if ( ! empty( $r['photo_consent'] ) ) : ?>
+								<strong>They have agreed these may be used publicly to promote the event.</strong>
+							<?php else : ?>
+								<strong>Not cleared for public use.</strong> They did not tick the permission box,
+								so these are for reviewing the application only.
+							<?php endif; ?>
+						<?php else : ?>
+							<span class="muted">None sent.</span>
+						<?php endif; ?>
+					</dd>
+				</dl>
 
 				<?php
 				if ( ! empty( $r['contract_snapshot'] ) ) {

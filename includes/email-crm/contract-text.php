@@ -99,10 +99,19 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 
 	<p class="gv-eg">e.g. &ndash; Vendor wishes to sell Bavarian Brats and Pretzels to the event attendees for profit</p>
 
+	<?php
+	/*
+	 * One blank, filled from the application above rather than asked again.
+	 *
+	 * The paper has three ruled lines here and a vendor writes across them. On
+	 * screen that would mean asking for the same description twice -- once to
+	 * decide whether to accept them, once inside the contract -- and two
+	 * descriptions in one signed document is a dispute waiting to happen. The
+	 * answer given above is what lands here, and it is what they sign.
+	 */
+	?>
 	<p class="gv-lines">
-		<?php $b( 'desc1', array( 'w' => 'full', 'aria' => 'Description of products or services, line 1' ) ); ?>
-		<?php $b( 'desc2', array( 'w' => 'full', 'aria' => 'Description of products or services, line 2' ) ); ?>
-		<?php $b( 'desc3', array( 'w' => 'full', 'aria' => 'Description of products or services, line 3' ) ); ?>
+		<?php $b( 'desc_full', array( 'w' => 'full', 'auto' => 'Taken from the description of your goods above.', 'aria' => 'Description of products or services' ) ); ?>
 	</p>
 
 	<p>The <strong>German-American Society</strong> in consideration of the fees and agreements mentioned here,

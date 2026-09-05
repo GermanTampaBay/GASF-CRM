@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.22.0' );
+	define( 'GASF_CRM_SCHEMA', '1.23.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -271,6 +271,7 @@ if ( true ) {
 		// the alternation ends at one path segment -- but a reader should not
 		// have to work that out.
 		add_rewrite_rule( '^email/contracts/coi/([0-9]+)/?$', 'index.php?gasf_crm=coi&gasf_crm_id=$matches[1]', 'top' );
+		add_rewrite_rule( '^email/contracts/file/([0-9]+)/([0-9]+)/?$', 'index.php?gasf_crm=vfile&gasf_crm_id=$matches[1]&gasf_crm_n=$matches[2]', 'top' );
 		add_rewrite_rule( '^email/(mail|photos|library|upload|contracts)/?$', 'index.php?gasf_crm=app', 'top' );
 	} );
 
@@ -278,6 +279,7 @@ if ( true ) {
 		$vars[] = 'gasf_crm';
 		$vars[] = 'gasf_crm_provider';
 		$vars[] = 'gasf_crm_id';
+		$vars[] = 'gasf_crm_n';
 		return $vars;
 	} );
 
@@ -466,7 +468,7 @@ if ( true ) {
 			'photo_submissions' => array( 'lease_owner', 'lease_until', 'next_attempt_at' ),
 			'photo_invites'     => array( 'remind_attempts' ),
 			'messages'          => array( 'stream' ),
-			'vendor_apps'       => array( 'fields_json', 'contract_snapshot' ),
+			'vendor_apps'       => array( 'fields_json', 'contract_snapshot', 'vendor_type', 'files_json', 'photo_consent' ),
 		) as $t => $cols ) {
 			$name = gasf_crm_table( $t );
 			if ( in_array( 'table ' . $t . ' is missing', $gaps, true ) ) { continue; }

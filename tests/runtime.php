@@ -2162,6 +2162,124 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * A vendor's own link never becomes an href we did not vet.
+	 *
+	 * These three fields are free text typed by a stranger and rendered into a
+	 * page that a signed-in reviewer is looking at. Vendors legitimately type
+	 * "@ourshop" and "ourshop.com" as often as a full address, so the field
+	 * cannot simply demand a URL -- which means something has to decide what
+	 * becomes a link, and that decision is worth pinning.
+	 */
+	public function test_vendor_link_safety() {
+		foreach ( array(
+			'javascript:alert(1)',
+			'javascript:alert(document.cookie)',
+			'data:text/html;base64,PHN2Zz4=',
+			'@ourshop',
+			'vbscript:msgbox(1)',
+		) as $bad ) {
+			$out = gasf_crm_vendor_link( $bad );
+			$this->ok( false === strpos( $out, '<a ' ), 'links: "' . $bad . '" is not rendered as a link' );
+			$this->ok( false === stripos( $out, 'href' ), 'links: "' . $bad . '" produces no href at all' );
+		}
+
+		$good = gasf_crm_vendor_link( 'ourshop.com' );
+		$this->ok( false !== strpos( $good, 'href="https://ourshop.com"' ), 'links: a bare host is promoted to https' );
+		$this->ok( false !== strpos( $good, 'rel="noopener nofollow"' ), 'links: an outbound link is not followed' );
+	}
+
+	/**
+	 * Both branches are on the page, and the generator rule is a rule.
+	 *
+	 * The branch script hides the half that does not apply, so a server that
+	 * stopped rendering one would look identical to a working page right up
+	 * until somebody without JavaScript -- or a reviewer wondering why no food
+	 * vendor ever gave a permit number.
+	 */
+	public function test_vendor_application_branches() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+
+		$this->ok( false !== strpos( $html, 'value="craft"' ), 'application: the craft branch is offered' );
+		$this->ok( false !== strpos( $html, 'value="food"' ), 'application: the food branch is offered' );
+		$this->ok( false !== strpos( $html, 'data-for="craft"' ), 'application: the craft questions are rendered' );
+		$this->ok( false !== strpos( $html, 'data-for="food"' ), 'application: the food questions are rendered' );
+
+		// Stated as a rule, never as a question with a yes in it.
+		$this->ok( false !== strpos( $html, 'Generators are not permitted' ), 'application: the generator rule is stated' );
+
+		foreach ( array( 'crafts[]', 'name="booth"', 'a[health_permit]', 'a[power_needs]', 'photo_consent', 'photos[]' ) as $needle ) {
+			$this->ok( false !== strpos( $html, $needle ), 'application: ' . $needle . ' is on the form' );
+		}
+
+		// Every craft type the club asked for, none invented.
+		$this->ok( 7 === count( gasf_crm_vendor_craft_types() ), 'application: seven craft types are offered' );
+		foreach ( array( 'Wood', 'Metal', 'Glass', 'Painting art', 'Photo', 'Leather', 'Other' ) as $label ) {
+			$this->ok( in_array( $label, gasf_crm_vendor_craft_types(), true ), 'application: "' . $label . '" is offered' );
+		}
+	}
+
+	/**
+	 * The description is asked once and lands in the contract.
+	 *
+	 * Two descriptions in one signed document is a dispute waiting to happen,
+	 * so the contract's own description blank is not a field -- it is filled
+	 * from the application. If that ever stops happening, the agreement goes out
+	 * with a blank where the goods should be described, and nothing else would
+	 * notice.
+	 */
+	public function test_vendor_description_reaches_the_contract() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+		$this->ok( false === strpos( $html, 'name="f[desc_full]"' ), 'contract: the description is not a second field' );
+		$this->ok( false !== strpos( $html, 'a[description]' ), 'application: the description is asked once' );
+
+		ob_start();
+		gasf_crm_vendor_contract( 'record', array( 'desc_full' => 'Hand-turned wooden bowls.' ) );
+		$record = ob_get_clean();
+		$this->ok( false !== strpos( $record, 'Hand-turned wooden bowls.' ), 'contract: the description appears in the signed record' );
+	}
+
+	/** Consent to publish photographs is stored as a fact, not inferred. */
+	public function test_vendor_photo_consent_stored() {
+		global $wpdb;
+
+		$id = gasf_crm_vendor_insert( array(
+			'vendor_name'   => 'Selftest Woodworks',
+			'vendor_type'   => 'craft',
+			'photo_consent' => 1,
+			'files_json'    => wp_json_encode( array( array( 'path' => 'x.jpg', 'name' => 'x.jpg', 'bytes' => 1, 'label' => 'Your booth set-up' ) ) ),
+		) );
+		$this->ok( is_int( $id ) && $id > 0, 'application: an application with photographs inserts' );
+		if ( ! is_int( $id ) ) { return; }
+
+		try {
+			$row = gasf_crm_vendor_get( $id );
+			$this->ok( $row && 1 === (int) $row['photo_consent'], 'application: consent to publish is recorded' );
+			$this->ok( $row && 'craft' === $row['vendor_type'], 'application: the vendor type is recorded' );
+			$files = json_decode( (string) $row['files_json'], true );
+			$this->ok( is_array( $files ) && 'Your booth set-up' === ( $files[0]['label'] ?? '' ), 'application: a photograph keeps its slot label' );
+		} finally {
+			$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+		}
+
+		// Absent consent must read as no, never as "not stated".
+		$id2 = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Woodworks 2' ) );
+		if ( is_int( $id2 ) ) {
+			try {
+				$row2 = gasf_crm_vendor_get( $id2 );
+				$this->ok( $row2 && 0 === (int) $row2['photo_consent'], 'application: no tick means no permission' );
+			} finally {
+				$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id2 ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+			}
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

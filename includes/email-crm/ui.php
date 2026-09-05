@@ -76,6 +76,12 @@ add_action( 'template_redirect', function () {
 			}
 			return;
 
+		case 'vfile':
+			if ( function_exists( 'gasf_crm_vendor_serve_file' ) ) {
+				gasf_crm_vendor_serve_file( (int) get_query_var( 'gasf_crm_id' ), (int) get_query_var( 'gasf_crm_n' ) );
+			}
+			return;
+
 		case 'app':
 			gasf_crm_render_app();
 			exit;
