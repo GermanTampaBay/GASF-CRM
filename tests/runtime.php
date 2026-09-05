@@ -2067,13 +2067,23 @@ final class GASF_CRM_Selftest {
 		$this->snapshot_option( 'gasf_crm_vendor' );
 
 		update_option( 'gasf_crm_vendor', array( 'terms_url' => '', 'terms_version' => '' ), false );
-		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: no agreement configured means no form' );
+		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: no version means no form' );
 
 		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => '' ), false );
-		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: a document with no version is still not ready' );
+		$this->ok( ! gasf_crm_vendor_ready(), 'vendor: a PDF with no version is still not ready' );
+
+		// The version ALONE is enough. The agreement is on the page; the PDF is a
+		// courtesy copy, and gating the form on it was a leftover from when the
+		// PDF was the thing being agreed to.
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => '', 'terms_version' => '2026-07' ), false );
+		$this->ok( gasf_crm_vendor_ready(), 'vendor: a version alone opens the form' );
+		$this->ok( false === strpos( gasf_crm_vendor_shortcode(), 'Download a PDF copy' ),
+			'vendor: no PDF configured means no download offered' );
 
 		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => '2026-07' ), false );
-		$this->ok( gasf_crm_vendor_ready(), 'vendor: a document and a version together open the form' );
+		$this->ok( gasf_crm_vendor_ready(), 'vendor: a version and a PDF also open the form' );
+		$this->ok( false !== strpos( gasf_crm_vendor_shortcode(), 'Download a PDF copy' ),
+			'vendor: a configured PDF is offered as a download' );
 
 		$html = gasf_crm_vendor_shortcode();
 		$this->ok( false !== strpos( $html, 'gasf_vendor_nonce' ), 'vendor: the form carries a nonce' );
@@ -2276,6 +2286,61 @@ final class GASF_CRM_Selftest {
 				$this->ok( $row2 && 0 === (int) $row2['photo_consent'], 'application: no tick means no permission' );
 			} finally {
 				$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id2 ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+			}
+		}
+	}
+
+	/**
+	 * Every submission is its own agreement, and nothing overwrites an earlier one.
+	 *
+	 * The club's whole reason for doing this digitally is to end up with a
+	 * LIBRARY of signed agreements, not one document that the last vendor to
+	 * submit has quietly rewritten. There is no update path in the code today --
+	 * only an insert -- and this is here so that adding one by accident, or
+	 * "improving" the insert into an upsert keyed on vendor name, fails loudly.
+	 */
+	public function test_vendor_each_submission_is_its_own_record() {
+		global $wpdb;
+
+		$ids = array();
+		try {
+			// Deliberately the same vendor and the same event, twice: the case
+			// where an upsert would collapse two agreements into one.
+			foreach ( array( 'first version of the goods', 'second version of the goods' ) as $i => $desc ) {
+				ob_start();
+				gasf_crm_vendor_contract( 'record', array( 'vendor_legal' => 'Selftest Same Name', 'desc_full' => $desc ) );
+				$snap = ob_get_clean();
+
+				$id = gasf_crm_vendor_insert( array(
+					'vendor_name'       => 'Selftest Same Name',
+					'event_text'        => 'Selftest Fest',
+					'products'          => $desc,
+					'terms_version'     => 'v' . ( $i + 1 ),
+					'agreed_name'       => 'A Tester',
+					'contract_snapshot' => $snap,
+				) );
+				if ( ! is_int( $id ) ) { $this->ok( false, 'library: submission ' . $i . ' did not insert' ); return; }
+				$ids[] = $id;
+			}
+
+			$this->ok( 2 === count( array_unique( $ids ) ), 'library: two submissions produce two distinct rows' );
+
+			$a = gasf_crm_vendor_get( $ids[0] );
+			$b = gasf_crm_vendor_get( $ids[1] );
+
+			$this->ok( $a && 'first version of the goods' === $a['products'],
+				'library: the earlier agreement still says what it said' );
+			$this->ok( $b && 'second version of the goods' === $b['products'],
+				'library: the later agreement says its own thing' );
+			$this->ok( $a && 'v1' === $a['terms_version'] && $b && 'v2' === $b['terms_version'],
+				'library: each agreement keeps the version it was signed under' );
+			$this->ok( $a && false !== strpos( (string) $a['contract_snapshot'], 'first version of the goods' ),
+				'library: the earlier snapshot is untouched by the later submission' );
+			$this->ok( $a['contract_snapshot'] !== $b['contract_snapshot'],
+				'library: the two snapshots are independent documents' );
+		} finally {
+			foreach ( $ids as $id ) {
+				$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
 			}
 		}
 	}

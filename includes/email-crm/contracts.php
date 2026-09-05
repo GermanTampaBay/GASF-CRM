@@ -67,10 +67,22 @@ function gasf_crm_vendor_cfg() {
 	) );
 }
 
-/** Is there enough configuration to put the form in front of the public? */
+/**
+ * Is there enough configuration to put the form in front of the public?
+ *
+ * The VERSION alone, deliberately. Until the agreement lived on the page, this
+ * also demanded a link to the PDF, because the PDF was the thing being agreed
+ * to and a click-wrap pointing at nothing is worth nothing. The words are here
+ * now, so that requirement had become a gate with no purpose behind it -- the
+ * form refusing to appear until somebody pasted a URL nobody would ever follow.
+ *
+ * The version is still required, and always will be: it is stamped onto every
+ * signature, and an agreement signed under a version that says nothing cannot
+ * be told apart later from one signed under different terms.
+ */
 function gasf_crm_vendor_ready() {
 	$cfg = gasf_crm_vendor_cfg();
-	return '' !== trim( (string) $cfg['terms_url'] ) && '' !== trim( (string) $cfg['terms_version'] );
+	return '' !== trim( (string) $cfg['terms_version'] );
 }
 
 /* --------------------------------------------------------------------------
@@ -905,6 +917,15 @@ function gasf_crm_vendor_shortcode() {
 			<?php endif; ?>
 
 			<?php gasf_crm_vendor_application_section( $app, $type, $crafts, $booth ); ?>
+
+			<?php
+			$cfg_pdf = gasf_crm_vendor_cfg();
+			if ( '' !== trim( (string) $cfg_pdf['terms_url'] ) ) :
+				?>
+				<p class="gv-legend">Would you rather read this on paper?
+					<a href="<?php echo esc_url( $cfg_pdf['terms_url'] ); ?>" target="_blank" rel="noopener">Download a PDF copy of the agreement</a>.
+					The version below is the one you are signing.</p>
+			<?php endif; ?>
 
 			<?php gasf_crm_vendor_contract( 'form', $values ); ?>
 

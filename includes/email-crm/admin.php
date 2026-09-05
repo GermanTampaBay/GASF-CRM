@@ -436,13 +436,13 @@ function gasf_crm_admin_tab() {
 		<table class="form-table" role="presentation">
 			<tr><th scope="row">Vendor Agreement</th>
 				<td><input type="url" class="large-text" name="vendor_terms_url" value="<?php echo esc_attr( $vendor_cfg['terms_url'] ); ?>" placeholder="https://germantampabay.com/wp-content/uploads/vendor-agreement.pdf">
-					<p class="description">A link to the agreement as published &mdash; upload the PDF to the Media Library and paste its URL. The form links this, and the vendor is asked to confirm they have read it. <strong>The form will not appear until this and the version below are both filled in</strong>, because a person cannot agree to a document that is not there.</p></td></tr>
+					<p class="description"><strong>Optional.</strong> The agreement itself is rendered on the vendor page &mdash; this is only a PDF copy for people who would rather read it on paper, offered as a download beside the form. Leave it blank and no download is offered. Nothing about the form depends on it.</p></td></tr>
 			<tr><th scope="row">Addenda</th>
 				<td><input type="url" class="large-text" name="vendor_addenda_url" value="<?php echo esc_attr( $vendor_cfg['addenda_url'] ); ?>">
 					<p class="description">Optional. The Vendor Addendum and the Rules and Regulations, if they exist as a document. Left blank, the form simply does not mention them.</p></td></tr>
 			<tr><th scope="row">Terms version</th>
 				<td><input type="text" class="regular-text" name="vendor_terms_version" value="<?php echo esc_attr( $vendor_cfg['terms_version'] ); ?>" placeholder="2026-07">
-					<p class="description">Anything you will recognise later &mdash; a date or a revision letter. It is stamped onto every acceptance, so <strong>change it whenever the agreement itself changes</strong>. Applications already accepted keep the version they were signed under, which is the only thing that makes the acceptance mean anything a year from now.</p></td></tr>
+					<p class="description"><strong>Required &mdash; the form will not appear without it.</strong> Anything you will recognise later, such as a date or a revision letter. It is stamped onto every signature, so <strong>change it whenever the agreement wording changes</strong>. Agreements already signed keep the version they were signed under, and each one also keeps a full copy of the contract exactly as it appeared at the time.</p></td></tr>
 		</table>
 
 		<?php submit_button( 'Save' ); ?>
