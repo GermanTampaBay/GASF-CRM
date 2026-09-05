@@ -790,6 +790,26 @@ function gasf_crm_vendor_posted_consent() {
 function gasf_crm_vendor_styles() {
 	?>
 <style>
+/*
+ * Set a colour wherever we set a background, without exception.
+ *
+ * This block paints its own white surfaces onto somebody else's theme, and the
+ * club's theme puts white text on a dark page. Anything here that sets a
+ * background and inherits its colour renders white on white -- which is not a
+ * subtle degradation, it is an invisible form. It shipped exactly that way:
+ * .gv-contract declared a colour and .gv-app did not, and the review copy could
+ * not reveal it because that page carried its own neutral body colour instead
+ * of the theme's.
+ *
+ * The inputs matter most. A field inheriting white text on its own near-white
+ * background is one a vendor cannot see themselves typing into.
+ */
+.gasf-vendor, .gasf-vendor p, .gasf-vendor label, .gasf-vendor legend,
+.gasf-vendor dt, .gasf-vendor dd, .gasf-vendor li, .gasf-vendor h2,
+.gasf-vendor h3, .gasf-vendor strong, .gasf-vendor em, .gasf-vendor span { color: #111; }
+.gasf-vendor input, .gasf-vendor select, .gasf-vendor textarea { color: #111; }
+.gasf-vendor ::placeholder { color: #8a8a8a; opacity: 1; }
+.gasf-vendor a { color: #8a5a00; }
 .gasf-vendor { max-width: 52rem; margin: 0 auto; }
 .gv-contract { background: #fff; color: #111; padding: 1.5rem; border: 1px solid #d8d8d8; line-height: 1.65; }
 .gv-contract p { margin: 0 0 1rem; }
@@ -806,7 +826,7 @@ function gasf_crm_vendor_styles() {
 .gv-lines .gv-in, .gv-lines .gv-blank, .gv-lines .gv-val { display: block; margin-bottom: 0.5rem; }
 .gv-attest { font-weight: 700; margin-top: 1.5rem; }
 .gv-note { font-style: italic; color: #555; }
-.gv-in { border: 0; border-bottom: 1px solid #444; background: #fffdf5; padding: 0.15rem 0.3rem; font: inherit; }
+.gv-in { border: 0; border-bottom: 1px solid #444; background: #fffdf5; color: #111; padding: 0.15rem 0.3rem; font: inherit; }
 .gv-in:focus { outline: 2px solid #EF9F27; outline-offset: 1px; background: #fff; }
 .gv-blank { display: inline-block; border-bottom: 1px solid #444; height: 1.2em; vertical-align: bottom; }
 .gv-val { display: inline-block; border-bottom: 1px solid #bbb; padding: 0 0.3rem; font-weight: 600; }
@@ -818,7 +838,7 @@ function gasf_crm_vendor_styles() {
 .gv-w-lg { width: 20rem; max-width: 100%; }
 .gv-w-xl { width: 30rem; max-width: 100%; }
 .gv-w-full { width: 100%; }
-.gv-app { background: #fff; border: 1px solid #d8d8d8; padding: 1.5rem; margin-bottom: 1.25rem; }
+.gv-app { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1.5rem; margin-bottom: 1.25rem; }
 .gv-app fieldset { border: 0; border-top: 1px solid #e4e4e4; padding: 1rem 0 0; margin: 1.5rem 0 0; }
 .gv-app fieldset:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
 .gv-app legend { font-weight: 700; font-size: 1.05rem; padding: 0; }
@@ -828,20 +848,23 @@ function gasf_crm_vendor_styles() {
 .gv-radio.gv-block { display: block; margin: 0.4rem 0; font-weight: 400; }
 .gv-checks { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; margin-bottom: 0.8rem; }
 .gv-check { white-space: nowrap; }
-.gv-rule { background: #fdeceb; border-left: 4px solid #c0392b; padding: 0.6rem 0.9rem; }
-.gv-consent { background: #fbf6ea; border: 1px solid #EF9F27; padding: 0.7rem 0.9rem; }
+.gv-rule { background: #fdeceb; color: #111; border-left: 4px solid #c0392b; padding: 0.6rem 0.9rem; }
+.gv-consent { background: #fbf6ea; color: #111; border: 1px solid #EF9F27; padding: 0.7rem 0.9rem; }
 .gv-auto { font-style: italic; color: #666; }
 .gv-branch[hidden] { display: none; }
 .gv-files dt { font-weight: 700; margin-top: 0.6rem; }
-.gv-pick { background: #fbf6ea; border: 1px solid #EF9F27; padding: 1rem; margin-bottom: 1.25rem; }
+.gv-pick { background: #fbf6ea; color: #111; border: 1px solid #EF9F27; padding: 1rem; margin-bottom: 1.25rem; }
 .gv-pick label { font-weight: 700; display: block; margin-bottom: 0.4rem; }
 .gv-pick select { max-width: 100%; }
-.gasf-vendor-errs { background: #fdeceb; border-left: 4px solid #c0392b; padding: 0.75rem 1rem; margin-bottom: 1.25rem; }
-.gasf-vendor-done { background: #eef7ee; border-left: 4px solid #2e7d32; padding: 1rem 1.25rem; }
+.gasf-vendor-errs { background: #fdeceb; color: #111; border-left: 4px solid #c0392b; padding: 0.75rem 1rem; margin-bottom: 1.25rem; }
+.gasf-vendor-done { background: #eef7ee; color: #111; border-left: 4px solid #2e7d32; padding: 1rem 1.25rem; }
 .gv-submit { margin-top: 1.5rem; }
 .gv-go { background: #EF9F27; border: 0; color: #1a1a1a; font-weight: 700; padding: 0.7rem 1.6rem; font-size: 1rem; cursor: pointer; }
 .gv-go:hover { background: #d98d1c; }
-.gv-legend { color: #555; font-size: 0.9rem; }
+.gasf-vendor .gv-legend { color: #555; font-size: 0.9rem; }
+.gasf-vendor .gv-note { color: #555; }
+.gasf-vendor .gv-auto { color: #666; }
+.gasf-vendor .muted { color: #666; }
 @media (max-width: 600px) {
 	.gv-contract { padding: 1rem; }
 	.gv-w-lg, .gv-w-xl, .gv-w-md { width: 100%; }
