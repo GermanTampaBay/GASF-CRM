@@ -917,6 +917,7 @@ function gasf_crm_vendor_styles() {
 .gv-files dt { font-weight: 700; margin-top: 0.6rem; }
 .gv-pay { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1rem 1.25rem; margin: 1rem 0; }
 .gv-pay h4 { margin: 0 0 0.75rem; }
+.gv-settings { border-left: 4px solid #EF9F27; }
 .gv-pay label { display: block; }
 .gv-pay input, .gv-pay textarea { width: 100%; box-sizing: border-box; }
 .gv-paygrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem 1rem; }
@@ -979,7 +980,9 @@ function gasf_crm_vendor_shortcode() {
 	}
 
 	$errors = gasf_crm_vendor_last_errors();
-	$values = gasf_crm_vendor_submitted_fields();
+	// Posted values win over the defaults, so a rejected submission comes back
+	// saying what the vendor typed rather than what we would have guessed.
+	$values = array_merge( gasf_crm_vendor_date_defaults(), gasf_crm_vendor_submitted_fields() );
 	$events = gasf_crm_vendor_events();
 	$app    = gasf_crm_vendor_posted_app();
 	$type   = gasf_crm_vendor_posted_type();
@@ -1086,6 +1089,28 @@ add_shortcode( 'vendor_application', 'gasf_crm_vendor_shortcode' );
 /* --------------------------------------------------------------------------
  * Handling the submission
  * -------------------------------------------------------------------------- */
+
+/**
+ * Blanks we can answer ourselves.
+ *
+ * "This agreement, made this ___ day of ___ 202_" is today, because today is
+ * when they are filling it in. Asking somebody to write down the date while
+ * they are looking at a screen that knows it is a small rudeness -- and one
+ * that produces a blank or a wrong date often enough to matter on a contract.
+ *
+ * Defaults only: these stay ordinary fields and anything posted wins, so a
+ * rejected submission comes back saying what the vendor actually typed.
+ */
+function gasf_crm_vendor_date_defaults() {
+	return array(
+		'agr_day'          => wp_date( 'j' ),
+		'agr_month'        => wp_date( 'F' ),
+		// The agreement prints "202_" and leaves one character after it, so this
+		// is the last digit of the year rather than the year.
+		'agr_year'         => substr( wp_date( 'Y' ), -1 ),
+		'sign_vendor_date' => wp_date( 'j F Y' ),
+	);
+}
 
 /** Errors from the submission being handled in this request, for redisplay. */
 function gasf_crm_vendor_last_errors( $set = null ) {
@@ -1500,6 +1525,91 @@ function gasf_crm_vendor_serve_file( $id, $n ) {
 	exit;
 }
 
+/**
+ * Save the event settings from the Contracts pane.
+ *
+ * Gated on the contracts area, NOT on manage_options. That is the whole point of
+ * moving them here: an event organiser holds a CRM account with no WordPress
+ * capabilities whatsoever, and "who may set the fee for the market they are
+ * running" should not have to mean "who may edit the website".
+ */
+function gasf_crm_vendor_handle_settings() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified immediately below.
+	if ( empty( $_POST['gasf_vendor_settings'] ) ) { return; }
+
+	if ( ! gasf_crm_vendor_may_read() ) {
+		status_header( 403 );
+		wp_die( esc_html__( 'You do not have access to that.', 'gasf' ), '', array( 'response' => 403 ) );
+	}
+
+	if ( ! isset( $_POST['gasf_vendor_settings_nonce'] )
+		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_settings_nonce'] ) ), 'gasf_vendor_settings' ) ) {
+		wp_safe_redirect( home_url( '/email/contracts/' ) );
+		exit;
+	}
+
+	// Read, modify, write the whole option. A form carrying four keys must not be
+	// able to drop the ones it does not show.
+	$cfg = gasf_crm_vendor_cfg();
+	foreach ( array( 'event_name', 'event_date', 'fee', 'terms_version' ) as $k ) {
+		// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+		if ( isset( $_POST[ $k ] ) ) {
+			$cfg[ $k ] = substr( sanitize_text_field( wp_unslash( $_POST[ $k ] ) ), 0, 191 );
+		}
+	}
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+	if ( isset( $_POST['terms_url'] ) ) {
+		$cfg['terms_url'] = esc_url_raw( wp_unslash( $_POST['terms_url'] ) );
+	}
+
+	update_option( 'gasf_crm_vendor', $cfg, false );
+	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' updated the event settings' );
+
+	wp_safe_redirect( home_url( '/email/contracts/' ) );
+	exit;
+}
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_settings', 4 );
+
+/** The event settings, at the top of the Contracts pane. */
+function gasf_crm_vendor_render_settings() {
+	$cfg = gasf_crm_vendor_cfg();
+	?>
+	<form method="post" class="gv-pay gv-settings">
+		<h4>This event</h4>
+		<?php wp_nonce_field( 'gasf_vendor_settings', 'gasf_vendor_settings_nonce' ); ?>
+		<input type="hidden" name="gasf_vendor_settings" value="1">
+
+		<p class="muted">These print straight onto the agreement, so a vendor never types the name of the event,
+			guesses its date, or writes down what they think the pitch costs. Leave any blank and that blank goes
+			back to being the vendor's to fill in.</p>
+
+		<div class="gv-paygrid">
+			<label>Event name
+				<input type="text" name="event_name" value="<?php echo esc_attr( $cfg['event_name'] ); ?>" placeholder="Krampus Market 2026"></label>
+			<label>Event date
+				<input type="text" name="event_date" value="<?php echo esc_attr( $cfg['event_date'] ); ?>" placeholder="5 December 2026"></label>
+			<label>Vendor fee
+				<input type="text" name="fee" value="<?php echo esc_attr( $cfg['fee'] ); ?>" placeholder="75"></label>
+		</div>
+
+		<p><label>Agreement version <span class="muted">(optional)</span>
+			<input type="text" name="terms_version" value="<?php echo esc_attr( $cfg['terms_version'] ); ?>" placeholder="leave blank to work it out automatically"></label>
+			<span class="muted">Stamped onto every signature, so an agreement can be matched to the wording it was
+				signed under. Blank is usually better: the plugin hashes the agreement text and the settings above,
+				which changes by itself whenever the wording or the fee does, where a typed label stays truthful
+				only while somebody remembers to change it. Currently stamping
+				<code><?php echo esc_html( gasf_crm_vendor_terms_version() ); ?></code>.</span></p>
+
+		<p><label>PDF copy of the agreement <span class="muted">(optional)</span>
+			<input type="text" name="terms_url" value="<?php echo esc_attr( $cfg['terms_url'] ); ?>" placeholder="https://..."></label>
+			<span class="muted">Offered beside the form for vendors who would rather read it on paper. The
+				agreement itself is on the page either way.</span></p>
+
+		<p><button class="btn">Save the event settings</button></p>
+	</form>
+	<?php
+}
+
 /** The bookkeeping the paper form carried, which no vendor ever fills in. */
 function gasf_crm_vendor_payment_fields() {
 	return array(
@@ -1598,6 +1708,8 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 	?>
 <div class="wrap" id="contractsview" <?php echo $hidden ? 'hidden' : ''; ?>>
 	<h2>Vendor agreements</h2>
+
+	<?php gasf_crm_vendor_render_settings(); ?>
 
 	<?php if ( ! $rows ) : ?>
 		<p class="muted">Nothing has come in yet. Agreements signed through the vendor page appear here.</p>

@@ -121,27 +121,17 @@ function gasf_crm_admin_tab() {
 			}
 
 			/*
-			 * Vendor contract settings live in their own option, not in $cfg.
+			 * The vendor settings are NOT saved here any more -- they moved to the
+			 * Contracts pane, so that whoever runs an event can set its name, date,
+			 * and fee without being a WordPress administrator.
 			 *
-			 * $cfg is the mail and Graph configuration and is read on nearly every
-			 * request; the contract settings are read on one public page and one
-			 * pane. Keeping them apart is also the honest shape -- contracts are
-			 * not part of the inbox, and the day somebody wants this without the
-			 * CRM, one option moves rather than a handful of keys being untangled.
-			 *
-			 * Changing terms_version is the act of publishing new terms: every
-			 * acceptance already recorded keeps pointing at the version that was
-			 * actually on screen when it was given.
+			 * The handler had to move with the fields rather than being left as a
+			 * harmless leftover. Every save of this screen posts no vendor_* keys
+			 * at all, so a handler reading $_POST['vendor_fee'] ?? '' would blank
+			 * the fee, the event, and the version each time somebody changed a
+			 * mailbox address -- silently, and with no way to tell afterwards that
+			 * it had been set.
 			 */
-			$vendor = gasf_crm_vendor_cfg();
-			$vendor['terms_url']     = esc_url_raw( wp_unslash( $_POST['vendor_terms_url'] ?? '' ) );
-			$vendor['addenda_url']   = esc_url_raw( wp_unslash( $_POST['vendor_addenda_url'] ?? '' ) );
-			$vendor['terms_version'] = sanitize_text_field( wp_unslash( $_POST['vendor_terms_version'] ?? '' ) );
-			$vendor['event_name']    = sanitize_text_field( wp_unslash( $_POST['vendor_event_name'] ?? '' ) );
-			$vendor['event_date']    = sanitize_text_field( wp_unslash( $_POST['vendor_event_date'] ?? '' ) );
-			$vendor['fee']           = sanitize_text_field( wp_unslash( $_POST['vendor_fee'] ?? '' ) );
-			update_option( 'gasf_crm_vendor', $vendor, false );
-
 			gasf_crm_save_cfg( $cfg );
 			delete_transient( 'gasf_crm_graph_token' ); // credentials may have changed
 			$notice = '<div class="notice notice-success"><p>Saved.</p></div>';
@@ -435,42 +425,12 @@ function gasf_crm_admin_tab() {
 		</table>
 
 		<h3>Vendor contracts</h3>
-		<?php $vendor_cfg = gasf_crm_vendor_cfg(); ?>
-		<p class="description" style="max-width:46em">These three fill themselves in on the agreement, so a
-			vendor never types the name of the event they are applying to, guesses its date, or writes down
-			what they think the pitch costs. Leave any of them blank and that blank goes back to being the
-			vendor's to fill in.</p>
-		<table class="form-table" role="presentation">
-			<tr><th scope="row">Event name</th>
-				<td><input type="text" class="regular-text" name="vendor_event_name" value="<?php echo esc_attr( $vendor_cfg['event_name'] ); ?>" placeholder="Krampus Market 2026">
-					<p class="description">Printed into the agreement as the Type/Name of Event. While this is set, the event picker is not shown to vendors at all.</p></td></tr>
-			<tr><th scope="row">Event date</th>
-				<td><input type="text" class="regular-text" name="vendor_event_date" value="<?php echo esc_attr( $vendor_cfg['event_date'] ); ?>" placeholder="5 December 2026">
-					<p class="description">Free text, exactly as you want it to read on the contract.</p></td></tr>
-			<tr><th scope="row">Vendor fee</th>
-				<td>$<input type="text" class="small-text" name="vendor_fee" value="<?php echo esc_attr( $vendor_cfg['fee'] ); ?>" placeholder="75">
-					<p class="description">The sum the agreement commits the vendor to. <strong>Set this before you publish the form</strong> &mdash; agreements already signed keep the figure they were signed under, which is the point, so a change here does not rewrite them.</p></td></tr>
-		</table>
-
-		<table class="form-table" role="presentation">
-			<tr><th scope="row">Vendor Agreement</th>
-				<td><input type="url" class="large-text" name="vendor_terms_url" value="<?php echo esc_attr( $vendor_cfg['terms_url'] ); ?>" placeholder="https://germantampabay.com/wp-content/uploads/vendor-agreement.pdf">
-					<p class="description"><strong>Optional.</strong> The agreement itself is rendered on the vendor page &mdash; this is only a PDF copy for people who would rather read it on paper, offered as a download beside the form. Leave it blank and no download is offered. Nothing about the form depends on it.</p></td></tr>
-			<tr><th scope="row">Addenda</th>
-				<td><input type="url" class="large-text" name="vendor_addenda_url" value="<?php echo esc_attr( $vendor_cfg['addenda_url'] ); ?>">
-					<p class="description">Optional. The Vendor Addendum and the Rules and Regulations, if they exist as a document. Left blank, the form simply does not mention them.</p></td></tr>
-			<tr><th scope="row">Terms version</th>
-				<td><input type="text" class="regular-text" name="vendor_terms_version" value="<?php echo esc_attr( $vendor_cfg['terms_version'] ); ?>" placeholder="2026-07">
-					<p class="description"><strong>Optional.</strong> A label you will recognise later, such as
-						<code>2026-Krampus</code>. It is stamped onto every signature so that an agreement can be
-						matched to the wording it was signed under.<br>
-						<strong>Leave it blank and the plugin works one out itself</strong> &mdash; a short hash of
-						the agreement text and the settings above, which changes automatically whenever the wording
-						or the fee does. That is usually the better answer, because a hand-typed label only stays
-						truthful if somebody remembers to change it, and the moment they are least likely to
-						remember is while amending the contract in a hurry. Currently stamping:
-						<code><?php echo esc_html( gasf_crm_vendor_terms_version() ); ?></code>.</p></td></tr>
-		</table>
+		<p class="description" style="max-width:46em">
+			These settings moved to <a href="<?php echo esc_url( home_url( '/email/contracts/' ) ); ?>">Contracts</a>
+			in the volunteer tool, so that whoever is running an event can set its name, date, and fee themselves.
+			Grant somebody <strong>Vendor contracts</strong> in Accounts below and they can manage it without a
+			WordPress login of their own. Administrators already hold every area, so that link works for you now.
+		</p>
 
 		<?php submit_button( 'Save' ); ?>
 	</form>

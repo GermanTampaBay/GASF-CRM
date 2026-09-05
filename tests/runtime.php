@@ -2452,6 +2452,49 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * The agreement dates itself, and running an event needs no WordPress login.
+	 *
+	 * The date half is small: a vendor filling this in today should not be asked
+	 * to write down what day it is on a screen that already knows. They stay
+	 * ordinary fields, so anything posted still wins on a redisplay.
+	 *
+	 * The permission half is the one that matters. These settings used to sit on
+	 * a wp-admin screen behind manage_options, which meant the only people who
+	 * could name an event and set its fee were the people who could also edit the
+	 * website. They are gated on the contracts area now, which a CRM account can
+	 * hold while holding no WordPress capability whatsoever.
+	 */
+	public function test_vendor_settings_are_delegated_and_dated() {
+		$d = gasf_crm_vendor_date_defaults();
+		$this->ok( wp_date( 'j' ) === $d['agr_day'], 'date: today is offered as the day' );
+		$this->ok( wp_date( 'F' ) === $d['agr_month'], 'date: this month is offered' );
+		$this->ok( substr( wp_date( 'Y' ), -1 ) === $d['agr_year'], 'date: the year fills the 202_ blank' );
+
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+		$this->ok( false !== strpos( $html, 'name="f[agr_day]" value="' . wp_date( 'j' ) . '"' ),
+			'date: the agreement arrives pre-dated' );
+
+		$this->ok( function_exists( 'gasf_crm_vendor_handle_settings' ), 'settings: the pane can save them' );
+		$this->ok( function_exists( 'gasf_crm_vendor_render_settings' ), 'settings: the pane renders them' );
+
+		/*
+		 * Nothing in wp-admin may still WRITE them.
+		 *
+		 * This is not tidiness. The old handler read $_POST['vendor_fee'] ?? '',
+		 * and that screen posts no vendor keys at all now -- so leaving it behind
+		 * would blank the event, the fee, and the version every time somebody
+		 * saved an unrelated mailbox setting, silently, with nothing afterwards to
+		 * show it had ever been set.
+		 */
+		$admin = file_get_contents( GASF_CRM_DIR . '/admin.php' );
+		$this->ok( false === strpos( $admin, '$vendor[' ), 'settings: wp-admin no longer writes them' );
+		$this->ok( false === strpos( $admin, 'name="vendor_' ), 'settings: wp-admin no longer offers the fields' );
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {
