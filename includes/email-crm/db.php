@@ -414,6 +414,8 @@ function gasf_crm_install_tables() {
 		agreed_at DATETIME NULL,
 		agreed_ip VARCHAR(45) NULL,
 		agreed_ua VARCHAR(255) NULL,
+		fields_json LONGTEXT NULL,
+		contract_snapshot LONGTEXT NULL,
 		notes LONGTEXT NULL,
 		PRIMARY KEY  (id),
 		KEY created (created_at),

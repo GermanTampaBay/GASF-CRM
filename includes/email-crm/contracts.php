@@ -9,22 +9,29 @@
  * they accepted the agreement as published, and files the result where only
  * somebody holding the 'contracts' area grant can read it.
  *
- * Two deliberate limits, both of which are the point rather than a shortcoming:
+ * The agreement IS the page. Its words live in contract-text.php, transcribed
+ * from the club's PDF, with every blank rendered as a field the vendor fills in
+ * place -- so a vendor reads and signs the actual contract rather than ticking
+ * a box to say they read one somewhere else. This file is the plumbing around
+ * that: the blanks, storage, validation, and who may read the result.
  *
- * 1. THE AGREEMENT TEXT IS NOT RETYPED HERE. It is linked, as a document, and
- *    the row records WHICH VERSION was on screen. Transcribing a contract into
- *    PHP means every future edit is a code change, and a clause that drifts
- *    from the signed paper is worse than no online form at all.
+ * Two things it deliberately does NOT do:
  *
- * 2. NO MONEY, AND NO COUNTERSIGNATURE. The paper form's fee, deposit, balance,
- *    and officer signature are all things the club fills in AFTER deciding to
- *    accept a vendor. Putting them on a public form would invite a stranger to
- *    write down what they intend to pay. Approval and payment stay a human
- *    step, and the deposit is taken separately.
+ * 1. NO MONEY, AND NO COUNTERSIGNATURE FROM THE PUBLIC. The fee, deposit,
+ *    balance, proof-of-insurance receipt, and the officer's signature are the
+ *    Society's blanks, filled in after deciding to accept a vendor. On the
+ *    public page they are not rendered as inputs at all -- not merely readonly,
+ *    which would still put them in the POST -- and the field whitelist refuses
+ *    them a second time.
  *
- * What this therefore is: an application carrying a click-wrap acceptance, not
- * an executed contract. The executed contract is still countersigned by a
- * person, as it was before.
+ * 2. NO AUTOMATIC EXECUTION. A submitted agreement is signed by the vendor and
+ *    nobody else. It becomes binding when an officer countersigns it, exactly
+ *    as the paper did.
+ *
+ * Every submission stores BOTH the version stamp and a full rendered snapshot
+ * of the contract as it stood when it was signed, because the words are now
+ * editable and a version string alone would let a later edit silently restate
+ * what somebody already agreed to.
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
@@ -224,6 +231,10 @@ function gasf_crm_vendor_insert( array $d ) {
 		'agreed_at'      => (string) ( $d['agreed_at'] ?? current_time( 'mysql' ) ),
 		'agreed_ip'      => (string) ( $d['agreed_ip'] ?? '' ),
 		'agreed_ua'      => (string) ( $d['agreed_ua'] ?? '' ),
+		// The contract as signed. fields_json is what they typed; the snapshot
+		// is what they were looking at when they typed it.
+		'fields_json'       => (string) ( $d['fields_json'] ?? '' ),
+		'contract_snapshot' => (string) ( $d['contract_snapshot'] ?? '' ),
 	);
 
 	$ok = $wpdb->insert( gasf_crm_vendor_table(), $row ); // phpcs:ignore WordPress.DB.DirectDatabaseQuery
@@ -352,31 +363,172 @@ function gasf_crm_vendor_notify( $id ) {
 }
 
 /* --------------------------------------------------------------------------
- * The public form
+ * The agreement's blanks
  * -------------------------------------------------------------------------- */
 
-/** Field values to put back in the form after a rejected submission. */
-function gasf_crm_vendor_sticky( $key ) {
-	// phpcs:ignore WordPress.Security.NonceVerification -- redisplay only; the
-	// nonce is checked before anything is acted on, and nothing here is trusted
-	// beyond being echoed back through esc_attr.
-	return isset( $_POST[ $key ] ) ? sanitize_text_field( wp_unslash( $_POST[ $key ] ) ) : '';
+/**
+ * Which blanks the vendor may fill, and how long each may be.
+ *
+ * A whitelist, not a filter. The submitted field array is keyed by whatever the
+ * browser sent, and anything not named here is dropped rather than trimmed --
+ * so a crafted POST cannot write the fee, the deposit, or the Society's
+ * countersignature into an agreement about itself.
+ */
+function gasf_crm_vendor_vendor_fields() {
+	return array(
+		'agr_day'           => 4,
+		'agr_month'         => 24,
+		'agr_year'          => 4,
+		'vendor_legal'      => 180,
+		'event_date'        => 60,
+		'event_name'        => 180,
+		'vendor_address'    => 180,
+		'vendor_city'       => 90,
+		'vendor_state'      => 30,
+		'vendor_zip'        => 12,
+		'poc_name'          => 180,
+		'poc_mobile'        => 30,
+		'poc_email'         => 180,
+		'desc1'             => 200,
+		'desc2'             => 200,
+		'desc3'             => 200,
+		'tax_exempt'        => 60,
+		'sign_vendor'       => 180,
+		'sign_vendor_date'  => 40,
+		'sign_cosigner'     => 180,
+		'sign_cosigner_date' => 40,
+	);
+}
+
+/** Blanks without which the agreement says nothing, and what to call each one. */
+function gasf_crm_vendor_required_fields() {
+	return array(
+		'vendor_legal' => 'the vendor or business name',
+		'event_name'   => 'the type or name of the event',
+		'poc_name'     => 'the point of contact name',
+		'poc_mobile'   => 'a contact mobile number',
+		'poc_email'    => 'a contact email address',
+		'desc1'        => 'a description of the products or services',
+		'sign_vendor'  => 'your signature',
+	);
+}
+
+/** Render context for gasf_crm_vendor_blank(), set by gasf_crm_vendor_contract(). */
+function gasf_crm_vendor_ctx( $set = null ) {
+	static $ctx = array( 'mode' => 'form', 'values' => array() );
+	if ( is_array( $set ) ) { $ctx = $set; }
+	return $ctx;
 }
 
 /**
- * [vendor_application] — the form itself.
+ * One blank in the agreement.
  *
- * A shortcode rather than a route, so the club can put it on a page with their
- * own wording above it and change that wording without a deploy.
+ * Three renderings of the same underlying thing, which is why it is one
+ * function: an input the vendor types into, the value they typed shown back as
+ * a filled-in contract, or -- for the Society's own blanks on the public page --
+ * a marked space that cannot be typed into at all. Making the club's fields
+ * merely readonly would still put them in the POST; they are not rendered as
+ * fields whatsoever, and the whitelist above refuses them a second time.
+ */
+function gasf_crm_vendor_blank( $key, array $args = array() ) {
+	$ctx = gasf_crm_vendor_ctx();
+	$w   = 'gv-w-' . ( isset( $args['w'] ) ? $args['w'] : 'md' );
+	$val = isset( $ctx['values'][ $key ] ) ? (string) $ctx['values'][ $key ] : '';
+
+	if ( 'record' === $ctx['mode'] ) {
+		if ( '' === trim( $val ) ) {
+			echo '<span class="gv-blank ' . esc_attr( $w ) . '"></span>';
+			return;
+		}
+		$cls = empty( $args['sig'] ) ? 'gv-val' : 'gv-val gv-sig';
+		echo '<span class="' . esc_attr( $cls . ' ' . $w ) . '">' . esc_html( $val ) . '</span>';
+		return;
+	}
+
+	if ( ! empty( $args['club'] ) ) {
+		echo '<span class="gv-club ' . esc_attr( $w ) . '" title="Completed by the German American Society"></span>';
+		return;
+	}
+
+	$required = array_key_exists( $key, gasf_crm_vendor_required_fields() );
+	$max      = gasf_crm_vendor_vendor_fields();
+	$max      = isset( $max[ $key ] ) ? (int) $max[ $key ] : 180;
+
+	printf(
+		'<input type="%s" name="f[%s]" value="%s" maxlength="%d" class="gv-in %s" aria-label="%s"%s>',
+		esc_attr( isset( $args['type'] ) ? $args['type'] : 'text' ),
+		esc_attr( $key ),
+		esc_attr( $val ),
+		(int) $max,
+		esc_attr( $w ),
+		esc_attr( isset( $args['aria'] ) ? $args['aria'] : $key ),
+		$required ? ' required' : ''
+	);
+}
+
+/* --------------------------------------------------------------------------
+ * The public page
+ * -------------------------------------------------------------------------- */
+
+/** The agreement's own stylesheet. Scoped to .gv-contract so a theme cannot reach in. */
+function gasf_crm_vendor_styles() {
+	?>
+<style>
+.gasf-vendor { max-width: 52rem; margin: 0 auto; }
+.gv-contract { background: #fff; color: #111; padding: 1.5rem; border: 1px solid #d8d8d8; line-height: 1.65; }
+.gv-contract p { margin: 0 0 1rem; }
+.gv-head { text-align: center; margin-bottom: 1.5rem; }
+.gv-org { font-weight: 700; margin: 0 0 0.2rem; }
+.gv-title { font-weight: 700; margin: 0.4rem 0 0; letter-spacing: 0.04em; }
+.gv-contract h3 { font-size: 1rem; font-weight: 700; margin: 1.6rem 0 0.5rem; }
+.gv-contract h3.gv-ul { text-decoration: underline; }
+.gv-rows { margin: 1rem 0; }
+.gv-rows dt { font-weight: 400; margin-top: 0.7rem; }
+.gv-rows dd { margin: 0.15rem 0 0; }
+.gv-inline { margin-left: 0.6rem; }
+.gv-eg { font-style: italic; }
+.gv-lines .gv-in, .gv-lines .gv-blank, .gv-lines .gv-val { display: block; margin-bottom: 0.5rem; }
+.gv-attest { font-weight: 700; margin-top: 1.5rem; }
+.gv-note { font-style: italic; color: #555; }
+.gv-in { border: 0; border-bottom: 1px solid #444; background: #fffdf5; padding: 0.15rem 0.3rem; font: inherit; }
+.gv-in:focus { outline: 2px solid #EF9F27; outline-offset: 1px; background: #fff; }
+.gv-blank { display: inline-block; border-bottom: 1px solid #444; height: 1.2em; vertical-align: bottom; }
+.gv-val { display: inline-block; border-bottom: 1px solid #bbb; padding: 0 0.3rem; font-weight: 600; }
+.gv-sig { font-family: "Segoe Script", "Brush Script MT", cursive; font-size: 1.15em; font-weight: 400; }
+.gv-club { display: inline-block; border-bottom: 1px dashed #999; height: 1.2em; vertical-align: bottom; background: #f3f3f3; }
+.gv-w-xs { width: 3rem; }
+.gv-w-sm { width: 6rem; }
+.gv-w-md { width: 11rem; }
+.gv-w-lg { width: 20rem; max-width: 100%; }
+.gv-w-xl { width: 30rem; max-width: 100%; }
+.gv-w-full { width: 100%; }
+.gv-pick { background: #fbf6ea; border: 1px solid #EF9F27; padding: 1rem; margin-bottom: 1.25rem; }
+.gv-pick label { font-weight: 700; display: block; margin-bottom: 0.4rem; }
+.gv-pick select { max-width: 100%; }
+.gasf-vendor-errs { background: #fdeceb; border-left: 4px solid #c0392b; padding: 0.75rem 1rem; margin-bottom: 1.25rem; }
+.gasf-vendor-done { background: #eef7ee; border-left: 4px solid #2e7d32; padding: 1rem 1.25rem; }
+.gv-submit { margin-top: 1.5rem; }
+.gv-go { background: #EF9F27; border: 0; color: #1a1a1a; font-weight: 700; padding: 0.7rem 1.6rem; font-size: 1rem; cursor: pointer; }
+.gv-go:hover { background: #d98d1c; }
+.gv-legend { color: #555; font-size: 0.9rem; }
+@media (max-width: 600px) {
+	.gv-contract { padding: 1rem; }
+	.gv-w-lg, .gv-w-xl, .gv-w-md { width: 100%; }
+}
+</style>
+	<?php
+}
+
+/**
+ * [vendor_application] -- the agreement, fillable.
+ *
+ * A shortcode rather than a route so the club can put it on a page with their
+ * own wording above it, and change that wording without a deploy.
  */
 function gasf_crm_vendor_shortcode() {
 	if ( ! gasf_crm_vendor_ready() ) {
-		return '<p><em>The vendor application form is not available yet.</em></p>';
+		return '<p><em>The vendor agreement is not available yet.</em></p>';
 	}
-
-	$cfg    = gasf_crm_vendor_cfg();
-	$events = gasf_crm_vendor_events();
-	$keys   = function_exists( 'gasf_crm_turnstile_keys' ) ? gasf_crm_turnstile_keys() : null;
 
 	// phpcs:ignore WordPress.Security.NonceVerification -- reading our own redirect flag.
 	$done = isset( $_GET['vendor'] ) && 'thanks' === $_GET['vendor'];
@@ -384,23 +536,29 @@ function gasf_crm_vendor_shortcode() {
 	ob_start();
 
 	if ( $done ) {
-		echo '<div class="gasf-vendor gasf-vendor-done"><h3>Thank you — we have your application.</h3>'
-			. '<p>Somebody from the Society will be in touch about availability, the fee, and the deposit. '
-			. 'Nothing is confirmed until we write back to you.</p></div>';
+		gasf_crm_vendor_styles();
+		echo '<div class="gasf-vendor"><div class="gasf-vendor-done">'
+			. '<h3>Thank you &mdash; we have your signed agreement.</h3>'
+			. '<p>Somebody from the Society will review it and be in touch about the fee, the deposit, and your space. '
+			. 'The agreement is not in force until an officer of the Society countersigns it.</p></div></div>';
 		return ob_get_clean();
 	}
 
 	$errors = gasf_crm_vendor_last_errors();
+	$values = gasf_crm_vendor_submitted_fields();
+	$events = gasf_crm_vendor_events();
+
+	gasf_crm_vendor_styles();
 	?>
 	<div class="gasf-vendor">
 		<?php if ( $errors ) : ?>
 			<div class="gasf-vendor-errs" role="alert">
-				<p><strong>That did not go through.</strong></p>
+				<p><strong>That did not go through.</strong> Everything you typed is still below.</p>
 				<ul><?php foreach ( $errors as $e ) : ?><li><?php echo esc_html( $e ); ?></li><?php endforeach; ?></ul>
 			</div>
 		<?php endif; ?>
 
-		<form method="post" enctype="multipart/form-data" class="gasf-vendor-form" novalidate>
+		<form method="post" enctype="multipart/form-data" novalidate>
 			<?php wp_nonce_field( 'gasf_vendor_apply', 'gasf_vendor_nonce' ); ?>
 			<input type="hidden" name="gasf_vendor_submit" value="1">
 			<input type="hidden" name="gasf_vendor_t" value="<?php echo esc_attr( (string) time() ); ?>">
@@ -410,127 +568,40 @@ function gasf_crm_vendor_shortcode() {
 				<label>Company website<input type="text" name="gasf_vendor_website" tabindex="-1" autocomplete="off"></label>
 			</div>
 
-			<fieldset>
-				<legend>Which event</legend>
-				<?php if ( $events ) : ?>
-					<p>
-						<label for="gv-event">Event</label>
-						<select name="event_id" id="gv-event">
-							<option value="0">— choose an event —</option>
-							<?php foreach ( $events as $e ) : ?>
-								<option value="<?php echo esc_attr( (string) $e['id'] ); ?>" <?php selected( gasf_crm_vendor_sticky( 'event_id' ), (string) $e['id'] ); ?>><?php echo esc_html( $e['label'] ); ?></option>
-							<?php endforeach; ?>
-						</select>
-					</p>
-				<?php endif; ?>
-				<p>
-					<label for="gv-eventother">If your event is not listed, name it here</label>
-					<input type="text" name="event_other" id="gv-eventother" maxlength="180" value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'event_other' ) ); ?>">
-				</p>
-			</fieldset>
-
-			<fieldset>
-				<legend>Your business</legend>
-				<p>
-					<label for="gv-name">Business or vendor name <span class="req">(required)</span></label>
-					<input type="text" name="vendor_name" id="gv-name" maxlength="180" required value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'vendor_name' ) ); ?>">
-				</p>
-				<p>
-					<label for="gv-addr">Address</label>
-					<input type="text" name="vendor_address" id="gv-addr" maxlength="180" value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'vendor_address' ) ); ?>">
-				</p>
-				<div class="gasf-vendor-row">
-					<p>
-						<label for="gv-city">City</label>
-						<input type="text" name="vendor_city" id="gv-city" maxlength="90" value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'vendor_city' ) ); ?>">
-					</p>
-					<p>
-						<label for="gv-state">State</label>
-						<input type="text" name="vendor_state" id="gv-state" maxlength="30" value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'vendor_state' ) ); ?>">
-					</p>
-					<p>
-						<label for="gv-zip">ZIP</label>
-						<input type="text" name="vendor_zip" id="gv-zip" maxlength="12" value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'vendor_zip' ) ); ?>">
-					</p>
+			<?php if ( $events ) : ?>
+				<div class="gv-pick">
+					<label for="gv-event">Which event is this for?</label>
+					<select name="event_id" id="gv-event">
+						<option value="0">&mdash; not listed, I will type it below &mdash;</option>
+						<?php foreach ( $events as $e ) : ?>
+							<option value="<?php echo esc_attr( (string) $e['id'] ); ?>" <?php selected( gasf_crm_vendor_posted_event_id(), $e['id'] ); ?>><?php echo esc_html( $e['label'] ); ?></option>
+						<?php endforeach; ?>
+					</select>
+					<p class="gv-legend">Choosing an event here fills in the event name and date in the agreement below.</p>
 				</div>
-				<p>
-					<label for="gv-tax">Tax exempt number <span class="opt">(if you have one)</span></label>
-					<input type="text" name="tax_exempt" id="gv-tax" maxlength="60" value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'tax_exempt' ) ); ?>">
-				</p>
-			</fieldset>
-
-			<fieldset>
-				<legend>Who we should talk to</legend>
-				<p>
-					<label for="gv-poc">Name <span class="req">(required)</span></label>
-					<input type="text" name="poc_name" id="gv-poc" maxlength="180" required value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'poc_name' ) ); ?>">
-				</p>
-				<div class="gasf-vendor-row">
-					<p>
-						<label for="gv-mobile">Mobile <span class="req">(required)</span></label>
-						<input type="tel" name="poc_mobile" id="gv-mobile" maxlength="30" required value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'poc_mobile' ) ); ?>">
-					</p>
-					<p>
-						<label for="gv-email">Email <span class="req">(required)</span></label>
-						<input type="email" name="poc_email" id="gv-email" maxlength="180" required value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'poc_email' ) ); ?>">
-					</p>
-				</div>
-			</fieldset>
-
-			<fieldset>
-				<legend>What you will be selling</legend>
-				<p>
-					<label for="gv-products">Describe the products or services <span class="req">(required)</span></label>
-					<textarea name="products" id="gv-products" rows="4" maxlength="2000" required><?php
-						// phpcs:ignore WordPress.Security.NonceVerification -- redisplay only.
-						echo esc_textarea( isset( $_POST['products'] ) ? sanitize_textarea_field( wp_unslash( $_POST['products'] ) ) : '' );
-					?></textarea>
-				</p>
-			</fieldset>
-
-			<fieldset>
-				<legend>Insurance</legend>
-				<p class="gasf-vendor-note">
-					The agreement requires general liability cover of $1,000,000 per occurrence and $2,000,000 aggregate,
-					naming the German American Society as an additional insured, with proof provided at least 30 days
-					before the event. You can attach the certificate now or send it later.
-				</p>
-				<p>
-					<label for="gv-coi">Certificate of insurance <span class="opt">(PDF, JPG, or PNG, up to 10 MB)</span></label>
-					<input type="file" name="coi" id="gv-coi" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
-				</p>
-			</fieldset>
-
-			<fieldset>
-				<legend>The agreement</legend>
-				<p class="gasf-vendor-note">
-					Please read the <a href="<?php echo esc_url( $cfg['terms_url'] ); ?>" target="_blank" rel="noopener">Vendor Agreement</a>
-					<?php if ( '' !== trim( (string) $cfg['addenda_url'] ) ) : ?>
-						and the <a href="<?php echo esc_url( $cfg['addenda_url'] ); ?>" target="_blank" rel="noopener">addenda</a>
-					<?php endif; ?>
-					before you submit this form. It covers the fee and deposit, the cancellation policy, liability,
-					insurance, and indemnification.
-				</p>
-				<p>
-					<label for="gv-signed">Type your full name to sign <span class="req">(required)</span></label>
-					<input type="text" name="agreed_name" id="gv-signed" maxlength="180" required value="<?php echo esc_attr( gasf_crm_vendor_sticky( 'agreed_name' ) ); ?>">
-				</p>
-				<p class="gasf-vendor-check">
-					<label>
-						<input type="checkbox" name="agree" value="1" required>
-						I have read and agree to the Vendor Agreement, I am authorised to sign for this business, and
-						the information above is true and correct.
-					</label>
-				</p>
-			</fieldset>
-
-			<?php if ( $keys ) : ?>
-				<div class="cf-turnstile" data-sitekey="<?php echo esc_attr( $keys['site'] ); ?>"></div>
-				<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 			<?php endif; ?>
 
-			<p><button type="submit" class="gasf-vendor-go">Submit application</button></p>
-			<p class="gasf-vendor-note">Submitting this does not reserve a space. We will write back to you.</p>
+			<?php gasf_crm_vendor_contract( 'form', $values ); ?>
+
+			<div class="gv-submit">
+				<p><strong>Certificate of insurance</strong> &mdash; PDF, JPG, or PNG, up to 10 MB.
+					You can attach it now or send it later, but the agreement requires it at least
+					30 days before the event.<br>
+					<input type="file" name="coi" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png">
+				</p>
+
+				<?php
+				$keys = function_exists( 'gasf_crm_turnstile_keys' ) ? gasf_crm_turnstile_keys() : null;
+				if ( $keys ) :
+					?>
+					<div class="cf-turnstile" data-sitekey="<?php echo esc_attr( $keys['site'] ); ?>"></div>
+					<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+				<?php endif; ?>
+
+				<p><button type="submit" class="gv-go">Sign and submit this agreement</button></p>
+				<p class="gv-legend">Submitting this does not reserve a space, and does not put the agreement in
+					force. An officer of the Society countersigns it after reviewing your application.</p>
+			</div>
 		</form>
 	</div>
 	<?php
@@ -549,14 +620,41 @@ function gasf_crm_vendor_last_errors( $set = null ) {
 	return $errors;
 }
 
+/** The event post id on a submission being redisplayed, or 0. */
+function gasf_crm_vendor_posted_event_id() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- redisplay only; nothing is acted on here.
+	return isset( $_POST['event_id'] ) ? (int) $_POST['event_id'] : 0;
+}
+
 /**
- * Validate and file an application.
+ * The vendor's blanks, whitelisted, sanitised, and length-capped.
+ *
+ * Used both to fill the form back in after a rejection and to build the record,
+ * so a rejected submission redisplays exactly what will be stored if they fix
+ * the one field that was wrong -- rather than something subtly different.
+ */
+function gasf_crm_vendor_submitted_fields() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- the caller that ACTS on this verifies first.
+	$raw = isset( $_POST['f'] ) && is_array( $_POST['f'] ) ? wp_unslash( $_POST['f'] ) : array();
+
+	$out = array();
+	foreach ( gasf_crm_vendor_vendor_fields() as $key => $max ) {
+		if ( ! isset( $raw[ $key ] ) || ! is_scalar( $raw[ $key ] ) ) { continue; }
+		$v = sanitize_text_field( (string) $raw[ $key ] );
+		$out[ $key ] = function_exists( 'mb_substr' ) ? mb_substr( $v, 0, $max ) : substr( $v, 0, $max );
+	}
+
+	return $out;
+}
+
+/**
+ * Validate and file a signed agreement.
  *
  * Runs on template_redirect so a success can redirect before a byte of the page
- * has been sent, which is what stops a refresh from filing the same agreement
- * twice. A failure falls through and the shortcode redraws the form with what
- * they typed still in it — losing a page of typing to one bad field is how a
- * vendor gives up and phones instead.
+ * is sent, which is what stops a refresh from filing the same agreement twice.
+ * A failure falls through and the shortcode redraws the contract with every
+ * blank still filled -- losing four pages of typing to one bad field is how a
+ * vendor gives up and telephones instead.
  */
 function gasf_crm_vendor_handle() {
 	// phpcs:ignore WordPress.Security.NonceVerification -- the nonce is verified immediately below.
@@ -569,16 +667,16 @@ function gasf_crm_vendor_handle() {
 	}
 
 	if ( ! gasf_crm_vendor_ready() ) {
-		gasf_crm_vendor_last_errors( array( 'The form is not accepting applications at the moment.' ) );
+		gasf_crm_vendor_last_errors( array( 'The agreement is not accepting signatures at the moment.' ) );
 		return;
 	}
 
-	// Bots, quietly. A filled honeypot or a form submitted faster than anybody
-	// could have read the agreement is answered with the same generic failure a
+	// Bots, quietly. A filled honeypot or a form returned faster than anybody
+	// could have read four pages is answered with the same generic failure a
 	// human would see, so a scraper learns nothing about which check caught it.
 	$hp   = isset( $_POST['gasf_vendor_website'] ) ? trim( (string) wp_unslash( $_POST['gasf_vendor_website'] ) ) : '';
 	$then = isset( $_POST['gasf_vendor_t'] ) ? (int) $_POST['gasf_vendor_t'] : 0;
-	if ( '' !== $hp || $then <= 0 || ( time() - $then ) < 5 ) {
+	if ( '' !== $hp || $then <= 0 || ( time() - $then ) < 10 ) {
 		gasf_crm_vendor_last_errors( array( 'That did not go through. Please try again.' ) );
 		gasf_crm_log( 'CRM vendor: submission rejected by the bot checks.' );
 		return;
@@ -586,7 +684,7 @@ function gasf_crm_vendor_handle() {
 
 	// Turnstile fails OPEN, as it does on the photo door: a human reads every
 	// one of these before anything happens, so an outage at Cloudflare must not
-	// stop a vendor applying. The check is here to spare the reader, not to gate.
+	// stop a vendor signing. The check spares the reader; it is not the gate.
 	$keys = function_exists( 'gasf_crm_turnstile_keys' ) ? gasf_crm_turnstile_keys() : null;
 	if ( $keys ) {
 		$token = isset( $_POST['cf-turnstile-response'] ) ? sanitize_text_field( wp_unslash( $_POST['cf-turnstile-response'] ) ) : '';
@@ -595,48 +693,41 @@ function gasf_crm_vendor_handle() {
 		}
 	}
 
-	$f = static function ( $k, $max = 180 ) {
-		// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
-		$v = isset( $_POST[ $k ] ) ? sanitize_text_field( wp_unslash( $_POST[ $k ] ) ) : '';
-		return function_exists( 'mb_substr' ) ? mb_substr( $v, 0, $max ) : substr( $v, 0, $max );
-	};
-
-	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
-	$products = isset( $_POST['products'] ) ? sanitize_textarea_field( wp_unslash( $_POST['products'] ) ) : '';
-	$products = function_exists( 'mb_substr' ) ? mb_substr( $products, 0, 2000 ) : substr( $products, 0, 2000 );
-
+	$values = gasf_crm_vendor_submitted_fields();
 	$errors = array();
 
-	$vendor_name = $f( 'vendor_name' );
-	$poc_name    = $f( 'poc_name' );
-	$poc_mobile  = $f( 'poc_mobile', 30 );
-	$poc_email   = sanitize_email( $f( 'poc_email' ) );
-	$agreed_name = $f( 'agreed_name' );
-
-	if ( '' === $vendor_name )            { $errors[] = 'Please give the business or vendor name.'; }
-	if ( '' === $poc_name )               { $errors[] = 'Please give a contact name.'; }
-	if ( '' === $poc_mobile )             { $errors[] = 'Please give a contact mobile number.'; }
-	if ( ! is_email( $poc_email ) )       { $errors[] = 'Please give a contact email address we can reply to.'; }
-	if ( '' === trim( $products ) )       { $errors[] = 'Please describe what you will be selling.'; }
-	if ( '' === $agreed_name )            { $errors[] = 'Please type your full name to sign.'; }
-	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
-	if ( empty( $_POST['agree'] ) )       { $errors[] = 'Please confirm you have read and agree to the Vendor Agreement.'; }
-
-	// The event: the picked post decides the id, and its title is copied into
-	// text so the row still says which event it was years after that post has
-	// been renamed or deleted.
-	$event_id   = (int) $f( 'event_id', 20 );
-	$event_text = $f( 'event_other' );
+	// A chosen event is authoritative over the typed blanks: the club knows its
+	// own calendar better than a vendor reading it off a poster, and the two
+	// disagreeing is a booking nobody can reconcile later.
+	$event_id = gasf_crm_vendor_posted_event_id();
 	if ( $event_id > 0 ) {
 		$post = get_post( $event_id );
 		if ( ! $post || 'gasf_event' !== $post->post_type ) {
 			$event_id = 0;
 		} else {
-			$event_text = $post->post_title;
+			$values['event_name'] = $post->post_title;
+			$start                = (int) get_post_meta( $post->ID, '_gasf_start', true );
+			if ( $start ) { $values['event_date'] = wp_date( 'j F Y', $start ); }
 		}
 	}
-	if ( '' === trim( $event_text ) ) {
-		$errors[] = 'Please choose the event, or type its name.';
+
+	foreach ( gasf_crm_vendor_required_fields() as $key => $label ) {
+		if ( '' === trim( (string) ( $values[ $key ] ?? '' ) ) ) {
+			$errors[] = 'Please give ' . $label . '.';
+		}
+	}
+
+	$values['poc_email'] = sanitize_email( (string) ( $values['poc_email'] ?? '' ) );
+	if ( '' !== $values['poc_email'] && ! is_email( $values['poc_email'] ) ) {
+		$errors[] = 'That contact email address does not look right.';
+	}
+
+	// The signature is a name, and it has to be the name of somebody. Requiring
+	// it to match the business would be wrong -- a POC signs for a company all
+	// the time -- but an empty or one-character "signature" is not a signature.
+	if ( '' !== trim( (string) ( $values['sign_vendor'] ?? '' ) )
+		&& strlen( trim( (string) $values['sign_vendor'] ) ) < 3 ) {
+		$errors[] = 'Please type your full name as your signature.';
 	}
 
 	$coi = array( 'path' => '', 'name' => '', 'bytes' => 0 );
@@ -650,10 +741,10 @@ function gasf_crm_vendor_handle() {
 	}
 
 	if ( $errors ) {
-		// A certificate that was accepted on a submission that then failed
-		// validation is deleted rather than orphaned: the vendor will attach it
-		// again on the retry, and an unreferenced file in a private store is
-		// something nobody will ever come back and reconcile.
+		// A certificate accepted on a submission that then failed validation is
+		// deleted rather than orphaned: they will attach it again on the retry,
+		// and an unreferenced file in a private store is something nobody will
+		// ever come back and reconcile.
 		if ( $coi['path'] ) {
 			@unlink( trailingslashit( gasf_crm_vendor_coi_root() ) . basename( $coi['path'] ) ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		}
@@ -661,31 +752,53 @@ function gasf_crm_vendor_handle() {
 		return;
 	}
 
+	if ( '' === trim( (string) ( $values['sign_vendor_date'] ?? '' ) ) ) {
+		$values['sign_vendor_date'] = wp_date( 'j F Y' );
+	}
+
+	/*
+	 * Snapshot the agreement AS RENDERED, not merely its version string.
+	 *
+	 * The words now live in contract-text.php, which means a future edit would
+	 * silently change what every past signatory appears to have agreed to. The
+	 * version stamp says which text it was; this says what it said. Storing both
+	 * is the difference between a record and an assertion.
+	 */
+	ob_start();
+	gasf_crm_vendor_contract( 'record', $values );
+	$snapshot = ob_get_clean();
+
 	$cfg = gasf_crm_vendor_cfg();
 
 	$id = gasf_crm_vendor_insert( array(
-		'event_id'       => $event_id,
-		'event_text'     => $event_text,
-		'vendor_name'    => $vendor_name,
-		'vendor_address' => $f( 'vendor_address' ),
-		'vendor_city'    => $f( 'vendor_city', 90 ),
-		'vendor_state'   => $f( 'vendor_state', 30 ),
-		'vendor_zip'     => $f( 'vendor_zip', 12 ),
-		'poc_name'       => $poc_name,
-		'poc_mobile'     => $poc_mobile,
-		'poc_email'      => $poc_email,
-		'products'       => $products,
-		'tax_exempt'     => $f( 'tax_exempt', 60 ),
-		'coi_path'       => $coi['path'],
-		'coi_name'       => $coi['name'],
-		'coi_bytes'      => $coi['bytes'],
-		'terms_version'  => (string) $cfg['terms_version'],
-		'agreed_name'    => $agreed_name,
-		'agreed_at'      => current_time( 'mysql' ),
-		'agreed_ip'      => function_exists( 'gasf_crm_client_ip' ) ? gasf_crm_client_ip() : '',
-		'agreed_ua'      => isset( $_SERVER['HTTP_USER_AGENT'] )
+		'event_id'          => $event_id,
+		'event_text'        => (string) ( $values['event_name'] ?? '' ),
+		'vendor_name'       => (string) ( $values['vendor_legal'] ?? '' ),
+		'vendor_address'    => (string) ( $values['vendor_address'] ?? '' ),
+		'vendor_city'       => (string) ( $values['vendor_city'] ?? '' ),
+		'vendor_state'      => (string) ( $values['vendor_state'] ?? '' ),
+		'vendor_zip'        => (string) ( $values['vendor_zip'] ?? '' ),
+		'poc_name'          => (string) ( $values['poc_name'] ?? '' ),
+		'poc_mobile'        => (string) ( $values['poc_mobile'] ?? '' ),
+		'poc_email'         => (string) ( $values['poc_email'] ?? '' ),
+		'products'          => trim( implode( "\n", array_filter( array(
+			(string) ( $values['desc1'] ?? '' ),
+			(string) ( $values['desc2'] ?? '' ),
+			(string) ( $values['desc3'] ?? '' ),
+		) ) ) ),
+		'tax_exempt'        => (string) ( $values['tax_exempt'] ?? '' ),
+		'coi_path'          => $coi['path'],
+		'coi_name'          => $coi['name'],
+		'coi_bytes'         => $coi['bytes'],
+		'terms_version'     => (string) $cfg['terms_version'],
+		'agreed_name'       => (string) ( $values['sign_vendor'] ?? '' ),
+		'agreed_at'         => current_time( 'mysql' ),
+		'agreed_ip'         => function_exists( 'gasf_crm_client_ip' ) ? gasf_crm_client_ip() : '',
+		'agreed_ua'         => isset( $_SERVER['HTTP_USER_AGENT'] )
 			? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 255 )
 			: '',
+		'fields_json'       => wp_json_encode( $values ),
+		'contract_snapshot' => $snapshot,
 	) );
 
 	if ( is_wp_error( $id ) ) {
@@ -694,9 +807,8 @@ function gasf_crm_vendor_handle() {
 	}
 
 	// Notification must never cost the vendor their submission. The row is
-	// already committed; if mail is down that is the club's problem to notice,
-	// not a reason to show a stranger an error about an application that was in
-	// fact accepted.
+	// committed; if mail is down that is the club's problem to notice, not a
+	// reason to show a stranger an error about an agreement that was accepted.
 	gasf_crm_vendor_notify( $id );
 
 	$back = remove_query_arg( array( 'vendor' ), wp_get_referer() );
@@ -741,12 +853,12 @@ function gasf_crm_vendor_serve_coi( $id ) {
 
 	$path = gasf_crm_vendor_coi_path( $row );
 	if ( ! $path || ! file_exists( $path ) ) {
-		gasf_crm_log( 'CRM vendor: certificate for application ' . (int) $id . ' is recorded but missing from disk.' );
+		gasf_crm_log( 'CRM vendor: certificate for agreement ' . (int) $id . ' is recorded but missing from disk.' );
 		status_header( 404 );
 		wp_die( esc_html__( 'That certificate is not here.', 'gasf' ), '', array( 'response' => 404 ) );
 	}
 
-	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' downloaded the certificate for application ' . (int) $id );
+	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' downloaded the certificate for agreement ' . (int) $id );
 
 	$type = wp_check_filetype( $path );
 	$mime = $type['type'] ? $type['type'] : 'application/octet-stream';
@@ -769,23 +881,28 @@ function gasf_crm_vendor_serve_coi( $id ) {
 /**
  * The Contracts pane.
  *
- * Rendered server-side rather than fetched, deliberately. Everything on this
- * screen is already gated by the area grant that let the page render at all;
- * adding a REST route would mean a second, separately-maintained answer to the
- * same permission question, and this list is a few dozen rows a year.
+ * Shows each agreement AS THE AGREEMENT -- the stored snapshot of the contract
+ * with that vendor's blanks filled in -- rather than a table of the values
+ * pulled out of it. A reviewer's job is to read what somebody signed, and a
+ * field list is not that document however complete it is.
+ *
+ * Rendered server-side rather than fetched. Everything here is already gated by
+ * the area grant that let the page render at all; a REST route would mean a
+ * second, separately-maintained answer to the same permission question.
  */
 function gasf_crm_vendor_render_section( $hidden = true ) {
 	if ( ! gasf_crm_vendor_may_read() ) { return; }
 
 	$rows = gasf_crm_vendor_list( 200 );
+	gasf_crm_vendor_styles();
 	?>
 <div class="wrap" id="contractsview" <?php echo $hidden ? 'hidden' : ''; ?>>
-	<h2>Vendor applications</h2>
+	<h2>Vendor agreements</h2>
 
 	<?php if ( ! $rows ) : ?>
-		<p class="muted">Nothing has come in yet. Applications submitted through the vendor form appear here.</p>
+		<p class="muted">Nothing has come in yet. Agreements signed through the vendor page appear here.</p>
 	<?php else : ?>
-		<p class="muted"><?php echo esc_html( count( $rows ) . ( 1 === count( $rows ) ? ' application' : ' applications' ) ); ?>, newest first.</p>
+		<p class="muted"><?php echo esc_html( count( $rows ) . ( 1 === count( $rows ) ? ' agreement' : ' agreements' ) ); ?>, newest first.</p>
 
 		<?php foreach ( $rows as $r ) : ?>
 			<details class="vapp">
@@ -797,70 +914,60 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 					<span class="muted"><?php echo esc_html( mysql2date( 'j M Y', $r['created_at'] ) ); ?></span>
 				</summary>
 
-				<dl>
-					<dt>Contact</dt>
-					<dd>
-						<?php echo esc_html( $r['poc_name'] ); ?><br>
-						<a href="mailto:<?php echo esc_attr( $r['poc_email'] ); ?>"><?php echo esc_html( $r['poc_email'] ); ?></a><br>
-						<?php echo esc_html( $r['poc_mobile'] ); ?>
-					</dd>
-
-					<?php if ( $r['vendor_address'] || $r['vendor_city'] ) : ?>
-						<dt>Address</dt>
-						<dd>
-							<?php echo esc_html( $r['vendor_address'] ); ?><br>
-							<?php echo esc_html( trim( $r['vendor_city'] . ' ' . $r['vendor_state'] . ' ' . $r['vendor_zip'] ) ); ?>
-						</dd>
+				<?php
+				/*
+				 * The acceptance record, above the document and shown in full.
+				 *
+				 * It is only worth anything if a person can read all of it at
+				 * once: who signed, when, from where, and WHICH version of the
+				 * agreement was in front of them. Hiding the version because it
+				 * looks like plumbing would leave a reader unable to answer the
+				 * only question ever asked about a signature.
+				 */
+				?>
+				<p class="gv-legend">
+					Signed by <strong><?php echo esc_html( $r['agreed_name'] ? $r['agreed_name'] : 'nobody' ); ?></strong>
+					on <?php echo esc_html( mysql2date( 'j M Y \a\t H:i', $r['agreed_at'] ) ); ?>
+					&middot; agreement version <?php echo esc_html( $r['terms_version'] ? $r['terms_version'] : 'not recorded' ); ?>
+					<?php if ( $r['agreed_ip'] ) : ?>
+						&middot; from <?php echo esc_html( $r['agreed_ip'] ); ?>
 					<?php endif; ?>
-
-					<dt>Selling</dt>
-					<dd><?php echo nl2br( esc_html( $r['products'] ) ); ?></dd>
-
-					<?php if ( $r['tax_exempt'] ) : ?>
-						<dt>Tax exempt number</dt>
-						<dd><?php echo esc_html( $r['tax_exempt'] ); ?></dd>
+					<br>
+					Insurance certificate:
+					<?php if ( $r['coi_path'] ) : ?>
+						<a href="<?php echo esc_url( home_url( '/email/contracts/coi/' . (int) $r['id'] ) ); ?>">download
+							<?php echo esc_html( $r['coi_name'] ? $r['coi_name'] : 'certificate' ); ?></a>
+						(<?php echo esc_html( size_format( (int) $r['coi_bytes'] ) ); ?>)
+					<?php else : ?>
+						not supplied yet &mdash; the agreement asks for it at least 30 days before the event.
 					<?php endif; ?>
+				</p>
 
-					<dt>Insurance certificate</dt>
-					<dd>
-						<?php if ( $r['coi_path'] ) : ?>
-							<a href="<?php echo esc_url( home_url( '/email/contracts/coi/' . (int) $r['id'] ) ); ?>">
-								Download <?php echo esc_html( $r['coi_name'] ? $r['coi_name'] : 'certificate' ); ?>
-							</a>
-							<span class="muted">(<?php echo esc_html( size_format( (int) $r['coi_bytes'] ) ); ?>)</span>
-						<?php else : ?>
-							<span class="muted">Not supplied yet. The agreement asks for it at least 30 days before the event.</span>
-						<?php endif; ?>
-					</dd>
-
-					<?php
+				<?php
+				if ( ! empty( $r['contract_snapshot'] ) ) {
 					/*
-					 * The acceptance record, shown in full and together.
+					 * The stored snapshot, printed as stored.
 					 *
-					 * This is the part that makes the application an agreement
-					 * rather than an enquiry, and it is only worth anything if a
-					 * person can read all four facts at once: who typed their
-					 * name, when, from where, and WHICH version of the terms was
-					 * in front of them. Splitting them up, or hiding the version
-					 * because it looks like plumbing, would leave a reader
-					 * unable to answer the only question that ever gets asked
-					 * about a click-wrap.
+					 * Deliberately not escaped and deliberately not re-rendered
+					 * from the current template. Escaping it would show a
+					 * reviewer a wall of markup instead of the contract, and
+					 * re-rendering would quietly restate an old signature in
+					 * today's words. It is markup this plugin generated itself,
+					 * from values that were sanitised and escaped on the way in.
 					 */
-					?>
-					<dt>Signed</dt>
-					<dd>
-						<?php if ( $r['agreed_name'] ) : ?>
-							<strong><?php echo esc_html( $r['agreed_name'] ); ?></strong>
-							on <?php echo esc_html( mysql2date( 'j M Y \a\t H:i', $r['agreed_at'] ) ); ?><br>
-							Terms version <?php echo esc_html( $r['terms_version'] ? $r['terms_version'] : 'not recorded' ); ?>
-							<?php if ( $r['agreed_ip'] ) : ?>
-								&middot; from <?php echo esc_html( $r['agreed_ip'] ); ?>
-							<?php endif; ?>
-						<?php else : ?>
-							<span class="muted">No acceptance recorded.</span>
-						<?php endif; ?>
-					</dd>
-				</dl>
+					echo $r['contract_snapshot']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+				} else {
+					// Rows from before snapshots existed, or a snapshot that
+					// failed to store. Rebuild from the fields so the reviewer
+					// still sees a contract rather than nothing.
+					$vals = json_decode( (string) $r['fields_json'], true );
+					if ( is_array( $vals ) ) {
+						gasf_crm_vendor_contract( 'record', $vals );
+					} else {
+						echo '<p class="muted">This agreement was stored without a readable copy. The details are in the database row.</p>';
+					}
+				}
+				?>
 			</details>
 		<?php endforeach; ?>
 	<?php endif; ?>

@@ -27,6 +27,7 @@ const TARGETS = [
 	'includes/email-crm/photos-page.php',
 	'includes/email-crm/photos-public.php',
 	'includes/email-crm/admin.php',
+	'includes/email-crm/contracts.php',
 	'includes/photo-catalog.php',
 ];
 

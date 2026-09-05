@@ -40,7 +40,7 @@ if ( true ) {
 	// upgrade check below runs dbDelta and flushes rules on any change. This
 	// plugin runs as an mu-plugin on the main site, where activation hooks
 	// never fire, so a version-compare on every load is the only reliable hook.
-	define( 'GASF_CRM_SCHEMA', '1.21.0' );
+	define( 'GASF_CRM_SCHEMA', '1.22.0' );
 
 	/**
 	 * How long the sign-in history is kept.
@@ -105,9 +105,11 @@ if ( true ) {
 	require_once GASF_CRM_DIR . '/photos-faces.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
-	// After auth.php and db.php: vendor contracts are granted through the area
-	// helpers in auth.php and stored in the table db.php creates. Nothing else
-	// calls into it, so it loads last.
+	// The agreement's own words and blanks, split from the plumbing so that
+	// amending the contract is an edit to one file of prose rather than a trawl
+	// through storage and validation. Must precede contracts.php, which renders
+	// it, and which reads the area grants from auth.php and the table from db.php.
+	require_once GASF_CRM_DIR . '/contract-text.php';
 	require_once GASF_CRM_DIR . '/contracts.php';
 
 	/**
@@ -464,6 +466,7 @@ if ( true ) {
 			'photo_submissions' => array( 'lease_owner', 'lease_until', 'next_attempt_at' ),
 			'photo_invites'     => array( 'remind_attempts' ),
 			'messages'          => array( 'stream' ),
+			'vendor_apps'       => array( 'fields_json', 'contract_snapshot' ),
 		) as $t => $cols ) {
 			$name = gasf_crm_table( $t );
 			if ( in_array( 'table ' . $t . ' is missing', $gaps, true ) ) { continue; }

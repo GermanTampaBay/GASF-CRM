@@ -2078,6 +2078,81 @@ final class GASF_CRM_Selftest {
 		$html = gasf_crm_vendor_shortcode();
 		$this->ok( false !== strpos( $html, 'gasf_vendor_nonce' ), 'vendor: the form carries a nonce' );
 		$this->ok( false !== strpos( $html, 'gasf_vendor_website' ), 'vendor: the form carries its honeypot' );
+
+		// The contract itself must be ON the page. Linking it was the earlier
+		// design and is precisely what this replaced: a vendor has to be able to
+		// read what they are signing without leaving the form.
+		$this->ok( false !== strpos( $html, 'VENDOR AGREEMENT' ), 'contract: the agreement is rendered on the page' );
+		$this->ok( false !== strpos( $html, 'CANCELLATION POLICY' ), 'contract: the cancellation terms are on the page' );
+		$this->ok( false !== strpos( $html, 'INDEMNIFICATION' ), 'contract: the indemnification clause is on the page' );
+		$this->ok( false !== strpos( $html, 'name="f[vendor_legal]"' ), 'contract: the blanks are fillable fields' );
+	}
+
+	/**
+	 * The Society's own blanks are not fields on the public page.
+	 *
+	 * Not merely readonly -- readonly still rides along in the POST, and the
+	 * fee, the deposit, and the countersignature are the three things a vendor
+	 * must never be able to assert about their own agreement. They are absent
+	 * from the markup, and refused again by the whitelist if one is posted.
+	 */
+	public function test_vendor_club_fields_are_not_inputs() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => 'https://example.org/a.pdf', 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+		foreach ( array( 'fee_amount', 'deposit_amount', 'balance_amount', 'sign_gas', 'gas_officer' ) as $key ) {
+			$this->ok( false === strpos( $html, 'name="f[' . $key . ']"' ),
+				'contract: ' . $key . ' is not an input on the public page' );
+		}
+
+		// And the whitelist refuses them even if one arrives anyway.
+		$fields = gasf_crm_vendor_vendor_fields();
+		foreach ( array( 'fee_amount', 'deposit_amount', 'sign_gas' ) as $key ) {
+			$this->ok( ! array_key_exists( $key, $fields ), 'contract: ' . $key . ' is not an accepted field' );
+		}
+	}
+
+	/**
+	 * A signed agreement stores what it looked like, not just which version.
+	 *
+	 * The words are editable now, so a version stamp alone would let a later
+	 * amendment silently restate what somebody already signed. The snapshot is
+	 * the difference between a record and an assertion.
+	 */
+	public function test_vendor_snapshot_is_stored() {
+		global $wpdb;
+
+		ob_start();
+		gasf_crm_vendor_contract( 'record', array(
+			'vendor_legal' => 'Selftest Bratwurst GmbH',
+			'sign_vendor'  => 'A Tester',
+		) );
+		$snapshot = ob_get_clean();
+
+		$this->ok( false !== strpos( $snapshot, 'Selftest Bratwurst GmbH' ), 'contract: a record renders the filled values' );
+		$this->ok( false === strpos( $snapshot, '<input' ), 'contract: a record has no editable fields' );
+
+		$id = gasf_crm_vendor_insert( array(
+			'vendor_name'       => 'Selftest Bratwurst GmbH',
+			'terms_version'     => 'selftest-v1',
+			'agreed_name'       => 'A Tester',
+			'fields_json'       => wp_json_encode( array( 'vendor_legal' => 'Selftest Bratwurst GmbH' ) ),
+			'contract_snapshot' => $snapshot,
+		) );
+		$this->ok( is_int( $id ) && $id > 0, 'contract: an agreement inserts' );
+		if ( ! is_int( $id ) ) { return; }
+
+		try {
+			$row = gasf_crm_vendor_get( $id );
+			$this->ok( $row && false !== strpos( (string) $row['contract_snapshot'], 'Selftest Bratwurst GmbH' ),
+				'contract: the snapshot survives the round trip' );
+			$vals = json_decode( (string) $row['fields_json'], true );
+			$this->ok( is_array( $vals ) && 'Selftest Bratwurst GmbH' === ( $vals['vendor_legal'] ?? '' ),
+				'contract: the typed blanks survive the round trip' );
+		} finally {
+			$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+		}
 	}
 
 	/* ------------------------------------------------------------------ run */
