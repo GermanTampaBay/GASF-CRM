@@ -15,6 +15,13 @@
  * "$2,000.000" and "neat and undamaged is all respects", because a transcription
  * that silently improves the source is no longer a transcription.
  *
+ * ONE DELIBERATE DEPARTURE from the PDF, on the club's instruction: the society's
+ * name is hyphenated here -- "German-American Society" -- where the PDF has it
+ * open throughout. It is the organisation's own name in its own contract, and
+ * the club is authoritative on how it is spelled. Recorded here because a reader
+ * diffing this against the paper will find it, and an unexplained difference in
+ * a contract is indistinguishable from drift.
+ *
  * WHEN THIS TEXT CHANGES, CHANGE THE VERSION in Email CRM -> Settings. Every
  * acceptance stores both the version and a full snapshot of what was on screen,
  * so past agreements keep saying what their signatories actually agreed to --
@@ -43,19 +50,19 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 <div class="gv-contract">
 
 	<header class="gv-head">
-		<p class="gv-org">GERMAN AMERICAN SOCIETY &ldquo;FRIENDSHIP&rdquo; OF PINELLAS COUNTY INC</p>
+		<p class="gv-org">GERMAN-AMERICAN SOCIETY &ldquo;FRIENDSHIP&rdquo; OF PINELLAS COUNTY INC</p>
 		<p class="gv-org">8098 66<sup>th</sup> STREET N. &nbsp;PINELLAS PARK FL &nbsp;33781</p>
 		<p class="gv-title">VENDOR AGREEMENT</p>
 	</header>
 
 	<p>Thank you for your interest in providing products/services/entertainment for an event held at
-		<strong>German American Society</strong> premises or on their behalf.</p>
+		<strong>German-American Society</strong> premises or on their behalf.</p>
 
 	<p>This agreement, made this <?php $b( 'agr_day', array( 'w' => 'xs', 'aria' => 'Day of the month' ) ); ?>
 		day of <?php $b( 'agr_month', array( 'w' => 'sm', 'aria' => 'Month' ) ); ?>
 		202<?php $b( 'agr_year', array( 'w' => 'xs', 'aria' => 'Year, last digit' ) ); ?>
-		by and between the German American Society Friendship of Pinellas County Inc., referred to herein as the
-		<strong>German American Society</strong> and <?php $b( 'vendor_legal', array( 'w' => 'xl', 'aria' => 'Vendor legal name' ) ); ?>
+		by and between the German-American Society Friendship of Pinellas County Inc., referred to herein as the
+		<strong>German-American Society</strong> and <?php $b( 'vendor_legal', array( 'w' => 'xl', 'aria' => 'Vendor legal name' ) ); ?>
 		herein after referred to as the <strong>Vendor.</strong></p>
 
 	<dl class="gv-rows">
@@ -98,7 +105,7 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 		<?php $b( 'desc3', array( 'w' => 'full', 'aria' => 'Description of products or services, line 3' ) ); ?>
 	</p>
 
-	<p>The <strong>German American Society</strong> in consideration of the fees and agreements mentioned here,
+	<p>The <strong>German-American Society</strong> in consideration of the fees and agreements mentioned here,
 		agrees to allow the vendor access to and use of the premises situated in City of Pinellas Park, Pinellas
 		County, FL as described above to the <strong>Vendor</strong> for the sum of
 		$<?php $b( 'fee_amount', array( 'w' => 'md', 'club' => true, 'aria' => 'Fee' ) ); ?> (see Vendor Addendum).</p>
@@ -123,11 +130,11 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 	</dl>
 
 	<h3>TERMS</h3>
-	<p><strong>Vendor</strong> agrees to pay half the fee made payable to the <strong>German American Society,</strong>
+	<p><strong>Vendor</strong> agrees to pay half the fee made payable to the <strong>German-American Society,</strong>
 		upon signing of this contract and the balance due plus damage and cleanup fee at least 30 days prior to the
-		event. The use of any equipment that belongs to the <strong>German American Society</strong> is not included
+		event. The use of any equipment that belongs to the <strong>German-American Society</strong> is not included
 		unless specified. <strong>Vendors</strong> to profit making ventures are subject to the
-		<strong>German American Society</strong> approval. The <strong>German American Society</strong> reserves the
+		<strong>German-American Society</strong> approval. The <strong>German-American Society</strong> reserves the
 		right to decline a <strong>Vendor</strong>.</p>
 
 	<p>The <strong>Vendor</strong> agrees to leave the premises neat and undamaged is all respects after event
@@ -135,47 +142,47 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 
 	<h3 class="gv-ul">CANCELLATION POLICY</h3>
 	<p>Advance deposits are refundable less a cancellation fee of $50.00, if the
-		<strong>German American Society</strong> is notified of cancellation in writing at least 45 days prior to
+		<strong>German-American Society</strong> is notified of cancellation in writing at least 45 days prior to
 		the day of the event. Refunds will be issued within 10 days after notification of cancellation. Deposits
 		are non-refundable if event is canceled less than 45 days before the event.</p>
 
-	<p>If an event is canceled by the <strong>German American Society,</strong> the full deposit will be refunded
-		within 10 days after the cancellation. The <strong>German American Society</strong> shall not be liable for
+	<p>If an event is canceled by the <strong>German-American Society,</strong> the full deposit will be refunded
+		within 10 days after the cancellation. The <strong>German-American Society</strong> shall not be liable for
 		damage of any type, whether direct or consequential, to the <strong>Vendor,</strong> for cancellation of the
 		event. The <strong>Vendor</strong> acknowledges and understands that the sole remedy for any claim of
 		damages arising out of, or relating to, a cancellation shall be a refund of deposits.</p>
 
 	<p>The <strong>Vendor</strong> agrees that if prior to or during the term of this event, these premises should
 		be destroyed or rendered unfit for the purposed use by the <strong>Vendor,</strong> by any cause beyond the
-		control of the <strong>German American Society,</strong> this shall cancel and any amounts paid by the
+		control of the <strong>German-American Society,</strong> this shall cancel and any amounts paid by the
 		<strong>Vendor</strong> shall be refunded.</p>
 
 	<h3 class="gv-ul">LIABILITY</h3>
 	<p>If <strong>Vendor</strong> supplies food and service, the <strong>Vendor</strong> is 100% responsible for the
-		health and welfare of those attending the event. The <strong>German American Society</strong> is not
+		health and welfare of those attending the event. The <strong>German-American Society</strong> is not
 		responsible for theft of any kind or items left on the property either prior to or at the end of an event.
-		The <strong>German American Society</strong> is not liable for any injury or damage to any person, or to any
+		The <strong>German-American Society</strong> is not liable for any injury or damage to any person, or to any
 		property at any time on or around said premises from any cause whatsoever that may at any time exist from
 		the use or condition of said premises.</p>
 
-	<p>The <strong>German American Society</strong> is not responsible for damages to or loss of personal property
+	<p>The <strong>German-American Society</strong> is not responsible for damages to or loss of personal property
 		of the <strong>Vendor,</strong> which is left on the premises before, during or after the event. The
-		<strong>German American Society</strong> is further indemnified and held harmless by the
+		<strong>German-American Society</strong> is further indemnified and held harmless by the
 		<strong>Vendor</strong> for any damages due to the actions, products, services provided by the
 		<strong>Vendor</strong> or occupancy of the <strong>Vendor.</strong></p>
 
 	<p>It is further agreed that the <strong>Vendor</strong> will not assign this agreement nor sublet any part of
 		premises without written consent; that the <strong>Vendor</strong> will properly repair and replace all
 		breakages, defacements and damages, except damages caused by the elements, in a manner acceptable to
-		<strong>German American Society</strong> and subject to written approval by
-		<strong>German American Society</strong>; that the <strong>Vendor</strong> will at all times admit said
-		<strong>German American Society</strong> and its agents upon said premises to inspect, maintain and repair
+		<strong>German-American Society</strong> and subject to written approval by
+		<strong>German-American Society</strong>; that the <strong>Vendor</strong> will at all times admit said
+		<strong>German-American Society</strong> and its agents upon said premises to inspect, maintain and repair
 		the same; that at the termination of the Agreement, and at any time <strong>Vendor</strong> fails to keep
 		any of the covenants herein contained during the event, <strong>Vendor</strong> will peacefully and quietly
-		surrender to the <strong>German American Society</strong> the possession of said premises upon demand of the
-		<strong>German American Society</strong> and that such re-entry by the
-		<strong>German American Society</strong> shall not operate to defeat the
-		<strong>German American Society's</strong> right to enforce the terms of this Agreement as to payment of
+		surrender to the <strong>German-American Society</strong> the possession of said premises upon demand of the
+		<strong>German-American Society</strong> and that such re-entry by the
+		<strong>German-American Society</strong> shall not operate to defeat the
+		<strong>German-American Society's</strong> right to enforce the terms of this Agreement as to payment of
 		fees or consideration and the specific performance thereof; that the <strong>Vendor</strong> will not use or
 		permit anything which will increase the rate of insurance or which may be dangerous to life, or limb or
 		permit these premises or any part thereof to be used in a manner contrary to the laws, ordinances or
@@ -183,7 +190,7 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 
 	<h3 class="gv-ul">INSURANCE</h3>
 	<p>The <strong>Vendor</strong> must have General Liability, including Damage to Premises Rented To You, and
-		Liquor Liability (if applicable) Insurance, with the <strong>German American Society</strong> named as
+		Liquor Liability (if applicable) Insurance, with the <strong>German-American Society</strong> named as
 		Additional Insured, in the amount of no less than $1,000,000 per occurrence / $2,000.000 aggregate. This
 		policy must be Primary and Non-contributory, include Waiver of Subrogation in favor of German American
 		Society, and contain no exclusion for Cross Liability suits. Proof of insurance must be presented at least
@@ -191,7 +198,7 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 
 	<h3 class="gv-ul">INDEMNIFICATION</h3>
 	<p>The <strong>Vendor</strong> shall indemnify, defend, and hold harmless
-		<strong>German American Society</strong> from and against any and all liabilities, losses, claims, demands,
+		<strong>German-American Society</strong> from and against any and all liabilities, losses, claims, demands,
 		and actions that may arise from the providing/selling of products or services, use of the premises or a
 		breach of this Agreement, including reasonable attorneys' fees, costs, and expenses, to the extent caused
 		by the acts or omissions of <strong>Vendor,</strong> its guests, sub-contractors, suppliers, agents, or
@@ -232,10 +239,10 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array() ) {
 		<dt>(Tax Exempt#)</dt>
 		<dd><?php $b( 'tax_exempt', array( 'w' => 'md', 'aria' => 'Tax exempt number' ) ); ?> (if applicable)</dd>
 
-		<dt>Name of <strong>German American Society</strong> officer signing:</dt>
+		<dt>Name of <strong>German-American Society</strong> officer signing:</dt>
 		<dd><?php $b( 'gas_officer', array( 'w' => 'xl', 'club' => true, 'aria' => 'Society officer name' ) ); ?></dd>
 
-		<dt>Signature of the <strong>German American Society</strong>:</dt>
+		<dt>Signature of the <strong>German-American Society</strong>:</dt>
 		<dd><?php $b( 'sign_gas', array( 'w' => 'lg', 'club' => true, 'aria' => 'Society signature' ) ); ?>
 			Date: <?php $b( 'sign_gas_date', array( 'w' => 'md', 'club' => true, 'aria' => 'Society signature date' ) ); ?></dd>
 	</dl>

@@ -2086,6 +2086,13 @@ final class GASF_CRM_Selftest {
 		$this->ok( false !== strpos( $html, 'CANCELLATION POLICY' ), 'contract: the cancellation terms are on the page' );
 		$this->ok( false !== strpos( $html, 'INDEMNIFICATION' ), 'contract: the indemnification clause is on the page' );
 		$this->ok( false !== strpos( $html, 'name="f[vendor_legal]"' ), 'contract: the blanks are fillable fields' );
+
+		// The club's name is hyphenated, where the source PDF has it open. That
+		// is a deliberate departure on the club's instruction, and it is exactly
+		// the kind of thing somebody diffing against the paper would helpfully
+		// undo -- so it is pinned rather than left to a comment nobody reads.
+		$this->ok( false === strpos( $html, 'German American Society' ), 'contract: the society name is hyphenated throughout' );
+		$this->ok( false !== strpos( $html, 'German-American Society' ), 'contract: the hyphenated name is present' );
 	}
 
 	/**

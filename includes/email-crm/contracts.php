@@ -446,7 +446,7 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 	}
 
 	if ( ! empty( $args['club'] ) ) {
-		echo '<span class="gv-club ' . esc_attr( $w ) . '" title="Completed by the German American Society"></span>';
+		echo '<span class="gv-club ' . esc_attr( $w ) . '" title="Completed by the German-American Society"></span>';
 		return;
 	}
 
