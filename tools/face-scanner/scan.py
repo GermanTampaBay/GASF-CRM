@@ -4265,6 +4265,9 @@ def scan(
     total_kept = 0
     total_captions = 0
     deferred_ids = set()
+    # The subset of the above that means the SERVER wants to be left alone.
+    # A photo we skipped because the captioner is off is not that photo.
+    backoff_ids = set()
     # Latched the first time the local captioner refuses a connection: it will
     # not come up mid-run, and asking once per photo costs a timeout each.
     captioner_down = False
@@ -4367,11 +4370,12 @@ def scan(
                             if verbose:
                                 print(f"  #{photo_id}: caption quarantined after repeated deterministic failures")
                         else:
-                            deferred_ids.add(photo_id)
+                            _defer(deferred_ids, backoff_ids, photo_id, back_off=False)
                             if verbose:
                                 print(f"  #{photo_id}: deterministic caption failure ({n}/{QUARANTINE_FAILS}) — {err}")
                     else:
-                        deferred_ids.add(photo_id)
+                        # A real one: the photo itself, or the far end.
+                        _defer(deferred_ids, backoff_ids, photo_id)
                         if verbose:
                             print(f"  #{photo_id}: temporary failure left in queue — {err}")
                     continue
@@ -4437,7 +4441,9 @@ def scan(
                 # timeout each and a screen of identical urllib3 text; the photos
                 # stay pending either way and are captioned on a later pass.
                 if needs_caption and captioner_down:
-                    deferred_ids.add(photo_id)
+                    # Left for a later pass, but NOT counted against the stop:
+                    # the captioner being off is not the server asking for room.
+                    _defer(deferred_ids, backoff_ids, photo_id, back_off=False)
                     needs_caption = False
 
                 if needs_caption and image_bytes is not None:
@@ -4471,11 +4477,11 @@ def scan(
                                 if verbose:
                                     print(f"  #{photo_id}: caption quarantined after {n} deterministic failures")
                             else:
-                                deferred_ids.add(photo_id)
+                                _defer(deferred_ids, backoff_ids, photo_id, back_off=False)
                                 if verbose:
                                     print(f"  #{photo_id}: deterministic caption failure ({n}/{QUARANTINE_FAILS}) — {e}")
                         else:
-                            deferred_ids.add(photo_id)
+                            _defer(deferred_ids, backoff_ids, photo_id, back_off=False)
                             if isinstance(e, requests.exceptions.ConnectionError) and not captioner_down:
                                 captioner_down = True
                                 print("  captions skipped for this run: " + _caption_error_line(e))
@@ -4516,7 +4522,9 @@ def scan(
                 processed.update(int(photo_id) for photo_id in acknowledged)
             else:
                 fallback_seen += int(out.get("photos", 0))
-            deferred_ids.update(int(photo_id) for photo_id in (out.get("busy_ids") or []))
+            # The server naming rows it could not take IS the back-off signal.
+            for busy in (out.get("busy_ids") or []):
+                _defer(deferred_ids, backoff_ids, int(busy))
             total_kept += int(out.get("suggestions", 0))
             if not caption_endpoint:
                 total_captions += int(out.get("captions", 0))
@@ -4527,13 +4535,42 @@ def scan(
                 processed.update(int(photo_id) for photo_id in acknowledged)
             else:
                 fallback_seen += int(out.get("photos", 0))
-            deferred_ids.update(int(photo_id) for photo_id in (out.get("busy_ids") or []))
+            # The server naming rows it could not take IS the back-off signal.
+            for busy in (out.get("busy_ids") or []):
+                _defer(deferred_ids, backoff_ids, int(busy))
             total_captions += int(out.get("captions", 0))
         total_seen += len(processed) + fallback_seen
-        if len(deferred_ids) >= 100:
+        if len(backoff_ids) >= 100:
             if verbose:
-                print("100 temporary failures deferred; stopping this pass")
+                print(
+                    f"{len(backoff_ids)} photo(s) the server could not take right now; "
+                    "stopping this pass to let it settle. Everything already sent is saved."
+                )
             return total_seen
+
+
+def _defer(deferred, backoff, photo_id, back_off=True):
+    """
+    Leave a photo in the queue, and say whether that is also a reason to STOP.
+
+    Two different things were being counted as one. A photo can be left for the
+    next run because the SERVER could not take it - it is locked, or busy - and
+    a hundred of those means the far end is struggling and the polite thing is
+    to go away for a while. Or it can be left because the LOCAL CAPTIONER is not
+    running, which says nothing about the server at all.
+
+    Lumping them together meant switching Ollama off silently capped every run
+    at a hundred photos: the face work was being done and sent perfectly well,
+    and the pass stopped anyway, announcing "100 temporary failures" when
+    nothing had failed. It read like a server problem and looked like one in the
+    log - the one line that explained it scrolled past a thousand lines earlier.
+
+    Both kinds still go in `deferred` so this run stops re-fetching them. Only
+    the server's kind goes in `backoff`.
+    """
+    deferred.add(photo_id)
+    if back_off:
+        backoff.add(photo_id)
 
 
 def _fail_key(engine, photo_id):
@@ -4955,6 +4992,18 @@ def selftest():
     class _FakeResp:
         def __init__(self, text):
             self.text = text
+    # Switching the captioner off used to cap every run at a hundred photos:
+    # the face work was done and sent, and the pass stopped anyway, reporting
+    # "100 temporary failures" when nothing had failed.
+    _def, _back = set(), set()
+    _defer(_def, _back, 11, back_off=False)   # captioner is off
+    _defer(_def, _back, 12, back_off=False)   # ditto
+    _defer(_def, _back, 13)                   # the server said it was busy
+    check_that(
+        _def == {11, 12, 13} and _back == {13},
+        "scanner: a downed captioner defers a photo without counting toward the stop",
+    )
+
     _api_probe = Api.__new__(Api)
     _api_probe._authed_once = False
     check_that(
