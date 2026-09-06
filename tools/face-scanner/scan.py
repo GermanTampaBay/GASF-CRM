@@ -114,7 +114,7 @@ DB_PATH = HERE / "faces.db"
 # in it — with a 406 before WordPress ever sees the request. This UA gets
 # through, and it is what --check must send too, or the doctor reports a healthy
 # server as broken (or a broken one as fine).
-USER_AGENT = "Mozilla/5.0 (compatible; GASF-CRM-FaceClient/1.1; +https://germantampabay.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; GASF-CRM-FaceClient/1.2; +https://germantampabay.com)"
 
 # How close two faces must be to count as the same person, measured as a
 # distance where LOWER is more alike. The number lives on the backend because
