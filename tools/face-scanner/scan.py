@@ -114,7 +114,7 @@ DB_PATH = HERE / "faces.db"
 # in it — with a 406 before WordPress ever sees the request. This UA gets
 # through, and it is what --check must send too, or the doctor reports a healthy
 # server as broken (or a broken one as fine).
-USER_AGENT = "Mozilla/5.0 (compatible; GASF-CRM-FaceClient/1.2; +https://germantampabay.com)"
+USER_AGENT = "Mozilla/5.0 (compatible; GASF-CRM-FaceClient/1.3; +https://germantampabay.com)"
 
 # How close two faces must be to count as the same person, measured as a
 # distance where LOWER is more alike. The number lives on the backend because
@@ -396,6 +396,11 @@ class Api:
     AUTH_RETRIES = 5
     AUTH_BACKOFF = 2.0
 
+    # A transient status (RETRYABLE_HTTP) or a dropped connection: the shared
+    # host having a bad minute, which every route rides out the same way.
+    SOFT_RETRIES = 4
+    SOFT_BACKOFF = 1.5
+
     def _auth_verdict(self, r, url):
         """
         Tell a wrong key from a working key that stopped working for a moment.
@@ -429,10 +434,47 @@ class Api:
         return "retry"
 
     def _send(self, method, url, **kw):
-        """One request, retried when the host is the one saying no."""
+        """
+        One request, retried whenever the answer is not the caller's problem.
+
+        Two kinds of "not yet", counted separately because they want different
+        patience. A refusal (401/403/406) may be the key or may be a doorman,
+        and _auth_verdict decides. A 503, a 500, a 429 or a dropped connection
+        is the shared host being unwell, and the answer is always to wait a
+        moment and ask again.
+
+        The transient half used to live in image() alone. So fetching a photo
+        rode out a 503, and posting the captions it produced did not: get() and
+        post() went straight to raise_for_status, and a single 503 on the
+        caption POST ended a run with a Python traceback after a hundred and
+        ninety-seven photos had been scanned and sent. Same host, same weather,
+        opposite handling - because the retry had been written where the bug
+        was noticed rather than where it belonged.
+        """
         last = ""
-        for attempt in range(1, self.AUTH_RETRIES + 1):
-            r = self.s.request(method, url, **kw)
+        auth_tries = 0
+        soft_tries = 0
+        while True:
+            try:
+                r = self.s.request(method, url, **kw)
+            except requests.RequestException as e:
+                # The connection itself, not an answer. Same patience.
+                soft_tries += 1
+                if soft_tries >= self.SOFT_RETRIES:
+                    raise
+                time.sleep(self.SOFT_BACKOFF * soft_tries)
+                continue
+
+            if r.status_code in RETRYABLE_HTTP:
+                soft_tries += 1
+                if soft_tries >= self.SOFT_RETRIES:
+                    # Out of patience: hand back the real response so the caller
+                    # raises with the server's own status and body rather than
+                    # something this function invented.
+                    return r
+                time.sleep(self.SOFT_BACKOFF * soft_tries)
+                continue
+
             if r.status_code not in (401, 403, 406):
                 # Only a real answer counts as proof the key works. A 404 is the
                 # route not matching, which happens before any key is looked at.
@@ -440,6 +482,8 @@ class Api:
                     self._authed_once = True
                 return r
 
+            auth_tries += 1
+            attempt = auth_tries
             verdict = self._auth_verdict(r, url)
             snippet = " ".join((r.text or "").split())[:220]
             if verdict == "fatal":
@@ -454,6 +498,8 @@ class Api:
                 # Longer each time. A rate limiter wants to be left alone, and
                 # hammering it is how a pause becomes a ban.
                 time.sleep(self.AUTH_BACKOFF * attempt)
+                continue
+            break
 
         if self._authed_once:
             sys.exit(
@@ -487,24 +533,12 @@ class Api:
         origin = (parts.scheme + "://" + parts.netloc).rstrip("/")
         if origin != self.origin:
             raise RuntimeError(f"refusing cross-origin image URL: {origin}")
-        attempts = 4
-        for attempt in range(1, attempts + 1):
-            try:
-                # Same treatment as the JSON routes: a refusal from the host
-                # is retried, a refusal from the CRM stops the run.
-                r = self._send("GET", url, timeout=120)
-                if r.status_code in RETRYABLE_HTTP:
-                    raise requests.HTTPError(
-                        f"{r.status_code} {r.reason}",
-                        response=r,
-                    )
-                r.raise_for_status()
-                return r.content
-            except requests.RequestException:
-                if attempt >= attempts:
-                    raise
-                # Brief backoff for host throttling/transient 5xx.
-                time.sleep(0.6 * attempt)
+        # No retry loop of its own any more: _send rides out transient statuses
+        # and dropped connections for every route, which is what this loop used
+        # to do here and nowhere else.
+        r = self._send("GET", url, timeout=120)
+        r.raise_for_status()
+        return r.content
 
 
 # --------------------------------------------------------------------------- backends
@@ -4515,30 +4549,46 @@ def scan(
 
         processed = set()
         fallback_seen = 0
-        if face_results:
-            out = api.post("/suggest", {"photos": face_results})
-            acknowledged = out.get("processed_ids")
-            if isinstance(acknowledged, list):
-                processed.update(int(photo_id) for photo_id in acknowledged)
-            else:
-                fallback_seen += int(out.get("photos", 0))
-            # The server naming rows it could not take IS the back-off signal.
-            for busy in (out.get("busy_ids") or []):
-                _defer(deferred_ids, backoff_ids, int(busy))
-            total_kept += int(out.get("suggestions", 0))
-            if not caption_endpoint:
+        # A status that survived _send's backoff means the host is properly
+        # unwell rather than merely busy. Say so in a sentence and stop: a
+        # traceback after two hundred photos reads as though the run was wasted,
+        # and it was not. Everything acknowledged is saved, and anything not
+        # acknowledged is still pending server-side and comes round again.
+        try:
+            if face_results:
+                out = api.post("/suggest", {"photos": face_results})
+                acknowledged = out.get("processed_ids")
+                if isinstance(acknowledged, list):
+                    processed.update(int(photo_id) for photo_id in acknowledged)
+                else:
+                    fallback_seen += int(out.get("photos", 0))
+                # The server naming rows it could not take IS the back-off signal.
+                for busy in (out.get("busy_ids") or []):
+                    _defer(deferred_ids, backoff_ids, int(busy))
+                total_kept += int(out.get("suggestions", 0))
+                if not caption_endpoint:
+                    total_captions += int(out.get("captions", 0))
+            if caption_results:
+                out = api.post("/caption", {"photos": caption_results})
+                acknowledged = out.get("processed_ids")
+                if isinstance(acknowledged, list):
+                    processed.update(int(photo_id) for photo_id in acknowledged)
+                else:
+                    fallback_seen += int(out.get("photos", 0))
+                # The server naming rows it could not take IS the back-off signal.
+                for busy in (out.get("busy_ids") or []):
+                    _defer(deferred_ids, backoff_ids, int(busy))
                 total_captions += int(out.get("captions", 0))
-        if caption_results:
-            out = api.post("/caption", {"photos": caption_results})
-            acknowledged = out.get("processed_ids")
-            if isinstance(acknowledged, list):
-                processed.update(int(photo_id) for photo_id in acknowledged)
-            else:
-                fallback_seen += int(out.get("photos", 0))
-            # The server naming rows it could not take IS the back-off signal.
-            for busy in (out.get("busy_ids") or []):
-                _defer(deferred_ids, backoff_ids, int(busy))
-            total_captions += int(out.get("captions", 0))
+        except requests.RequestException as e:
+            total_seen += len(processed) + fallback_seen
+            print("the server could not take this batch: " + _http_error_line(e))
+            print(
+                "  It was asked %d times over several seconds first, so this is the host "
+                "rather than a blip. Everything it acknowledged is saved; the rest is "
+                "still pending and comes round again. Wait a few minutes and run again."
+                % Api.SOFT_RETRIES
+            )
+            return total_seen
         total_seen += len(processed) + fallback_seen
         if len(backoff_ids) >= 100:
             if verbose:
@@ -4606,6 +4656,18 @@ def _clear_caption_failure(conn, caption_key, photo_id):
         (_caption_fail_key(caption_key, photo_id),),
     )
     conn.commit()
+
+
+def _http_error_line(err):
+    """A server refusal as one readable clause, never a traceback."""
+    if isinstance(err, requests.HTTPError) and err.response is not None:
+        body = " ".join((err.response.text or "").split())[:160]
+        return "HTTP %d%s" % (err.response.status_code, (" - " + body) if body else "")
+    if isinstance(err, requests.Timeout):
+        return "it stopped answering"
+    if isinstance(err, requests.ConnectionError):
+        return "the connection dropped"
+    return str(err) or err.__class__.__name__
 
 
 def _is_retryable_error(err):
@@ -5002,6 +5064,21 @@ def selftest():
     check_that(
         _def == {11, 12, 13} and _back == {13},
         "scanner: a downed captioner defers a photo without counting toward the stop",
+    )
+
+    # 503 lives in RETRYABLE_HTTP, and used to be retried on the image route and
+    # nowhere else - so a photo survived a bad minute and the captions made from
+    # it did not.
+    check_that(
+        503 in RETRYABLE_HTTP and 500 in RETRYABLE_HTTP and 429 in RETRYABLE_HTTP
+        and 404 not in RETRYABLE_HTTP and 401 not in RETRYABLE_HTTP,
+        "scanner: a transient status is the host having a bad minute, not an answer",
+    )
+    check_that(
+        _http_error_line(
+            requests.HTTPError("boom", response=type("R", (), {"status_code": 503, "text": "busy"})())
+        ) == "HTTP 503 - busy",
+        "scanner: a server refusal reads as a sentence, not a traceback",
     )
 
     _api_probe = Api.__new__(Api)
