@@ -2517,6 +2517,68 @@ final class GASF_CRM_Selftest {
 		$this->ok( false === strpos( $admin, 'name="vendor_' ), 'settings: wp-admin no longer offers the fields' );
 	}
 
+	/**
+	 * What the form insists on, and the three things it deliberately does not.
+	 *
+	 * The exceptions are the interesting half. Each one looks like an oversight
+	 * to anybody reading the list quickly, and "make everything required" is a
+	 * one-line change somebody will eventually make in good faith -- so each is
+	 * pinned with the reason it is not required sitting next to it.
+	 */
+	public function test_vendor_required_and_optional() {
+		$req = gasf_crm_vendor_required_fields();
+
+		foreach ( array(
+			'vendor_legal', 'event_name', 'event_date', 'vendor_address', 'vendor_city',
+			'vendor_state', 'vendor_zip', 'poc_name', 'poc_mobile', 'poc_email',
+			'sign_vendor', 'sign_vendor_date', 'agr_day', 'agr_month', 'agr_year',
+		) as $key ) {
+			$this->ok( array_key_exists( $key, $req ), 'required: ' . $key . ' must be filled in' );
+		}
+
+		// The agreement itself says "(if applicable)". Requiring it would stop a
+		// vendor applying over a field their own contract calls optional.
+		$this->ok( ! array_key_exists( 'tax_exempt', $req ), 'optional: the tax exempt number stays optional' );
+
+		// A sole trader signs alone, which is the common case.
+		$this->ok( ! array_key_exists( 'sign_cosigner', $req ), 'optional: a co-signer is not demanded' );
+		$this->ok( ! array_key_exists( 'sign_cosigner_date', $req ), 'optional: nor a co-signer date' );
+
+		// One of three, never all three: plenty of good vendors run a Facebook
+		// page and nothing else, and demanding a website would be demanding they
+		// invent one.
+		$links = gasf_crm_vendor_link_fields();
+		$this->ok( 3 === count( $links ), 'links: three places to be found' );
+		foreach ( array( 'website', 'facebook', 'instagram' ) as $key ) {
+			$this->ok( array_key_exists( $key, $links ), 'links: ' . $key . ' counts towards the one required' );
+			$this->ok( ! array_key_exists( $key, $req ), 'links: ' . $key . ' is not required on its own' );
+		}
+
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
+		$html = gasf_crm_vendor_shortcode();
+		$this->ok( false !== strpos( $html, 'Please give at least one' ), 'links: the form says one is enough' );
+
+		/*
+		 * A preset must satisfy its own requirement.
+		 *
+		 * event_name is required AND filled from settings. If the handler ever
+		 * validates before applying the presets, every application is rejected
+		 * for omitting an event name the vendor was never shown a field for --
+		 * and the form would look, from the outside, simply broken.
+		 */
+		update_option( 'gasf_crm_vendor', array(
+			'terms_version' => 'selftest',
+			'event_name'    => 'Selftest Market',
+			'event_date'    => '5 December 2026',
+		), false );
+		$locked = gasf_crm_vendor_locked_values();
+		foreach ( array( 'event_name', 'event_date' ) as $key ) {
+			$this->ok( array_key_exists( $key, $locked ) && array_key_exists( $key, $req ),
+				'required: ' . $key . ' is required and supplied by the organiser' );
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

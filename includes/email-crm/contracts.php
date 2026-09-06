@@ -483,15 +483,64 @@ function gasf_crm_vendor_vendor_fields() {
 	);
 }
 
-/** Blanks without which the agreement says nothing, and what to call each one. */
+/**
+ * Blanks without which the agreement says nothing, and what to call each one.
+ *
+ * Nearly everything, because a contract with holes in it is not much of a
+ * contract and chasing a vendor for their ZIP code in November is nobody's idea
+ * of a good time.
+ *
+ * Three things are deliberately NOT here, and each for a reason that would
+ * survive an argument:
+ *
+ *   tax_exempt  -- the agreement itself says "(if applicable)". Most vendors
+ *                  have no exemption number, and demanding one would stop them
+ *                  applying over a field their own contract calls optional.
+ *   sign_cosigner and its date
+ *               -- a sole trader signs alone, which is the common case. The
+ *                  paper leaves the line blank in exactly that situation.
+ *   the certificate of insurance for CRAFT vendors
+ *               -- the club's own instruction: food attaches it now, craft may
+ *                  send it later. The contract's thirty-days-prior deadline is
+ *                  the real gate, and it bites long after this form.
+ *
+ * The event date is here but is filled from settings when the organiser has set
+ * one, so it only ever falls to the vendor if the club left it blank.
+ */
 function gasf_crm_vendor_required_fields() {
 	return array(
-		'vendor_legal' => 'the vendor or business name',
-		'event_name'   => 'the type or name of the event',
-		'poc_name'     => 'the point of contact name',
-		'poc_mobile'   => 'a contact mobile number',
-		'poc_email'    => 'a contact email address',
-		'sign_vendor'  => 'your signature',
+		'agr_day'          => 'the day of the month this agreement is made',
+		'agr_month'        => 'the month this agreement is made',
+		'agr_year'         => 'the year this agreement is made',
+		'vendor_legal'     => 'the vendor or business name',
+		'event_date'       => 'the date of the event',
+		'event_name'       => 'the type or name of the event',
+		'vendor_address'   => 'your address',
+		'vendor_city'      => 'your city',
+		'vendor_state'     => 'your state',
+		'vendor_zip'       => 'your ZIP code',
+		'poc_name'         => 'the point of contact name',
+		'poc_mobile'       => 'a contact mobile number',
+		'poc_email'        => 'a contact email address',
+		'sign_vendor'      => 'your signature',
+		'sign_vendor_date' => 'the date you signed',
+	);
+}
+
+/**
+ * At least one of these, not all three.
+ *
+ * The club uses them to promote the event and to look at the work before
+ * deciding, so an application with no way to see the vendor at all is one
+ * somebody has to chase. But plenty of good vendors run a Facebook page and
+ * nothing else, and demanding a website from them would be demanding they
+ * invent one.
+ */
+function gasf_crm_vendor_link_fields() {
+	return array(
+		'website'   => 'a website',
+		'facebook'  => 'a Facebook page',
+		'instagram' => 'an Instagram account',
 	);
 }
 
@@ -755,8 +804,9 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		</fieldset>
 
 		<fieldset>
-			<legend>Where we can see your work</legend>
-			<p class="gv-legend">We use these to help promote the event, and to see what you make.</p>
+			<legend>Where we can see your work <span class="gv-req">(at least one)</span></legend>
+			<p class="gv-legend">We use these to help promote the event, and to see what you make.
+				<strong>Please give at least one</strong> &mdash; whichever you actually use is fine.</p>
 			<p><label for="gv-website">Website</label>
 				<input type="text" name="a[website]" id="gv-website" maxlength="200" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['website'] ?? '' ); ?>" placeholder="ourshop.com"></p>
 			<p><label for="gv-facebook">Facebook</label>
@@ -768,7 +818,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<?php /* ---------------------------------------------------- craft */ ?>
 		<div class="gv-branch" data-for="craft">
 			<fieldset>
-				<legend>What you make</legend>
+				<legend>What you make <span class="gv-req">(required)</span></legend>
 				<p class="gv-legend">Tick everything that applies.</p>
 				<div class="gv-checks">
 					<?php foreach ( gasf_crm_vendor_craft_types() as $key => $label ) : ?>
@@ -783,7 +833,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 			</fieldset>
 
 			<fieldset>
-				<legend>Your space</legend>
+				<legend>Your space <span class="gv-req">(required)</span></legend>
 				<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
 					<label class="gv-radio gv-block">
 						<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" <?php checked( $booth, $key ); ?>>
@@ -796,7 +846,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<?php /* ----------------------------------------------------- food */ ?>
 		<div class="gv-branch" data-for="food">
 			<fieldset>
-				<legend>Permits and power</legend>
+				<legend>Permits and power <span class="gv-req">(required for food vendors)</span></legend>
 				<p><label for="gv-permit">Health permit number(s)</label>
 					<input type="text" name="a[health_permit]" id="gv-permit" maxlength="120" class="gv-in gv-w-lg" value="<?php echo esc_attr( $app['health_permit'] ?? '' ); ?>"></p>
 
@@ -810,14 +860,14 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		</div>
 
 		<fieldset>
-			<legend>Tell us about what you are selling</legend>
+			<legend>Tell us about what you are selling <span class="gv-req">(required)</span></legend>
 			<p class="gv-legend">In your own words. <strong>This goes into the agreement below</strong> as the
 				description of what you are approved to sell, so please be specific.</p>
 			<p><textarea name="a[description]" id="gv-description" rows="5" maxlength="2000" class="gv-in gv-w-full" required><?php echo esc_textarea( $app['description'] ?? '' ); ?></textarea></p>
 		</fieldset>
 
 		<fieldset>
-			<legend>Photographs</legend>
+			<legend>Photographs <span class="gv-req">(all three required)</span></legend>
 			<p class="gv-legend">Three photographs, please. The first should be your set-up, so we can picture
 				where you will go.</p>
 			<?php foreach ( gasf_crm_vendor_photo_slots( $type ? $type : 'craft' ) as $i => $label ) : ?>
@@ -904,6 +954,7 @@ function gasf_crm_vendor_styles() {
 .gv-app fieldset { border: 0; border-top: 1px solid #e4e4e4; padding: 1rem 0 0; margin: 1.5rem 0 0; }
 .gv-app fieldset:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
 .gv-app legend { font-weight: 700; font-size: 1.05rem; padding: 0; }
+.gv-req { font-weight: 400; font-size: 0.85rem; color: #a03000; }
 .gv-app label { display: inline-block; margin-bottom: 0.2rem; }
 .gv-app textarea.gv-in { border: 1px solid #444; padding: 0.5rem; }
 .gv-kind .gv-radio { display: inline-block; margin-right: 1.5rem; font-weight: 700; font-size: 1.05rem; }
@@ -1196,6 +1247,13 @@ function gasf_crm_vendor_handle() {
 
 	$values = gasf_crm_vendor_submitted_fields();
 	$locked = gasf_crm_vendor_locked_values();
+
+	// Applied BEFORE anything is checked. These blanks are required, and the
+	// organiser has already answered them -- validating first would reject a
+	// perfectly good application for leaving out the event name it was never
+	// asked for.
+	foreach ( $locked as $k => $v ) { $values[ $k ] = $v; }
+
 	$app    = gasf_crm_vendor_posted_app();
 	$type   = gasf_crm_vendor_posted_type();
 	$crafts = gasf_crm_vendor_posted_crafts();
@@ -1215,6 +1273,14 @@ function gasf_crm_vendor_handle() {
 
 	if ( '' === trim( (string) ( $app['description'] ?? '' ) ) ) {
 		$errors[] = 'Please describe what you will be selling.';
+	}
+
+	$links = 0;
+	foreach ( gasf_crm_vendor_link_fields() as $key => $label ) {
+		if ( '' !== trim( (string) ( $app[ $key ] ?? '' ) ) ) { $links++; }
+	}
+	if ( 0 === $links ) {
+		$errors[] = 'Please give at least one of a website, a Facebook page, or an Instagram account, so we can see your work.';
 	}
 
 	if ( 'craft' === $type ) {
@@ -1348,10 +1414,6 @@ function gasf_crm_vendor_handle() {
 	// It is copied in before the snapshot is taken, so what they sign says what
 	// they are approved to sell.
 	$values['desc_full'] = (string) ( $app['description'] ?? '' );
-
-	// Whatever the organiser fixed overrides whatever arrived, before the
-	// snapshot is taken, so the signed document carries the club's numbers.
-	foreach ( $locked as $k => $v ) { $values[ $k ] = $v; }
 
 	/*
 	 * Snapshot the agreement AS RENDERED, not merely its version string.
