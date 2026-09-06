@@ -544,6 +544,19 @@ function gasf_crm_vendor_link_fields() {
 	);
 }
 
+/**
+ * The required marker.
+ *
+ * aria-hidden, deliberately. Every field it sits beside already carries the
+ * required attribute and a label, which is what a screen reader announces;
+ * reading out a bare asterisk on top of that is noise. The star is for people
+ * scanning the page with their eyes, and the key at the top of the form says
+ * what it means -- a red mark nobody has explained is just decoration.
+ */
+function gasf_crm_vendor_star() {
+	return ' <span class="gv-star" aria-hidden="true">*</span>';
+}
+
 /** Render context for gasf_crm_vendor_blank(), set by gasf_crm_vendor_contract(). */
 function gasf_crm_vendor_ctx( $set = null ) {
 	static $ctx = array( 'mode' => 'form', 'values' => array(), 'locked' => array() );
@@ -611,6 +624,13 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 		esc_attr( isset( $args['aria'] ) ? $args['aria'] : $key ),
 		$required ? ' required' : ''
 	);
+
+	// The blanks in the agreement sit inside sentences rather than beside
+	// labels, so the star is the only thing telling somebody scanning the page
+	// which of them they cannot leave.
+	if ( $required ) {
+		echo wp_kses( gasf_crm_vendor_star(), array( 'span' => array( 'class' => array(), 'aria-hidden' => array() ) ) );
+	}
 }
 
 /* --------------------------------------------------------------------------
@@ -794,7 +814,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 	?>
 	<div class="gv-app">
 		<fieldset class="gv-kind">
-			<legend>What kind of vendor are you?</legend>
+			<legend>What kind of vendor are you?<span class="gv-star" aria-hidden="true">*</span></legend>
 			<?php foreach ( $types as $key => $label ) : ?>
 				<label class="gv-radio">
 					<input type="radio" name="vendor_type" value="<?php echo esc_attr( $key ); ?>" <?php checked( $type, $key ); ?> required>
@@ -804,9 +824,11 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		</fieldset>
 
 		<fieldset>
-			<legend>Where we can see your work <span class="gv-req">(at least one)</span></legend>
-			<p class="gv-legend">We use these to help promote the event, and to see what you make.
-				<strong>Please give at least one</strong> &mdash; whichever you actually use is fine.</p>
+			<legend>Where we can see your work <span class="gv-req">&mdash; enter at least one</span></legend>
+			<p class="gv-oneof"><strong>Enter at least one of these three.</strong> A star on each would be
+				a lie, since no single one is required &mdash; but we do need somewhere to see your work.
+				Whichever you actually use is fine.</p>
+			<p class="gv-legend">We also use them to help promote the event.</p>
 			<p><label for="gv-website">Website</label>
 				<input type="text" name="a[website]" id="gv-website" maxlength="200" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['website'] ?? '' ); ?>" placeholder="ourshop.com"></p>
 			<p><label for="gv-facebook">Facebook</label>
@@ -818,7 +840,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<?php /* ---------------------------------------------------- craft */ ?>
 		<div class="gv-branch" data-for="craft">
 			<fieldset>
-				<legend>What you make <span class="gv-req">(required)</span></legend>
+				<legend>What you make<span class="gv-star" aria-hidden="true">*</span></legend>
 				<p class="gv-legend">Tick everything that applies.</p>
 				<div class="gv-checks">
 					<?php foreach ( gasf_crm_vendor_craft_types() as $key => $label ) : ?>
@@ -833,7 +855,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 			</fieldset>
 
 			<fieldset>
-				<legend>Your space <span class="gv-req">(required)</span></legend>
+				<legend>Your space<span class="gv-star" aria-hidden="true">*</span></legend>
 				<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
 					<label class="gv-radio gv-block">
 						<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" <?php checked( $booth, $key ); ?>>
@@ -846,32 +868,32 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<?php /* ----------------------------------------------------- food */ ?>
 		<div class="gv-branch" data-for="food">
 			<fieldset>
-				<legend>Permits and power <span class="gv-req">(required for food vendors)</span></legend>
-				<p><label for="gv-permit">Health permit number(s)</label>
+				<legend>Permits and power<span class="gv-star" aria-hidden="true">*</span> <span class="gv-req">for food vendors</span></legend>
+				<p><label for="gv-permit">Health permit number(s)<span class="gv-star" aria-hidden="true">*</span></label>
 					<input type="text" name="a[health_permit]" id="gv-permit" maxlength="120" class="gv-in gv-w-lg" value="<?php echo esc_attr( $app['health_permit'] ?? '' ); ?>"></p>
 
 				<p class="gv-rule"><strong>Generators are not permitted at our events.</strong>
 					They are too loud for the evening programme. Tell us what power you need and we will
 					run a cord to you where we can.</p>
 
-				<p><label for="gv-power">What power do you need?</label>
+				<p><label for="gv-power">What power do you need?<span class="gv-star" aria-hidden="true">*</span></label>
 					<input type="text" name="a[power_needs]" id="gv-power" maxlength="300" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['power_needs'] ?? '' ); ?>" placeholder="e.g. one 20A outlet for a warmer"></p>
 			</fieldset>
 		</div>
 
 		<fieldset>
-			<legend>Tell us about what you are selling <span class="gv-req">(required)</span></legend>
+			<legend>Tell us about what you are selling<span class="gv-star" aria-hidden="true">*</span></legend>
 			<p class="gv-legend">In your own words. <strong>This goes into the agreement below</strong> as the
 				description of what you are approved to sell, so please be specific.</p>
 			<p><textarea name="a[description]" id="gv-description" rows="5" maxlength="2000" class="gv-in gv-w-full" required><?php echo esc_textarea( $app['description'] ?? '' ); ?></textarea></p>
 		</fieldset>
 
 		<fieldset>
-			<legend>Photographs <span class="gv-req">(all three required)</span></legend>
+			<legend>Photographs<span class="gv-star" aria-hidden="true">*</span> <span class="gv-req">all three</span></legend>
 			<p class="gv-legend">Three photographs, please. The first should be your set-up, so we can picture
 				where you will go.</p>
 			<?php foreach ( gasf_crm_vendor_photo_slots( $type ? $type : 'craft' ) as $i => $label ) : ?>
-				<p><label for="gv-photo<?php echo (int) $i; ?>"><?php echo esc_html( $label ); ?></label>
+				<p><label for="gv-photo<?php echo (int) $i; ?>"><?php echo esc_html( $label ); ?><span class="gv-star" aria-hidden="true">*</span></label>
 					<input type="file" name="photos[]" id="gv-photo<?php echo (int) $i; ?>" accept="image/jpeg,image/png,image/webp,image/heic,.jpg,.jpeg,.png,.webp,.heic"></p>
 			<?php endforeach; ?>
 
@@ -955,6 +977,9 @@ function gasf_crm_vendor_styles() {
 .gv-app fieldset:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
 .gv-app legend { font-weight: 700; font-size: 1.05rem; padding: 0; }
 .gv-req { font-weight: 400; font-size: 0.85rem; color: #a03000; }
+.gv-star { color: #c0392b; font-weight: 700; }
+.gv-key { background: #f4f4f2; color: #111; border-left: 4px solid #c0392b; padding: 0.6rem 0.9rem; margin: 0 0 1.25rem; font-size: 0.95rem; }
+.gv-oneof { background: #fff6e0; color: #111; border: 1px solid #EF9F27; padding: 0.6rem 0.9rem; }
 .gv-app label { display: inline-block; margin-bottom: 0.2rem; }
 .gv-app textarea.gv-in { border: 1px solid #444; padding: 0.5rem; }
 .gv-kind .gv-radio { display: inline-block; margin-right: 1.5rem; font-weight: 700; font-size: 1.05rem; }
@@ -1077,6 +1102,9 @@ function gasf_crm_vendor_shortcode() {
 					<p class="gv-legend">Choosing an event here fills in the event name and date in the agreement below.</p>
 				</div>
 			<?php endif; ?>
+
+			<p class="gv-key"><span class="gv-star" aria-hidden="true">*</span> marks something we cannot
+				process the application without. Everything else is optional.</p>
 
 			<?php gasf_crm_vendor_application_section( $app, $type, $crafts, $booth ); ?>
 
