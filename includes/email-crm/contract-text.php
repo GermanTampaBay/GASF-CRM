@@ -205,6 +205,12 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 		Society, and contain no exclusion for Cross Liability suits. Proof of insurance must be presented at least
 		thirty (30) days prior to event.</p>
 
+	<?php if ( 'form' === $mode ) : ?>
+		<p class="gv-note">You can attach your certificate of insurance at the bottom of this form, after the
+			signature. If you do not have it yet, send it to us when it arrives &mdash; but no vendor sets up
+			without it.</p>
+	<?php endif; ?>
+
 	<h3 class="gv-ul">INDEMNIFICATION</h3>
 	<p>The <strong>Vendor</strong> shall indemnify, defend, and hold harmless
 		<strong>German-American Society</strong> from and against any and all liabilities, losses, claims, demands,
@@ -214,17 +220,18 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 		anyone employed directly or indirectly by any of them or by anyone for whose acts any of them may be
 		liable.</p>
 
-	<dl class="gv-rows gv-money">
-		<dt>RECEIPT OF PROOF OF INSURANCE:</dt>
-		<dd>DATE: <?php $b( 'poi_date', array( 'w' => 'md', 'club' => true, 'aria' => 'Proof of insurance date' ) ); ?>
-			BY: <?php $b( 'poi_by', array( 'w' => 'lg', 'club' => true, 'aria' => 'Proof of insurance received by' ) ); ?></dd>
-
-		<dt>ADDENDA ATTACHED:</dt>
-		<dd>
-			<?php $b( 'addenda_vendor', array( 'w' => 'xs', 'club' => true, 'aria' => 'Vendor Addendum attached' ) ); ?> VENDOR ADDENDUM<br>
-			<?php $b( 'addenda_rules', array( 'w' => 'xs', 'club' => true, 'aria' => 'Rules and Regulation attached' ) ); ?> RULES AND REGULATION
-		</dd>
-	</dl>
+	<?php
+	/*
+	 * RECEIPT OF PROOF OF INSURANCE and ADDENDA ATTACHED are NOT here.
+	 *
+	 * Both are the Society's record of what it has received and enclosed, filled
+	 * in by whoever takes the certificate off the vendor -- often weeks after
+	 * this page was signed. On the vendor's copy they were four grey boxes that
+	 * could never be filled and that invited exactly the question "am I supposed
+	 * to do this?". They are in the Contracts pane, against the submission they
+	 * belong to, where somebody can actually tick them.
+	 */
+	?>
 
 	<p class="gv-attest"><strong>I HEREBY AGREE TO THE CONDITIONS FOR VENDOR USE OF PREMISES AND SIGNIFY THAT ALL
 		INFORMATION SUPPLIED BY ME IS TRUE AND CORRECT. I ASSUME ALL LIABILITY FOR THE CONDUCT OF MYSELF AND OTHERS

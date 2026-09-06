@@ -919,6 +919,8 @@ function gasf_crm_vendor_styles() {
 .gv-pay h4 { margin: 0 0 0.75rem; }
 .gv-settings { border-left: 4px solid #EF9F27; }
 .gv-pay label { display: block; }
+.gv-pay .gv-check { display: inline-block; margin-right: 1.5rem; }
+.gv-pay .gv-check input { width: auto; }
 .gv-pay input, .gv-pay textarea { width: 100%; box-sizing: border-box; }
 .gv-paygrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.6rem 1rem; }
 .gv-pick { background: #fbf6ea; color: #111; border: 1px solid #EF9F27; padding: 1rem; margin-bottom: 1.25rem; }
@@ -1610,6 +1612,14 @@ function gasf_crm_vendor_render_settings() {
 	<?php
 }
 
+/** The paper's ADDENDA ATTACHED ticks, which are the club's to make. */
+function gasf_crm_vendor_record_checks() {
+	return array(
+		'addenda_vendor' => 'Vendor Addendum attached',
+		'addenda_rules'  => 'Rules and Regulation attached',
+	);
+}
+
 /** The bookkeeping the paper form carried, which no vendor ever fills in. */
 function gasf_crm_vendor_payment_fields() {
 	return array(
@@ -1667,6 +1677,13 @@ function gasf_crm_vendor_handle_payment() {
 			? sanitize_textarea_field( (string) $raw[ $key ] )
 			: sanitize_text_field( (string) $raw[ $key ] );
 		$paid[ $key ] = function_exists( 'mb_substr' ) ? mb_substr( $v, 0, 500 ) : substr( $v, 0, 500 );
+	}
+
+	// Checkboxes are absent from a POST when unticked, so each is read as a
+	// present-or-not question rather than a value. Untick, save, and it clears.
+	foreach ( gasf_crm_vendor_record_checks() as $key => $label ) {
+		// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+		$paid[ $key ] = empty( $raw[ $key ] ) ? '' : '1';
 	}
 
 	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
@@ -1867,6 +1884,15 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 							</label>
 						<?php endforeach; ?>
 					</div>
+
+					<p class="gv-checks">
+						<?php foreach ( gasf_crm_vendor_record_checks() as $key => $label ) : ?>
+							<label class="gv-check">
+								<input type="checkbox" name="pay[<?php echo esc_attr( $key ); ?>]" value="1" <?php checked( ! empty( $paid[ $key ] ) ); ?>>
+								<?php echo esc_html( $label ); ?>
+							</label>
+						<?php endforeach; ?>
+					</p>
 
 					<p><label>Notes<br>
 						<textarea name="pay[notes]" rows="2"><?php echo esc_textarea( $paid['notes'] ?? '' ); ?></textarea></label></p>

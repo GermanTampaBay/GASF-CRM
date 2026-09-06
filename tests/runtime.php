@@ -2395,6 +2395,28 @@ final class GASF_CRM_Selftest {
 			$this->ok( false === strpos( $html, $gone ), 'money: "' . $gone . '" is not on the vendor page' );
 		}
 
+		// The club's own record-keeping is off the vendor's copy too: the receipt
+		// of insurance and the addenda ticks are filled in by whoever takes the
+		// certificate, often weeks later. On the vendor's page they were boxes
+		// that could never be filled and invited "am I supposed to do this?".
+		foreach ( array( 'RECEIPT OF PROOF OF INSURANCE', 'ADDENDA ATTACHED' ) as $gone ) {
+			$this->ok( false === strpos( $html, $gone ), 'record: "' . $gone . '" is not on the vendor page' );
+		}
+		$checks = gasf_crm_vendor_record_checks();
+		$this->ok( array_key_exists( 'addenda_vendor', $checks ) && array_key_exists( 'addenda_rules', $checks ),
+			'record: the addenda ticks are the reviewer to make' );
+
+		// The countersignature block STAYS. A contract that shows only the
+		// vendor signing reads as a one-sided undertaking rather than an
+		// agreement, and the vendor should see that the Society signs it too.
+		$this->ok( false !== strpos( $html, 'Signature of the <strong>German-American Society</strong>' ),
+			'record: the Society countersignature block remains on the contract' );
+
+		// And the vendor is told where the upload actually is, at the point they
+		// read the rule that demands it.
+		$this->ok( false !== strpos( $html, 'attach your certificate of insurance at the bottom of this form' ),
+			'record: the insurance clause points at the upload' );
+
 		// They are fields a reviewer can actually fill, which is the point.
 		$fields = gasf_crm_vendor_payment_fields();
 		foreach ( array( 'deposit_amount', 'balance_amount', 'poi_date', 'notes' ) as $key ) {
