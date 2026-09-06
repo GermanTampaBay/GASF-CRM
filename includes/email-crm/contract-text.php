@@ -255,13 +255,29 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 		<dt>(Tax Exempt#)</dt>
 		<dd><?php $b( 'tax_exempt', array( 'w' => 'md', 'aria' => 'Tax exempt number' ) ); ?> (if applicable)</dd>
 
-		<dt>Name of <strong>German-American Society</strong> officer signing:</dt>
-		<dd><?php $b( 'gas_officer', array( 'w' => 'xl', 'club' => true, 'aria' => 'Society officer name' ) ); ?></dd>
-
-		<dt>Signature of the <strong>German-American Society</strong>:</dt>
-		<dd><?php $b( 'sign_gas', array( 'w' => 'lg', 'club' => true, 'aria' => 'Society signature' ) ); ?>
-			Date: <?php $b( 'sign_gas_date', array( 'w' => 'md', 'club' => true, 'aria' => 'Society signature date' ) ); ?></dd>
 	</dl>
+
+	<?php
+	/*
+	 * The Society's countersignature is STATED here, not drawn as blanks.
+	 *
+	 * Two reasons, and the second is the one that decides it. A vendor cannot
+	 * fill these in, so three grey boxes on their screen only invite the
+	 * question "am I supposed to know this?". And the countersignature happens
+	 * AFTER they sign -- an officer signs once the application has been read --
+	 * so it could never appear in the copy taken at the moment they submit,
+	 * whatever it looked like. Empty boxes would have been permanently empty.
+	 *
+	 * What a vendor does need to know is that this is an agreement rather than
+	 * a one-sided undertaking, and that it is not in force until somebody signs
+	 * back. That is a sentence, so it is written as one. The officer's name,
+	 * signature, and date are recorded against the application in the Contracts
+	 * pane, where the person who actually signs can enter them.
+	 */
+	?>
+	<p class="gv-countersign"><strong>To be countersigned by the German-American Society.</strong>
+		An officer of the Society signs this agreement after reviewing your application. It does not
+		come into force until they do, and we will let you know when it has been signed.</p>
 </div>
 	<?php
 }

@@ -969,6 +969,8 @@ function gasf_crm_vendor_styles() {
 .gv-pay { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1rem 1.25rem; margin: 1rem 0; }
 .gv-pay h4 { margin: 0 0 0.75rem; }
 .gv-settings { border-left: 4px solid #EF9F27; }
+.gv-status { background: #fff6e0; color: #111; border-left: 4px solid #EF9F27; padding: 0.6rem 0.9rem; margin: 0.75rem 0; }
+.gv-countersign { background: #f4f4f2; color: #111; border-left: 4px solid #999; padding: 0.75rem 1rem; margin-top: 1.25rem; }
 .gv-pay label { display: block; }
 .gv-pay .gv-check { display: inline-block; margin-right: 1.5rem; }
 .gv-pay .gv-check input { width: auto; }
@@ -1674,6 +1676,23 @@ function gasf_crm_vendor_render_settings() {
 	<?php
 }
 
+/**
+ * The Society's countersignature, which happens after the vendor has signed.
+ *
+ * Kept out of the contract snapshot deliberately. The snapshot is a copy of
+ * what the VENDOR signed, frozen at the moment they submitted; an officer
+ * signing a fortnight later is a second, later act, and writing it back into
+ * that copy would quietly change a document whose whole value is that it does
+ * not change. It is recorded here and shown beside the agreement instead.
+ */
+function gasf_crm_vendor_countersign_fields() {
+	return array(
+		'gas_officer'   => 'Officer signing',
+		'sign_gas'      => 'Signature',
+		'sign_gas_date' => 'Date signed',
+	);
+}
+
 /** The paper's ADDENDA ATTACHED ticks, which are the club's to make. */
 function gasf_crm_vendor_record_checks() {
 	return array(
@@ -1733,7 +1752,7 @@ function gasf_crm_vendor_handle_payment() {
 	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
 	$raw  = isset( $_POST['pay'] ) && is_array( $_POST['pay'] ) ? wp_unslash( $_POST['pay'] ) : array();
 	$paid = array();
-	foreach ( gasf_crm_vendor_payment_fields() as $key => $label ) {
+	foreach ( array_merge( gasf_crm_vendor_payment_fields(), gasf_crm_vendor_countersign_fields() ) as $key => $label ) {
 		if ( ! isset( $raw[ $key ] ) || ! is_scalar( $raw[ $key ] ) ) { continue; }
 		$v = 'notes' === $key
 			? sanitize_textarea_field( (string) $raw[ $key ] )
@@ -1816,6 +1835,21 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 				 * only question ever asked about a signature.
 				 */
 				?>
+				<?php
+				$rec = json_decode( (string) $r['paid_json'], true );
+				$rec = is_array( $rec ) ? $rec : array();
+				?>
+				<p class="gv-status">
+					<?php if ( ! empty( $rec['sign_gas'] ) ) : ?>
+						<strong>Countersigned</strong> by <?php echo esc_html( $rec['gas_officer'] ? $rec['gas_officer'] : $rec['sign_gas'] ); ?>
+						<?php if ( ! empty( $rec['sign_gas_date'] ) ) : ?>on <?php echo esc_html( $rec['sign_gas_date'] ); ?><?php endif; ?>
+						&mdash; this agreement is in force.
+					<?php else : ?>
+						<strong>Not countersigned yet.</strong> The vendor has signed; the agreement is not in
+						force until an officer of the Society signs it below.
+					<?php endif; ?>
+				</p>
+
 				<p class="gv-legend">
 					Signed by <strong><?php echo esc_html( $r['agreed_name'] ? $r['agreed_name'] : 'nobody' ); ?></strong>
 					on <?php echo esc_html( mysql2date( 'j M Y \a\t H:i', $r['agreed_at'] ) ); ?>
@@ -1941,6 +1975,18 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 					<div class="gv-paygrid">
 						<?php foreach ( gasf_crm_vendor_payment_fields() as $key => $label ) : ?>
 							<?php if ( 'notes' === $key ) { continue; } ?>
+							<label><?php echo esc_html( $label ); ?>
+								<input type="text" name="pay[<?php echo esc_attr( $key ); ?>]" value="<?php echo esc_attr( $paid[ $key ] ?? '' ); ?>">
+							</label>
+						<?php endforeach; ?>
+					</div>
+
+					<h4>Countersignature</h4>
+					<p class="muted">The agreement is not in force until an officer of the Society signs it.
+						This is recorded here rather than written into the vendor's signed copy, which must stay
+						exactly as they submitted it.</p>
+					<div class="gv-paygrid">
+						<?php foreach ( gasf_crm_vendor_countersign_fields() as $key => $label ) : ?>
 							<label><?php echo esc_html( $label ); ?>
 								<input type="text" name="pay[<?php echo esc_attr( $key ); ?>]" value="<?php echo esc_attr( $paid[ $key ] ?? '' ); ?>">
 							</label>

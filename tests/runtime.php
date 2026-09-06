@@ -2406,11 +2406,27 @@ final class GASF_CRM_Selftest {
 		$this->ok( array_key_exists( 'addenda_vendor', $checks ) && array_key_exists( 'addenda_rules', $checks ),
 			'record: the addenda ticks are the reviewer to make' );
 
-		// The countersignature block STAYS. A contract that shows only the
-		// vendor signing reads as a one-sided undertaking rather than an
-		// agreement, and the vendor should see that the Society signs it too.
-		$this->ok( false !== strpos( $html, 'Signature of the <strong>German-American Society</strong>' ),
-			'record: the Society countersignature block remains on the contract' );
+		/*
+		 * The countersignature is STATED on the vendor's copy, not drawn as blanks.
+		 *
+		 * An earlier version kept the officer's name, signature, and date as grey
+		 * boxes, on the reasoning that a contract showing only the vendor signing
+		 * reads as one-sided. That reasoning was half right. The vendor does need
+		 * to know the Society signs too -- but not as three boxes they cannot
+		 * fill, and above all not as boxes that could never be filled: an officer
+		 * signs AFTER the application is read, long after the snapshot of what the
+		 * vendor signed has been taken. They would have been permanently empty.
+		 */
+		$this->ok( false !== strpos( $html, 'To be countersigned by the German-American Society' ),
+			'countersign: the vendor is told the Society signs too' );
+		foreach ( array( 'gas_officer', 'sign_gas', 'sign_gas_date' ) as $key ) {
+			$this->ok( false === strpos( $html, 'name="f[' . $key . ']"' ),
+				'countersign: ' . $key . ' is not a field on the vendor page' );
+		}
+		$counter = gasf_crm_vendor_countersign_fields();
+		foreach ( array( 'gas_officer', 'sign_gas', 'sign_gas_date' ) as $key ) {
+			$this->ok( array_key_exists( $key, $counter ), 'countersign: ' . $key . ' is recorded in the pane' );
+		}
 
 		// And the vendor is told where the upload actually is, at the point they
 		// read the rule that demands it.
