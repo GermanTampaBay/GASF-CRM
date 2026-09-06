@@ -2507,7 +2507,8 @@ final class GASF_CRM_Selftest {
 		$d = gasf_crm_vendor_date_defaults();
 		$this->ok( wp_date( 'j' ) === $d['agr_day'], 'date: today is offered as the day' );
 		$this->ok( wp_date( 'F' ) === $d['agr_month'], 'date: this month is offered' );
-		$this->ok( substr( wp_date( 'Y' ), -1 ) === $d['agr_year'], 'date: the year fills the 202_ blank' );
+		$this->ok( substr( wp_date( 'Y' ), -2 ) === $d['agr_year'], 'date: two digits fill the 20__ blank' );
+		$this->ok( 2 === strlen( $d['agr_year'] ), 'date: the year is two digits, so the form outlives 2029' );
 
 		$this->snapshot_option( 'gasf_crm_vendor' );
 		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );

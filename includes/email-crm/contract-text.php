@@ -17,7 +17,7 @@
  *
  * ONE DELIBERATE DEPARTURE from the PDF, on the club's instruction: the society's
  * name is hyphenated here -- "German-American Society" -- where the PDF has it
- * open throughout. It is the organisation's own name in its own contract, and
+ * open throughout. It is the organization's own name in its own contract, and
  * the club is authoritative on how it is spelled. Recorded here because a reader
  * diffing this against the paper will find it, and an unexplained difference in
  * a contract is indistinguishable from drift.
@@ -42,7 +42,7 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
  *                       one back as it was signed.
  * @param array  $values Field values, keyed as below. Ignored in 'form' mode
  *                       except to repopulate a rejected submission.
- * @param array  $locked Blanks the organiser fixed in advance. Printed as
+ * @param array  $locked Blanks the organizer fixed in advance. Printed as
  *                       values in both modes, never as fields. Defaults to
  *                       whatever settings say, so a caller that does not care
  *                       still renders the right document.
@@ -65,7 +65,8 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 
 	<p>This agreement, made this <?php $b( 'agr_day', array( 'w' => 'xs', 'aria' => 'Day of the month' ) ); ?>
 		day of <?php $b( 'agr_month', array( 'w' => 'sm', 'aria' => 'Month' ) ); ?>
-		202<?php $b( 'agr_year', array( 'w' => 'xs', 'aria' => 'Year, last digit' ) ); ?>
+		<?php /* "20" and two characters, not the paper's "202_", which stops working in 2030. */ ?>
+		20<?php $b( 'agr_year', array( 'w' => 'xs', 'aria' => 'Year, last two digits' ) ); ?>
 		by and between the German-American Society Friendship of Pinellas County Inc., referred to herein as the
 		<strong>German-American Society</strong> and <?php $b( 'vendor_legal', array( 'w' => 'xl', 'aria' => 'Vendor legal name' ) ); ?>
 		herein after referred to as the <strong>Vendor.</strong></p>

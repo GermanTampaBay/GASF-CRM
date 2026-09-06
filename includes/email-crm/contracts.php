@@ -55,7 +55,7 @@ if ( ! defined( 'GASF_CRM_VENDOR_COI_DIR' ) ) { define( 'GASF_CRM_VENDOR_COI_DIR
  * Where the published agreement lives, and what to call this version of it.
  *
  * terms_version is free text on purpose — "2026-07" or "Rev C" both work, and
- * the club is the only reader who has to recognise it. It is stamped onto every
+ * the club is the only reader who has to recognize it. It is stamped onto every
  * acceptance, so CHANGING IT IS THE ACT OF PUBLISHING NEW TERMS: rows accepted
  * before the change keep pointing at what those people actually agreed to.
  */
@@ -64,7 +64,7 @@ function gasf_crm_vendor_cfg() {
 		'terms_url'     => '',
 		'terms_version' => '',
 		'addenda_url'   => '',
-		// What the organiser fixes in advance. A vendor should not be typing the
+		// What the organizer fixes in advance. A vendor should not be typing the
 		// name of the event they are applying to, guessing its date, or writing
 		// down what they think the pitch costs.
 		'event_name'    => '',
@@ -94,7 +94,7 @@ function gasf_crm_vendor_ready() {
  *
  * The configured label if there is one, because "2026-Krampus Market" means
  * something to a person reading the file in two years. Failing that, a short
- * hash OF THE AGREEMENT ITSELF -- the words, plus the organiser's presets that
+ * hash OF THE AGREEMENT ITSELF -- the words, plus the organizer's presets that
  * appear inside them.
  *
  * That fallback is the reason the setting is now optional. The version exists to
@@ -119,7 +119,7 @@ function gasf_crm_vendor_terms_version() {
 }
 
 /**
- * The blanks the organiser fills once, in settings, rather than every vendor
+ * The blanks the organizer fills once, in settings, rather than every vendor
  * filling in for themselves.
  *
  * Returned only where actually configured: an empty setting leaves the blank
@@ -142,7 +142,7 @@ function gasf_crm_vendor_locked_values() {
  * Certificate storage
  *
  * Same posture as the photo review store: ABOVE the document root, so the web
- * server has no path to it, with an .htaccess as a second line of defence for
+ * server has no path to it, with an .htaccess as a second line of defense for
  * the day somebody moves it back under public_html.
  * -------------------------------------------------------------------------- */
 
@@ -464,7 +464,7 @@ function gasf_crm_vendor_vendor_fields() {
 	return array(
 		'agr_day'           => 4,
 		'agr_month'         => 24,
-		'agr_year'          => 4,
+		'agr_year'          => 2,
 		'vendor_legal'      => 180,
 		'event_date'        => 60,
 		'event_name'        => 180,
@@ -504,7 +504,7 @@ function gasf_crm_vendor_vendor_fields() {
  *                  send it later. The contract's thirty-days-prior deadline is
  *                  the real gate, and it bites long after this form.
  *
- * The event date is here but is filled from settings when the organiser has set
+ * The event date is here but is filled from settings when the organizer has set
  * one, so it only ever falls to the vendor if the club left it blank.
  */
 function gasf_crm_vendor_required_fields() {
@@ -589,7 +589,7 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 		return;
 	}
 
-	// Fixed by the organiser before anybody applied. Printed as a value in both
+	// Fixed by the organizer before anybody applied. Printed as a value in both
 	// modes: it is not the vendor's to change, and showing it as an empty box
 	// would invite them to try.
 	if ( array_key_exists( $key, (array) $ctx['locked'] ) ) {
@@ -825,10 +825,8 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 
 		<fieldset>
 			<legend>Where we can see your work <span class="gv-req">&mdash; enter at least one</span></legend>
-			<p class="gv-oneof"><strong>Enter at least one of these three.</strong> A star on each would be
-				a lie, since no single one is required &mdash; but we do need somewhere to see your work.
-				Whichever you actually use is fine.</p>
-			<p class="gv-legend">We also use them to help promote the event.</p>
+			<p class="gv-oneof"><strong>Enter at least one of these three.</strong></p>
+			<p class="gv-legend">We use them to help promote the event, and to see what you make.</p>
 			<p><label for="gv-website">Website</label>
 				<input type="text" name="a[website]" id="gv-website" maxlength="200" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['website'] ?? '' ); ?>" placeholder="ourshop.com"></p>
 			<p><label for="gv-facebook">Facebook</label>
@@ -868,12 +866,12 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<?php /* ----------------------------------------------------- food */ ?>
 		<div class="gv-branch" data-for="food">
 			<fieldset>
-				<legend>Permits and power<span class="gv-star" aria-hidden="true">*</span> <span class="gv-req">for food vendors</span></legend>
+				<legend>Permits and power <span class="gv-req">for food vendors</span></legend>
 				<p><label for="gv-permit">Health permit number(s)<span class="gv-star" aria-hidden="true">*</span></label>
 					<input type="text" name="a[health_permit]" id="gv-permit" maxlength="120" class="gv-in gv-w-lg" value="<?php echo esc_attr( $app['health_permit'] ?? '' ); ?>"></p>
 
 				<p class="gv-rule"><strong>Generators are not permitted at our events.</strong>
-					They are too loud for the evening programme. Tell us what power you need and we will
+					They are too loud for the evening program. Tell us what power you need and we will
 					run a cord to you where we can.</p>
 
 				<p><label for="gv-power">What power do you need?<span class="gv-star" aria-hidden="true">*</span></label>
@@ -889,7 +887,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		</fieldset>
 
 		<fieldset>
-			<legend>Photographs<span class="gv-star" aria-hidden="true">*</span> <span class="gv-req">all three</span></legend>
+			<legend>Photographs</legend>
 			<p class="gv-legend">Three photographs, please. The first should be your set-up, so we can picture
 				where you will go.</p>
 			<?php foreach ( gasf_crm_vendor_photo_slots( $type ? $type : 'craft' ) as $i => $label ) : ?>
@@ -904,7 +902,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 				</label>
 			</p>
 			<p class="gv-legend">Ticking that is optional, and we will not use your photographs publicly if you
-				leave it blank. We still need them either way so we can review your application.</p>
+				leave it blank. We still need them so we can review your application.</p>
 		</fieldset>
 	</div>
 	<?php
@@ -925,14 +923,14 @@ function gasf_crm_vendor_styles() {
 	?>
 <style>
 /*
- * Set a colour wherever we set a background, without exception.
+ * Set a color wherever we set a background, without exception.
  *
  * This block paints its own white surfaces onto somebody else's theme, and the
  * club's theme puts white text on a dark page. Anything here that sets a
- * background and inherits its colour renders white on white -- which is not a
+ * background and inherits its color renders white on white -- which is not a
  * subtle degradation, it is an invisible form. It shipped exactly that way:
- * .gv-contract declared a colour and .gv-app did not, and the review copy could
- * not reveal it because that page carried its own neutral body colour instead
+ * .gv-contract declared a color and .gv-app did not, and the review copy could
+ * not reveal it because that page carried its own neutral body color instead
  * of the theme's.
  *
  * The inputs matter most. A field inheriting white text on its own near-white
@@ -1010,8 +1008,8 @@ function gasf_crm_vendor_styles() {
  * The closing strip paints itself, like every other panel here.
  *
  * It had no background at all, so it sat directly on the club's dark theme --
- * and the blanket colour rule above, which fixed white-on-white inside the
- * panels, made it black-on-dark out here. Forcing a text colour without owning
+ * and the blanket color rule above, which fixed white-on-white inside the
+ * panels, made it black-on-dark out here. Forcing a text color without owning
  * the surface underneath only moves the problem.
  */
 .gv-submit { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1.25rem 1.5rem; margin-top: 1.25rem; }
@@ -1103,9 +1101,6 @@ function gasf_crm_vendor_shortcode() {
 				</div>
 			<?php endif; ?>
 
-			<p class="gv-key"><span class="gv-star" aria-hidden="true">*</span> marks something we cannot
-				process the application without. Everything else is optional.</p>
-
 			<?php gasf_crm_vendor_application_section( $app, $type, $crafts, $booth ); ?>
 
 			<?php
@@ -1188,9 +1183,10 @@ function gasf_crm_vendor_date_defaults() {
 	return array(
 		'agr_day'          => wp_date( 'j' ),
 		'agr_month'        => wp_date( 'F' ),
-		// The agreement prints "202_" and leaves one character after it, so this
-		// is the last digit of the year rather than the year.
-		'agr_year'         => substr( wp_date( 'Y' ), -1 ),
+		// The agreement prints "20" and leaves two characters after it, so this
+		// is the last two digits rather than the year. Two, not one: the paper
+		// says "202_", which quietly stops working in 2030.
+		'agr_year'         => substr( wp_date( 'Y' ), -2 ),
 		'sign_vendor_date' => wp_date( 'j F Y' ),
 	);
 }
@@ -1279,7 +1275,7 @@ function gasf_crm_vendor_handle() {
 	$locked = gasf_crm_vendor_locked_values();
 
 	// Applied BEFORE anything is checked. These blanks are required, and the
-	// organiser has already answered them -- validating first would reject a
+	// organizer has already answered them -- validating first would reject a
 	// perfectly good application for leaving out the event name it was never
 	// asked for.
 	foreach ( $locked as $k => $v ) { $values[ $k ] = $v; }
@@ -1337,7 +1333,7 @@ function gasf_crm_vendor_handle() {
 	// A chosen event is authoritative over the typed blanks: the club knows its
 	// own calendar better than a vendor reading it off a poster, and the two
 	// disagreeing is a booking nobody can reconcile later.
-	// A preset event wins over anything posted. It is the organiser's answer,
+	// A preset event wins over anything posted. It is the organizer's answer,
 	// and the picker is not even rendered when one is set -- so a POST carrying
 	// an event is either stale or crafted, and neither should decide which event
 	// an agreement is for.
@@ -1623,7 +1619,7 @@ function gasf_crm_vendor_serve_file( $id, $n ) {
  * Save the event settings from the Contracts pane.
  *
  * Gated on the contracts area, NOT on manage_options. That is the whole point of
- * moving them here: an event organiser holds a CRM account with no WordPress
+ * moving them here: an event organizer holds a CRM account with no WordPress
  * capabilities whatsoever, and "who may set the fee for the market they are
  * running" should not have to mean "who may edit the website".
  */
