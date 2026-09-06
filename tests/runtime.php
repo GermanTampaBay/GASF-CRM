@@ -2573,7 +2573,11 @@ final class GASF_CRM_Selftest {
 		$this->snapshot_option( 'gasf_crm_vendor' );
 		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
 		$html = gasf_crm_vendor_shortcode();
-		$this->ok( false !== strpos( $html, 'Please give at least one' ), 'links: the form says one is enough' );
+		// Pins the CALLOUT, not the wording of a sentence inside it. The copy has
+		// already changed once and broke this test rather than the feature; the
+		// thing worth guarding is that a one-of-three rule is stated at all.
+		$this->ok( false !== strpos( $html, 'gv-oneof' ), 'links: the one-of-three rule is called out' );
+		$this->ok( false !== strpos( $html, 'at least one' ), 'links: the form says one is enough' );
 
 		/*
 		 * A preset must satisfy its own requirement.
