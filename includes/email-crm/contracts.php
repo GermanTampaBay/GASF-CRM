@@ -2217,7 +2217,7 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 					<p><label>Notes<br>
 						<textarea name="pay[notes]" rows="2"><?php echo esc_textarea( $paid['notes'] ?? '' ); ?></textarea></label></p>
 
-					<p><button class="btn">Save the money record</button></p>
+					<p><button class="btn">Save the record</button></p>
 					<p class="muted">Accepting the agreement is a separate act, at the foot of the contract below.</p>
 				</form>
 
