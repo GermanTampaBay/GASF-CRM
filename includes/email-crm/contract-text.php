@@ -123,7 +123,15 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 	<p>The <strong>German-American Society</strong> in consideration of the fees and agreements mentioned here,
 		agrees to allow the vendor access to and use of the premises situated in City of Pinellas Park, Pinellas
 		County, FL as described above to the <strong>Vendor</strong> for the sum of
-		$<?php $b( 'fee_amount', array( 'w' => 'md', 'club' => true, 'aria' => 'Fee' ) ); ?> (see Vendor Addendum).</p>
+		<?php
+		/*
+		 * Filled from the pitch rather than typed, and never by the vendor. The
+		 * script above writes the figure in as they choose a space; the handler
+		 * writes it again from settings at submission, so what is signed is the
+		 * club's number whatever the page was showing.
+		 */
+		?>
+		$<?php $b( 'fee_amount', array( 'w' => 'md', 'auto' => 'set by the space you choose above', 'aria' => 'Fee' ) ); ?> (see Vendor Addendum).</p>
 
 	<?php
 	/*

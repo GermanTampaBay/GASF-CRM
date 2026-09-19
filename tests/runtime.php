@@ -2732,6 +2732,59 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * The fee follows the pitch, and the vendor cannot set it.
+	 *
+	 * This is the one number on the page somebody has an obvious motive to
+	 * edit, so it is worth being explicit about where it comes from: the club's
+	 * settings, keyed on the space chosen, read at submission. It is not in the
+	 * posted-field whitelist and it is not an input anywhere on the form.
+	 */
+	public function test_vendor_fee_follows_the_pitch() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array(
+			'terms_version' => 'selftest',
+			'fee_outside'   => '50',
+			'fee_inside'    => '100',
+		), false );
+
+		$this->ok( '50' === gasf_crm_vendor_fee_for( '10x10_outside' ), 'fee: outdoors is 50' );
+		$this->ok( '100' === gasf_crm_vendor_fee_for( '8ft_inside' ), 'fee: indoors is 100' );
+		$this->ok( '' === gasf_crm_vendor_fee_for( 'not-a-pitch' ), 'fee: an unknown pitch has no price' );
+
+		// A vendor must not be able to post their own figure.
+		$this->ok( ! array_key_exists( 'fee_amount', gasf_crm_vendor_vendor_fields() ),
+			'fee: fee_amount is not an accepted field' );
+		$html = gasf_crm_vendor_shortcode();
+		$this->ok( false === strpos( $html, 'name="f[fee_amount]"' ), 'fee: the fee is not an input' );
+		$this->ok( false !== strpos( $html, 'data-fee="50"' ), 'fee: the outdoor price is shown beside the pitch' );
+		$this->ok( false !== strpos( $html, 'data-fee="100"' ), 'fee: the indoor price is shown beside the pitch' );
+
+		/*
+		 * The old single fee still covers a pitch that has no price of its own.
+		 * A club that upgrades and never opens the new fields should keep
+		 * charging what it charged, not quote every vendor a contract for
+		 * nothing -- which is what an empty fee blank would amount to.
+		 */
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest', 'fee' => '75' ), false );
+		$this->ok( '75' === gasf_crm_vendor_fee_for( '10x10_outside' ), 'fee: the old single figure still covers outdoors' );
+		$this->ok( '75' === gasf_crm_vendor_fee_for( '8ft_inside' ), 'fee: and indoors' );
+
+		// A signed agreement keeps the figure it was signed under, whatever the
+		// club charges later.
+		global $wpdb;
+		$id = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Fee', 'fee_quoted' => '50' ) );
+		if ( is_int( $id ) ) {
+			try {
+				update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest', 'fee_outside' => '999' ), false );
+				$row = gasf_crm_vendor_get( $id );
+				$this->ok( '50' === $row['fee_quoted'], 'fee: raising the price does not re-price a signed agreement' );
+			} finally {
+				$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+			}
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

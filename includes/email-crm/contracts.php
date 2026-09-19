@@ -69,7 +69,12 @@ function gasf_crm_vendor_cfg() {
 		// down what they think the pitch costs.
 		'event_name'    => '',
 		'event_date'    => '',
+		// One fee per pitch. 'fee' is the old single figure and is kept as the
+		// fallback for both, so a club that never opens the new fields keeps
+		// charging what it charged before rather than suddenly charging nothing.
 		'fee'           => '',
+		'fee_outside'   => '',
+		'fee_inside'    => '',
 	) );
 }
 
@@ -130,7 +135,9 @@ function gasf_crm_vendor_locked_values() {
 	$cfg = gasf_crm_vendor_cfg();
 	$out = array();
 
-	foreach ( array( 'event_name' => 'event_name', 'event_date' => 'event_date', 'fee' => 'fee_amount' ) as $setting => $blank ) {
+	// The fee is NOT here: it follows the pitch the vendor picks, so it is
+	// computed at submission rather than fixed before anybody applied.
+	foreach ( array( 'event_name' => 'event_name', 'event_date' => 'event_date' ) as $setting => $blank ) {
 		$v = trim( (string) $cfg[ $setting ] );
 		if ( '' !== $v ) { $out[ $blank ] = $v; }
 	}
@@ -691,6 +698,34 @@ function gasf_crm_vendor_booths() {
 	);
 }
 
+/**
+ * What each pitch costs.
+ *
+ * The fee stopped being a single number the moment the two pitches were priced
+ * differently, and it is not something the vendor is asked -- it is a fact about
+ * the space they picked. So it is derived from the booth rather than stored
+ * anywhere a vendor could put a figure of their own choosing.
+ *
+ * Falls back to the old single 'fee' for either pitch that has not been given
+ * its own price, so a half-configured club charges the old amount rather than
+ * quoting a contract for nothing.
+ */
+function gasf_crm_vendor_fees() {
+	$cfg  = gasf_crm_vendor_cfg();
+	$both = trim( (string) $cfg['fee'] );
+
+	return array(
+		'10x10_outside' => trim( (string) $cfg['fee_outside'] ) !== '' ? trim( (string) $cfg['fee_outside'] ) : $both,
+		'8ft_inside'    => trim( (string) $cfg['fee_inside'] ) !== '' ? trim( (string) $cfg['fee_inside'] ) : $both,
+	);
+}
+
+/** The fee for one pitch, or '' if that pitch has no price set. */
+function gasf_crm_vendor_fee_for( $booth ) {
+	$fees = gasf_crm_vendor_fees();
+	return isset( $fees[ $booth ] ) ? (string) $fees[ $booth ] : '';
+}
+
 /** Free-text application answers, whitelisted and length-capped like the contract's blanks. */
 function gasf_crm_vendor_app_fields() {
 	return array(
@@ -894,9 +929,13 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<fieldset class="gv-hideable">
 			<legend>Your space<span class="gv-star" aria-hidden="true">*</span></legend>
 			<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
+				<?php $fee = gasf_crm_vendor_fee_for( $key ); ?>
 				<label class="gv-radio gv-block">
-					<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" <?php checked( $booth, $key ); ?>>
+					<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" data-fee="<?php echo esc_attr( $fee ); ?>" <?php checked( $booth, $key ); ?>>
 					<?php echo esc_html( $label ); ?>
+					<?php if ( '' !== $fee ) : ?>
+						<strong class="gv-fee">$<?php echo esc_html( $fee ); ?></strong>
+					<?php endif; ?>
 				</label>
 			<?php endforeach; ?>
 		</fieldset>
@@ -1042,6 +1081,7 @@ function gasf_crm_vendor_styles() {
 .gv-callout p { margin: 0 0 0.6rem; }
 .gv-callout p:last-child { margin-bottom: 0; }
 .gv-fixed { font-weight: 700; border-bottom-style: solid; }
+.gv-fee { margin-left: 0.5rem; color: #7a4a00; }
 .gv-go { background: #EF9F27; border: 0; color: #1a1a1a; font-weight: 700; padding: 0.7rem 1.6rem; font-size: 1rem; cursor: pointer; }
 .gv-go:hover { background: #d98d1c; }
 .gasf-vendor .gv-legend { color: #555; font-size: 0.9rem; }
@@ -1207,6 +1247,34 @@ function gasf_crm_vendor_shortcode() {
 					 * the description above", which reads like a promise the form
 					 * forgot to keep.
 					 */
+					/*
+					 * The fee follows the pitch, in front of them.
+					 *
+					 * The clause reads "for the sum of $____", and leaving that
+					 * blank while a price sat in a radio button further up would
+					 * be asking somebody to sign a figure they had to go and work
+					 * out for themselves.
+					 */
+					var fee = document.querySelector('[data-mirror="fee_amount"]');
+					if (fee) {
+						var feePlaceholder = fee.textContent;
+						var priceIt = function () {
+							var chosenFee = '';
+							Array.prototype.forEach.call(
+								document.querySelectorAll('input[name="booth"]'),
+								function (b) { if (b.checked) { chosenFee = b.getAttribute('data-fee') || ''; } }
+							);
+							fee.textContent = chosenFee === '' ? feePlaceholder : chosenFee;
+							fee.classList.toggle('gv-auto', chosenFee === '');
+							fee.classList.toggle('gv-val', chosenFee !== '');
+						};
+						Array.prototype.forEach.call(
+							document.querySelectorAll('input[name="booth"]'),
+							function (b) { b.addEventListener('change', priceIt); }
+						);
+						priceIt();
+					}
+
 					var source = document.getElementById('gv-description');
 					var target = document.querySelector('[data-mirror="desc_full"]');
 					if (source && target) {
@@ -1527,6 +1595,12 @@ function gasf_crm_vendor_handle() {
 	// they are approved to sell.
 	$values['desc_full'] = (string) ( $app['description'] ?? '' );
 
+	// The fee is a fact about the pitch, taken from settings at the moment of
+	// signing. Never from the request: the figure a vendor commits to is the
+	// club's to state, and this is the one number on the page somebody would
+	// have an obvious reason to edit on the way past.
+	$values['fee_amount'] = gasf_crm_vendor_fee_for( $booth );
+
 	/*
 	 * Snapshot the agreement AS RENDERED, not merely its version string.
 	 *
@@ -1544,7 +1618,7 @@ function gasf_crm_vendor_handle() {
 	$id = gasf_crm_vendor_insert( array(
 		'event_id'          => $event_id,
 		'event_text'        => (string) ( $values['event_name'] ?? '' ),
-		'fee_quoted'        => (string) ( $locked['fee_amount'] ?? '' ),
+		'fee_quoted'        => (string) ( $values['fee_amount'] ?? '' ),
 		'vendor_name'       => (string) ( $values['vendor_legal'] ?? '' ),
 		'vendor_address'    => (string) ( $values['vendor_address'] ?? '' ),
 		'vendor_city'       => (string) ( $values['vendor_city'] ?? '' ),
@@ -1727,7 +1801,7 @@ function gasf_crm_vendor_handle_settings() {
 	// Read, modify, write the whole option. A form carrying four keys must not be
 	// able to drop the ones it does not show.
 	$cfg = gasf_crm_vendor_cfg();
-	foreach ( array( 'event_name', 'event_date', 'fee', 'terms_version' ) as $k ) {
+	foreach ( array( 'event_name', 'event_date', 'fee', 'fee_outside', 'fee_inside', 'terms_version' ) as $k ) {
 		// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
 		if ( isset( $_POST[ $k ] ) ) {
 			$cfg[ $k ] = substr( sanitize_text_field( wp_unslash( $_POST[ $k ] ) ), 0, 191 );
@@ -1756,16 +1830,19 @@ function gasf_crm_vendor_render_settings() {
 		<input type="hidden" name="gasf_vendor_settings" value="1">
 
 		<p class="muted">These print straight onto the agreement, so a vendor never types the name of the event,
-			guesses its date, or writes down what they think the pitch costs. Leave any blank and that blank goes
-			back to being the vendor's to fill in.</p>
+			guesses its date, or writes down what they think the pitch costs. The fee follows the space they
+			choose, and is shown beside each option as they pick. Leave the event name or date blank and that
+			blank goes back to being the vendor's to fill in.</p>
 
 		<div class="gv-paygrid">
 			<label>Event name
 				<input type="text" name="event_name" value="<?php echo esc_attr( $cfg['event_name'] ); ?>" placeholder="Krampus Market 2026"></label>
 			<label>Event date
 				<input type="text" name="event_date" value="<?php echo esc_attr( $cfg['event_date'] ); ?>" placeholder="5 December 2026"></label>
-			<label>Vendor fee
-				<input type="text" name="fee" value="<?php echo esc_attr( $cfg['fee'] ); ?>" placeholder="75"></label>
+			<label>Outdoor fee
+				<input type="text" name="fee_outside" value="<?php echo esc_attr( $cfg['fee_outside'] ); ?>" placeholder="50"></label>
+			<label>Indoor fee
+				<input type="text" name="fee_inside" value="<?php echo esc_attr( $cfg['fee_inside'] ); ?>" placeholder="100"></label>
 		</div>
 
 		<p><label>Agreement version <span class="muted">(optional)</span>
