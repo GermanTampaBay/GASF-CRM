@@ -1015,6 +1015,7 @@ function gasf_crm_vendor_styles() {
 .gv-pay { background: #fff; color: #111; border: 1px solid #d8d8d8; padding: 1rem 1.25rem; margin: 1rem 0; }
 .gv-pay h4 { margin: 0 0 0.75rem; }
 .gv-settings { border-left: 4px solid #EF9F27; }
+.gv-sign-form { border-left: 4px solid #2e7d32; }
 .gv-status { background: #fff6e0; color: #111; border-left: 4px solid #EF9F27; padding: 0.6rem 0.9rem; margin: 0.75rem 0; }
 .gv-countersign { background: #f4f4f2; color: #111; border-left: 4px solid #999; padding: 0.75rem 1rem; margin-top: 1.25rem; }
 .gv-pay label { display: block; }
@@ -1896,6 +1897,120 @@ function gasf_crm_vendor_handle_payment() {
 add_action( 'template_redirect', 'gasf_crm_vendor_handle_payment', 4 );
 
 /**
+ * The Society's half of the signing, at the end of the document.
+ *
+ * Placement is the whole point. These fields existed before this, inside a form
+ * headed "Money and paperwork" and saved by a button reading "Save the money
+ * record" -- so the one person looking for how to accept an agreement read the
+ * entire contract, reached the bottom, and found nothing. A control nobody can
+ * find is not a feature; it is a feature-shaped absence.
+ *
+ * Signing is also not bookkeeping, and it now has its own form and its own
+ * verb. The deposit can be edited fifty times; this happens once and changes
+ * whether the agreement binds anybody.
+ */
+function gasf_crm_vendor_render_countersign( array $r, array $paid ) {
+	$signed = ! empty( $paid['sign_gas'] );
+	$me     = wp_get_current_user();
+	$name   = function_exists( 'gasf_crm_display_name' ) ? gasf_crm_display_name( $me->ID ) : $me->display_name;
+	?>
+	<form method="post" class="gv-pay gv-sign-form">
+		<h4>Countersignature</h4>
+		<?php wp_nonce_field( 'gasf_vendor_sign_' . (int) $r['id'], 'gasf_vendor_sign_nonce' ); ?>
+		<input type="hidden" name="gasf_vendor_sign" value="<?php echo (int) $r['id']; ?>">
+
+		<?php if ( $signed ) : ?>
+			<p><strong>Countersigned by <?php echo esc_html( $paid['gas_officer'] ? $paid['gas_officer'] : $paid['sign_gas'] ); ?></strong>
+				<?php if ( ! empty( $paid['sign_gas_date'] ) ) : ?>on <?php echo esc_html( $paid['sign_gas_date'] ); ?><?php endif; ?>.
+				This agreement is in force.</p>
+			<p class="muted">Signed in error? Removing the countersignature puts the agreement back to awaiting
+				one. It does not touch the vendor's signed copy above, which never changes.</p>
+			<p><button class="btn" name="undo" value="1">Remove the countersignature</button></p>
+		<?php else : ?>
+			<p class="muted">The vendor has signed. The agreement does not bind either party until an officer of
+				the Society signs it too. Recorded here rather than written into the copy above, which must stay
+				exactly as the vendor submitted it.</p>
+			<div class="gv-paygrid">
+				<label>Officer signing
+					<input type="text" name="gas_officer" value="<?php echo esc_attr( $name ); ?>"></label>
+				<label>Signature
+					<input type="text" name="sign_gas" value="<?php echo esc_attr( $name ); ?>"></label>
+				<label>Date
+					<input type="text" name="sign_gas_date" value="<?php echo esc_attr( wp_date( 'j F Y' ) ); ?>"></label>
+			</div>
+			<p><button class="btn gv-go">Countersign this agreement</button></p>
+		<?php endif; ?>
+	</form>
+	<?php
+}
+
+/**
+ * Record or remove the Society's signature.
+ *
+ * Writes only paid_json and status, like the money record does, so the vendor's
+ * contract snapshot is untouched by either signing or unsigning it.
+ */
+function gasf_crm_vendor_handle_countersign() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified immediately below.
+	if ( empty( $_POST['gasf_vendor_sign'] ) ) { return; }
+
+	if ( ! gasf_crm_vendor_may_read() ) {
+		status_header( 403 );
+		wp_die( esc_html__( 'You do not have access to that.', 'gasf' ), '', array( 'response' => 403 ) );
+	}
+
+	$id = (int) $_POST['gasf_vendor_sign'];
+	if ( ! isset( $_POST['gasf_vendor_sign_nonce'] )
+		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_sign_nonce'] ) ), 'gasf_vendor_sign_' . $id ) ) {
+		wp_safe_redirect( home_url( '/email/contracts/' ) );
+		exit;
+	}
+
+	$row = gasf_crm_vendor_get( $id );
+	if ( ! $row ) {
+		wp_safe_redirect( home_url( '/email/contracts/' ) );
+		exit;
+	}
+
+	$paid = json_decode( (string) $row['paid_json'], true );
+	if ( ! is_array( $paid ) ) { $paid = array(); }
+
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+	$undo = ! empty( $_POST['undo'] );
+
+	if ( $undo ) {
+		foreach ( array_keys( gasf_crm_vendor_countersign_fields() ) as $k ) { $paid[ $k ] = ''; }
+		$status = 'new';
+		gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' REMOVED the countersignature on agreement ' . $id );
+	} else {
+		foreach ( array_keys( gasf_crm_vendor_countersign_fields() ) as $k ) {
+			// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+			$paid[ $k ] = isset( $_POST[ $k ] ) ? substr( sanitize_text_field( wp_unslash( $_POST[ $k ] ) ), 0, 191 ) : '';
+		}
+		if ( '' === trim( (string) $paid['sign_gas'] ) ) {
+			// A countersignature with no name on it is not one.
+			wp_safe_redirect( home_url( '/email/contracts/' ) );
+			exit;
+		}
+		$status = 'countersigned';
+		gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' countersigned agreement ' . $id . ' as ' . $paid['sign_gas'] );
+	}
+
+	global $wpdb;
+	$wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		gasf_crm_vendor_table(),
+		array( 'paid_json' => wp_json_encode( $paid ), 'status' => $status ),
+		array( 'id' => $id ),
+		array( '%s', '%s' ),
+		array( '%d' )
+	);
+
+	wp_safe_redirect( home_url( '/email/contracts/' ) );
+	exit;
+}
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_countersign', 4 );
+
+/**
  * The Contracts pane.
  *
  * Shows each agreement AS THE AGREEMENT -- the stored snapshot of the contract
@@ -2090,18 +2205,6 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 						<?php endforeach; ?>
 					</div>
 
-					<h4>Countersignature</h4>
-					<p class="muted">The agreement is not in force until an officer of the Society signs it.
-						This is recorded here rather than written into the vendor's signed copy, which must stay
-						exactly as they submitted it.</p>
-					<div class="gv-paygrid">
-						<?php foreach ( gasf_crm_vendor_countersign_fields() as $key => $label ) : ?>
-							<label><?php echo esc_html( $label ); ?>
-								<input type="text" name="pay[<?php echo esc_attr( $key ); ?>]" value="<?php echo esc_attr( $paid[ $key ] ?? '' ); ?>">
-							</label>
-						<?php endforeach; ?>
-					</div>
-
 					<p class="gv-checks">
 						<?php foreach ( gasf_crm_vendor_record_checks() as $key => $label ) : ?>
 							<label class="gv-check">
@@ -2115,6 +2218,7 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 						<textarea name="pay[notes]" rows="2"><?php echo esc_textarea( $paid['notes'] ?? '' ); ?></textarea></label></p>
 
 					<p><button class="btn">Save the money record</button></p>
+					<p class="muted">Accepting the agreement is a separate act, at the foot of the contract below.</p>
 				</form>
 
 				<?php
@@ -2142,6 +2246,8 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 					}
 				}
 				?>
+
+				<?php gasf_crm_vendor_render_countersign( $r, $paid ); ?>
 			</details>
 		<?php endforeach; ?>
 	<?php endif; ?>

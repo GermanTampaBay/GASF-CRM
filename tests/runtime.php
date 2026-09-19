@@ -2666,6 +2666,72 @@ final class GASF_CRM_Selftest {
 		$this->ok( 2 === count( gasf_crm_vendor_booths() ), 'space: two pitches are offered' );
 	}
 
+	/**
+	 * The Society can actually sign, and signing does not disturb what the
+	 * vendor signed.
+	 *
+	 * The controls existed before this and nobody could find them: three text
+	 * boxes inside a form headed "Money and paperwork", saved by a button that
+	 * said "Save the money record". The person looking for how to accept an
+	 * agreement read the whole contract, reached the end, and found nothing. So
+	 * this pins WHERE it is as much as that it works -- after the document,
+	 * which is where somebody looks having just read one.
+	 */
+	public function test_vendor_countersignature() {
+		global $wpdb;
+
+		ob_start();
+		gasf_crm_vendor_contract( 'record', array( 'vendor_legal' => 'Selftest Countersign', 'desc_full' => 'Goods.' ) );
+		$snap = ob_get_clean();
+
+		$id = gasf_crm_vendor_insert( array(
+			'vendor_name'       => 'Selftest Countersign',
+			'terms_version'     => 'v-signed',
+			'agreed_name'       => 'A Vendor',
+			'contract_snapshot' => $snap,
+		) );
+		$this->ok( is_int( $id ) && $id > 0, 'countersign: the agreement inserts' );
+		if ( ! is_int( $id ) ) { return; }
+
+		try {
+			$row = gasf_crm_vendor_get( $id );
+			$this->ok( 'new' === $row['status'], 'countersign: a fresh agreement is not countersigned' );
+
+			// The form a reviewer is shown, and where it sits.
+			ob_start();
+			gasf_crm_vendor_render_countersign( $row, array() );
+			$unsigned = ob_get_clean();
+			$this->ok( false !== strpos( $unsigned, 'Countersign this agreement' ),
+				'countersign: the button says what it does' );
+			$this->ok( false !== strpos( $unsigned, 'name="sign_gas"' ), 'countersign: the signature field is there' );
+
+			// Exactly what the handler writes.
+			$paid = array( 'gas_officer' => 'An Officer', 'sign_gas' => 'An Officer', 'sign_gas_date' => '1 October 2026' );
+			$wpdb->update( // phpcs:ignore WordPress.DB
+				gasf_crm_vendor_table(),
+				array( 'paid_json' => wp_json_encode( $paid ), 'status' => 'countersigned' ),
+				array( 'id' => $id ),
+				array( '%s', '%s' ),
+				array( '%d' )
+			);
+
+			$row = gasf_crm_vendor_get( $id );
+			$this->ok( 'countersigned' === $row['status'], 'countersign: the agreement records that it is in force' );
+			$this->ok( $snap === $row['contract_snapshot'],
+				'countersign: the vendor copy is byte-identical after the Society signs' );
+			$this->ok( 'A Vendor' === $row['agreed_name'], 'countersign: the vendor signature is untouched' );
+
+			ob_start();
+			gasf_crm_vendor_render_countersign( $row, $paid );
+			$signed = ob_get_clean();
+			$this->ok( false !== strpos( $signed, 'in force' ), 'countersign: a signed agreement says so' );
+			$this->ok( false !== strpos( $signed, 'Remove the countersignature' ),
+				'countersign: signing in error can be undone' );
+		} finally {
+			$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {
