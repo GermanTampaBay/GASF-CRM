@@ -858,6 +858,32 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 	$types = gasf_crm_vendor_types();
 	?>
 	<div class="gv-app">
+		<?php
+		/*
+		 * The event, named before anything is asked.
+		 *
+		 * Deliberately NOT hideable: it is the one thing on the page that has to
+		 * be readable the instant it loads. The club runs several events a year
+		 * and will send this link out in email and on Facebook, where a vendor
+		 * arrives with no idea which one they have landed on -- and with the rest
+		 * of the form held back until they choose a type, the first screen would
+		 * otherwise say nothing but "craft or food?".
+		 *
+		 * Silent when no event is configured, rather than printing an empty
+		 * banner: a heading with nothing in it is worse than no heading.
+		 */
+		$event = gasf_crm_vendor_cfg();
+		if ( '' !== trim( (string) $event['event_name'] ) ) :
+			?>
+			<p class="gv-event">
+				<span class="gv-event-label">Vendor application</span>
+				<strong><?php echo esc_html( $event['event_name'] ); ?></strong>
+				<?php if ( '' !== trim( (string) $event['event_date'] ) ) : ?>
+					<span class="gv-event-date"><?php echo esc_html( $event['event_date'] ); ?></span>
+				<?php endif; ?>
+			</p>
+		<?php endif; ?>
+
 		<fieldset class="gv-kind">
 			<legend>What kind of vendor are you?<span class="gv-star" aria-hidden="true">*</span></legend>
 			<?php foreach ( $types as $key => $label ) : ?>
@@ -1042,6 +1068,10 @@ function gasf_crm_vendor_styles() {
 .gv-oneof { background: #fff6e0; color: #111; border: 1px solid #EF9F27; padding: 0.6rem 0.9rem; }
 .gv-app label { display: inline-block; margin-bottom: 0.2rem; }
 .gv-app textarea.gv-in { border: 1px solid #444; padding: 0.5rem; }
+.gv-event { border-bottom: 2px solid #EF9F27; padding-bottom: 0.6rem; margin: 0 0 1.25rem; }
+.gv-event strong { display: block; font-size: 1.5rem; line-height: 1.2; }
+.gv-event-label { display: block; font-size: 0.85rem; letter-spacing: 0.08em; text-transform: uppercase; color: #7a4a00; }
+.gv-event-date { display: block; font-size: 1rem; color: #555; }
 .gv-kind .gv-radio { display: inline-block; margin-right: 1.5rem; font-weight: 700; font-size: 1.05rem; }
 .gv-radio.gv-block { display: block; margin: 0.4rem 0; font-weight: 400; }
 .gv-checks { display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; margin-bottom: 0.8rem; }
