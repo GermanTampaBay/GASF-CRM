@@ -2368,7 +2368,10 @@ final class GASF_CRM_Selftest {
 
 		$this->ok( false !== strpos( $html, 'Selftest Krampus Market' ), 'presets: the event name is printed on the agreement' );
 		$this->ok( false !== strpos( $html, '5 December 2026' ), 'presets: the event date is printed' );
-		$this->ok( false !== strpos( $html, '>75<' ), 'presets: the fee is printed' );
+		// The fee is no longer a flat preset printed into the clause: it follows
+		// the pitch, so it appears beside each space as a price the vendor can
+		// see before choosing. The old single figure still covers both.
+		$this->ok( false !== strpos( $html, '$75' ), 'presets: the fee is shown against the pitches' );
 
 		foreach ( array( 'event_name', 'event_date', 'fee_amount' ) as $key ) {
 			$this->ok( false === strpos( $html, 'name="f[' . $key . ']"' ),
