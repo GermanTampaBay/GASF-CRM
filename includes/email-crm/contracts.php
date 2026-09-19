@@ -499,10 +499,11 @@ function gasf_crm_vendor_vendor_fields() {
  *   sign_cosigner and its date
  *               -- a sole trader signs alone, which is the common case. The
  *                  paper leaves the line blank in exactly that situation.
- *   the certificate of insurance for CRAFT vendors
- *               -- the club's own instruction: food attaches it now, craft may
- *                  send it later. The contract's thirty-days-prior deadline is
- *                  the real gate, and it bites long after this form.
+ *   the certificate of insurance
+ *               -- required of FOOD vendors and not asked of craft vendors at
+ *                  all, on the club's instruction. It is handled by vendor type
+ *                  in the handler rather than listed here, because "required"
+ *                  depends on an answer given further up the same form.
  *
  * The event date is here but is filled from settings when the organizer has set
  * one, so it only ever falls to the vendor if the club left it blank.
@@ -1115,16 +1116,28 @@ function gasf_crm_vendor_shortcode() {
 			<?php gasf_crm_vendor_contract( 'form', $values ); ?>
 
 			<div class="gv-submit">
-				<div class="gv-callout">
-					<h4>Certificate of insurance</h4>
-					<p>The agreement above requires general liability cover of <strong>$1,000,000 per occurrence
-						and $2,000,000 aggregate</strong>, naming the German-American Society as an additional
-						insured, with proof provided <strong>at least 30 days before the event</strong>.</p>
-					<p><strong>Food vendors must attach it now.</strong> Craft vendors may send it later, but no
-						vendor sets up without it.</p>
-					<p><label for="gv-coi">Attach it here &mdash; PDF or a photograph, up to 10 MB.</label><br>
-						<input type="file" name="coi" id="gv-coi" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,application/pdf,image/jpeg,image/png,image/webp,image/heic">
-					</p>
+				<?php
+				/*
+				 * Food vendors only, and hidden outright for craft.
+				 *
+				 * It rides the same branch mechanism as the craft and food question
+				 * blocks above, so the script that hides one hides this too. Sitting
+				 * down here away from its siblings, that is easy to miss -- hence
+				 * this note rather than a bare div.
+				 */
+				?>
+				<div class="gv-branch" data-for="food">
+					<div class="gv-callout">
+						<h4>Certificate of insurance<span class="gv-star" aria-hidden="true">*</span></h4>
+						<p>The agreement above requires general liability cover of <strong>$1,000,000 per occurrence
+							and $2,000,000 aggregate</strong>, naming the German-American Society as an additional
+							insured, with proof provided <strong>at least 30 days before the event</strong>.</p>
+						<p><strong>Food vendors must attach it with this application.</strong> No food vendor serves
+							without it.</p>
+						<p><label for="gv-coi">Attach it here &mdash; PDF or a photograph, up to 10 MB.</label><br>
+							<input type="file" name="coi" id="gv-coi" accept=".pdf,.jpg,.jpeg,.png,.webp,.heic,application/pdf,image/jpeg,image/png,image/webp,image/heic">
+						</p>
+					</div>
 				</div>
 
 				<?php
@@ -1368,17 +1381,29 @@ function gasf_crm_vendor_handle() {
 		$errors[] = 'Please type your full name as your signature.';
 	}
 
+	/*
+	 * Insurance is a food requirement, so a craft application never stores one.
+	 *
+	 * The field is not rendered for craft at all, but the check is on the TYPE
+	 * rather than on whether a file arrived. Hiding an input does not stop it
+	 * being posted -- a stale page, a browser with no JavaScript, or anybody
+	 * curious with developer tools can still send one -- and quietly filing a
+	 * certificate against a vendor the club never asked for one from is a
+	 * document nobody will remember is there.
+	 */
 	$coi = array( 'path' => '', 'name' => '', 'bytes' => 0 );
-	if ( ! empty( $_FILES['coi']['name'] ) ) {
-		$stored = gasf_crm_vendor_store_coi( (array) $_FILES['coi'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
-		if ( is_wp_error( $stored ) ) {
-			$errors[] = $stored->get_error_message();
-		} else {
-			$coi = $stored;
+	if ( 'food' === $type ) {
+		if ( ! empty( $_FILES['coi']['name'] ) ) {
+			$stored = gasf_crm_vendor_store_coi( (array) $_FILES['coi'] ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+			if ( is_wp_error( $stored ) ) {
+				$errors[] = $stored->get_error_message();
+			} else {
+				$coi = $stored;
+			}
 		}
-	}
-	if ( 'food' === $type && '' === $coi['path'] ) {
-		$errors[] = 'Please attach your certificate of insurance. Food vendors need it with the application.';
+		if ( '' === $coi['path'] ) {
+			$errors[] = 'Please attach your certificate of insurance. Food vendors need it with the application.';
+		}
 	}
 
 	/*

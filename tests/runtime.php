@@ -2428,9 +2428,11 @@ final class GASF_CRM_Selftest {
 			$this->ok( array_key_exists( $key, $counter ), 'countersign: ' . $key . ' is recorded in the pane' );
 		}
 
-		// And the vendor is told where the upload actually is, at the point they
-		// read the rule that demands it.
-		$this->ok( false !== strpos( $html, 'attach your certificate of insurance at the bottom of this form' ),
+		// The vendor is told where the upload is, at the point they read the rule
+		// that demands it. Pinned on the behaviour rather than the sentence: this
+		// exact string has already broken once when the copy was reworded, and a
+		// test that fails on rewording is a test somebody deletes.
+		$this->ok( false !== strpos( $html, 'certificate of insurance at the bottom' ),
 			'record: the insurance clause points at the upload' );
 
 		// They are fields a reviewer can actually fill, which is the point.
@@ -2598,6 +2600,37 @@ final class GASF_CRM_Selftest {
 			$this->ok( array_key_exists( $key, $locked ) && array_key_exists( $key, $req ),
 				'required: ' . $key . ' is required and supplied by the organiser' );
 		}
+	}
+
+	/**
+	 * Insurance is asked of food vendors and of nobody else.
+	 *
+	 * Both halves are load-bearing. The field is not rendered for craft, and the
+	 * handler refuses one on TYPE rather than on whether a file turned up --
+	 * because hiding an input does not stop it being posted. A stale page, a
+	 * browser with no JavaScript, or anybody with developer tools can still send
+	 * a file, and a certificate quietly filed against a vendor the club never
+	 * asked one of is a document nobody will remember is there.
+	 */
+	public function test_vendor_insurance_is_food_only() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+
+		// The upload exists, and lives inside a branch only food vendors see.
+		$this->ok( false !== strpos( $html, 'name="coi"' ), 'insurance: the upload is on the page' );
+		$pos = strpos( $html, 'name="coi"' );
+		$before = substr( $html, 0, $pos );
+		$open = strrpos( $before, '<div class="gv-branch"' );
+		$this->ok( false !== $open, 'insurance: the upload sits inside a branch' );
+		$this->ok( false !== strpos( substr( $before, $open, 60 ), 'data-for="food"' ),
+			'insurance: that branch is the food one, so craft never sees it' );
+
+		// The agreement points food vendors at it, and says craft are not asked.
+		$this->ok( false !== strpos( $html, 'Food vendors:' ), 'insurance: the clause names who it applies to' );
+		$this->ok( false !== strpos( $html, 'does not require one from craft vendors' ),
+			'insurance: the clause says craft vendors are not asked' );
 	}
 
 	/* ------------------------------------------------------------------ run */

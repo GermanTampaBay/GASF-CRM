@@ -207,9 +207,8 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 		thirty (30) days prior to event.</p>
 
 	<?php if ( 'form' === $mode ) : ?>
-		<p class="gv-note">You can attach your certificate of insurance at the bottom of this form, after the
-			signature. If you do not have it yet, send it to us when it arrives &mdash; but no vendor sets up
-			without it.</p>
+		<p class="gv-note"><strong>Food vendors:</strong> attach your certificate of insurance at the bottom of
+			this form, after the signature. The Society does not require one from craft vendors.</p>
 	<?php endif; ?>
 
 	<h3 class="gv-ul">INDEMNIFICATION</h3>
