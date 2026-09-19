@@ -2633,6 +2633,39 @@ final class GASF_CRM_Selftest {
 			'insurance: the clause says craft vendors are not asked' );
 	}
 
+	/**
+	 * Every vendor is asked where they are standing.
+	 *
+	 * The space question used to live inside the craft branch, so picking "food
+	 * vendor" made it vanish -- and the food half then asked what power they
+	 * needed "for indoor locations" without ever having offered them indoors.
+	 *
+	 * Pinned by checking the question is not inside ANY branch, rather than that
+	 * it is inside the right one. The natural way to add a vendor type later is
+	 * to wrap more of the form in branches, and this is the field that must not
+	 * be swept up when somebody does.
+	 */
+	public function test_vendor_space_is_asked_of_everyone() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_version' => 'selftest' ), false );
+
+		$html = gasf_crm_vendor_shortcode();
+		$pos  = strpos( $html, 'name="booth"' );
+		$this->ok( false !== $pos, 'space: the question is on the form' );
+		if ( false === $pos ) { return; }
+
+		// Walk back to the nearest branch marker and the nearest branch close.
+		// If a branch opened more recently than one closed, we are inside one.
+		$before    = substr( $html, 0, $pos );
+		$last_open = strrpos( $before, '<div class="gv-branch"' );
+		$last_shut = strrpos( $before, '</div>' );
+		$inside    = ( false !== $last_open ) && ( false === $last_shut || $last_open > $last_shut );
+		$this->ok( ! $inside, 'space: the question is outside every branch, so both vendor types see it' );
+
+		// And it is required of everyone rather than of craft alone.
+		$this->ok( 2 === count( gasf_crm_vendor_booths() ), 'space: two pitches are offered' );
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

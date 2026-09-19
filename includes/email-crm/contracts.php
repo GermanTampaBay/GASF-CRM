@@ -856,16 +856,6 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 				<p><label for="gv-craftother">If you ticked Other, what is it?</label>
 					<input type="text" name="a[craft_other]" id="gv-craftother" maxlength="90" class="gv-in gv-w-lg" value="<?php echo esc_attr( $app['craft_other'] ?? '' ); ?>"></p>
 			</fieldset>
-
-			<fieldset>
-				<legend>Your space<span class="gv-star" aria-hidden="true">*</span></legend>
-				<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
-					<label class="gv-radio gv-block">
-						<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" <?php checked( $booth, $key ); ?>>
-						<?php echo esc_html( $label ); ?>
-					</label>
-				<?php endforeach; ?>
-			</fieldset>
 		</div>
 
 		<?php /* ----------------------------------------------------- food */ ?>
@@ -883,6 +873,28 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 					<input type="text" name="a[power_needs]" id="gv-power" maxlength="300" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['power_needs'] ?? '' ); ?>" placeholder="e.g. one 20A outlet for a warmer"></p>
 			</fieldset>
 		</div>
+
+		<?php
+		/*
+		 * Outside the branches, because everybody stands somewhere.
+		 *
+		 * This sat inside the craft half, so choosing "food vendor" made the
+		 * indoor-or-outdoor question vanish -- and food vendors were then asked
+		 * what power they needed "for indoor locations" without ever having been
+		 * offered the choice of indoors. The split made sense when the two
+		 * pitches were different things (a 10x10 outside, an 8 foot table in);
+		 * now that both are a 10'x10', where you stand is not a craft question.
+		 */
+		?>
+		<fieldset>
+			<legend>Your space<span class="gv-star" aria-hidden="true">*</span></legend>
+			<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
+				<label class="gv-radio gv-block">
+					<input type="radio" name="booth" value="<?php echo esc_attr( $key ); ?>" <?php checked( $booth, $key ); ?>>
+					<?php echo esc_html( $label ); ?>
+				</label>
+			<?php endforeach; ?>
+		</fieldset>
 
 		<fieldset>
 			<legend>Tell us about what you are selling<span class="gv-star" aria-hidden="true">*</span></legend>
@@ -1326,15 +1338,19 @@ function gasf_crm_vendor_handle() {
 		$errors[] = 'Please give at least one of a website, a Facebook page, or an Instagram account, so we can see your work.';
 	}
 
+	// Asked of everyone, so checked for everyone. It used to be inside the craft
+	// branch below, which meant a food vendor could not answer it and was never
+	// asked to.
+	if ( '' === $booth ) {
+		$errors[] = 'Please choose whether you want a 10x10 space outside or indoors.';
+	}
+
 	if ( 'craft' === $type ) {
 		if ( ! $crafts ) {
 			$errors[] = 'Please tick at least one kind of craft.';
 		}
 		if ( in_array( 'other', $crafts, true ) && '' === trim( (string) ( $app['craft_other'] ?? '' ) ) ) {
 			$errors[] = 'You ticked Other -- please say what kind of craft that is.';
-		}
-		if ( '' === $booth ) {
-			$errors[] = 'Please choose whether you want a 10x10 space outside or indoors.';
 		}
 	}
 
