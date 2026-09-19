@@ -607,7 +607,12 @@ function gasf_crm_vendor_blank( $key, array $args = array() ) {
 	// the vendor can see the clause is not blank by accident, and emitted as no
 	// field at all so there is nothing to disagree with what they typed above.
 	if ( ! empty( $args['auto'] ) ) {
-		echo '<span class="gv-auto ' . esc_attr( $w ) . '">' . esc_html( $args['auto'] ) . '</span>';
+		printf(
+			'<span class="gv-auto %s" data-mirror="%s">%s</span>',
+			esc_attr( $w ),
+			esc_attr( $key ),
+			esc_html( $args['auto'] )
+		);
 		return;
 	}
 
@@ -828,7 +833,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 			<?php endforeach; ?>
 		</fieldset>
 
-		<fieldset>
+		<fieldset class="gv-hideable">
 			<legend>Where we can see your work <span class="gv-req">&mdash; enter at least one</span></legend>
 			<p class="gv-oneof"><strong>Enter at least one of these three.</strong></p>
 			<p class="gv-legend">We use them to help promote the event, and to see what you make.</p>
@@ -886,7 +891,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		 * now that both are a 10'x10', where you stand is not a craft question.
 		 */
 		?>
-		<fieldset>
+		<fieldset class="gv-hideable">
 			<legend>Your space<span class="gv-star" aria-hidden="true">*</span></legend>
 			<?php foreach ( gasf_crm_vendor_booths() as $key => $label ) : ?>
 				<label class="gv-radio gv-block">
@@ -896,14 +901,14 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 			<?php endforeach; ?>
 		</fieldset>
 
-		<fieldset>
+		<fieldset class="gv-hideable">
 			<legend>Tell us about what you are selling<span class="gv-star" aria-hidden="true">*</span></legend>
-			<p class="gv-legend">In your own words. <strong>This goes into the agreement below</strong> as the
-				description of what you are approved to sell, so please be specific.</p>
+			<p class="gv-legend">In your own words, and please be specific &mdash; this is the description of
+				what you are approved to sell. <strong>It appears in the agreement below as you type.</strong></p>
 			<p><textarea name="a[description]" id="gv-description" rows="5" maxlength="2000" class="gv-in gv-w-full" required><?php echo esc_textarea( $app['description'] ?? '' ); ?></textarea></p>
 		</fieldset>
 
-		<fieldset>
+		<fieldset class="gv-hideable">
 			<legend>Photographs</legend>
 			<p class="gv-legend">Three photographs, please. The first should be your set-up, so we can picture
 				where you will go.</p>
@@ -973,6 +978,7 @@ function gasf_crm_vendor_styles() {
 .gv-inline { margin-left: 0.6rem; }
 .gv-eg { font-style: italic; }
 .gv-lines .gv-in, .gv-lines .gv-blank, .gv-lines .gv-val { display: block; margin-bottom: 0.5rem; }
+.gv-lines .gv-val { min-height: 1.2em; white-space: pre-wrap; }
 .gv-attest { font-weight: 700; margin-top: 1.5rem; }
 .gv-note { font-style: italic; color: #555; }
 .gv-in { border: 0; border-bottom: 1px solid #444; background: #fffdf5; color: #111; padding: 0.15rem 0.3rem; font: inherit; }
@@ -1124,14 +1130,14 @@ function gasf_crm_vendor_shortcode() {
 			$cfg_pdf = gasf_crm_vendor_cfg();
 			if ( '' !== trim( (string) $cfg_pdf['terms_url'] ) ) :
 				?>
-				<p class="gv-legend">Would you rather read this on paper?
+				<p class="gv-legend gv-hideable">Would you rather read this on paper?
 					<a href="<?php echo esc_url( $cfg_pdf['terms_url'] ); ?>" target="_blank" rel="noopener">Download a PDF copy of the agreement</a>.
 					The version below is the one you are signing.</p>
 			<?php endif; ?>
 
 			<?php gasf_crm_vendor_contract( 'form', $values ); ?>
 
-			<div class="gv-submit">
+			<div class="gv-submit gv-hideable">
 				<?php
 				/*
 				 * Food vendors only, and hidden outright for craft.
@@ -1170,16 +1176,50 @@ function gasf_crm_vendor_shortcode() {
 				<p><button type="submit" class="gv-go">Sign and submit this agreement</button></p>
 				<script>
 				(function () {
+					/*
+					 * Everything here is progressive enhancement: with no
+					 * JavaScript the whole form is visible and every rule is
+					 * still enforced on the server. The script only spares
+					 * somebody four pages of questions that do not apply.
+					 */
 					var branches = document.querySelectorAll('.gv-branch');
+					var waiting = document.querySelectorAll('.gv-hideable, .gv-contract');
 					var radios = document.querySelectorAll('input[name="vendor_type"]');
+
 					function sync() {
 						var chosen = '';
 						Array.prototype.forEach.call(radios, function (r) { if (r.checked) { chosen = r.value; } });
+						var picked = chosen !== '';
+
+						Array.prototype.forEach.call(waiting, function (el) { el.hidden = !picked; });
 						Array.prototype.forEach.call(branches, function (b) {
-							b.hidden = (chosen !== '' && b.getAttribute('data-for') !== chosen);
+							b.hidden = !picked || b.getAttribute('data-for') !== chosen;
 						});
 					}
 					Array.prototype.forEach.call(radios, function (r) { r.addEventListener('change', sync); });
+
+					/*
+					 * The description IS the agreement's description of goods, and
+					 * the copy beside it says so. Until this ran, that was a claim
+					 * the page never demonstrated: somebody typed four lines about
+					 * their bratwurst and the clause below still read "taken from
+					 * the description above", which reads like a promise the form
+					 * forgot to keep.
+					 */
+					var source = document.getElementById('gv-description');
+					var target = document.querySelector('[data-mirror="desc_full"]');
+					if (source && target) {
+						var placeholder = target.textContent;
+						var mirror = function () {
+							var typed = source.value.replace(/\s+/g, ' ').trim();
+							target.textContent = typed === '' ? placeholder : typed;
+							target.classList.toggle('gv-auto', typed === '');
+							target.classList.toggle('gv-val', typed !== '');
+						};
+						source.addEventListener('input', mirror);
+						mirror();
+					}
+
 					sync();
 				}());
 				</script>
