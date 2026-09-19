@@ -838,7 +838,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 		<?php /* ---------------------------------------------------- craft */ ?>
 		<div class="gv-branch" data-for="craft">
 			<fieldset>
-				<legend>What you make<span class="gv-star" aria-hidden="true">*</span></legend>
+				<legend>What do you make?<span class="gv-star" aria-hidden="true">*</span></legend>
 				<p class="gv-legend">Tick everything that applies.</p>
 				<div class="gv-checks">
 					<?php foreach ( gasf_crm_vendor_craft_types() as $key => $label ) : ?>
