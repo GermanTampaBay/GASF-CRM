@@ -869,7 +869,7 @@ function gasf_crm_vendor_application_section( array $app, $type, array $crafts, 
 					They are too loud for the evening program. Tell us what power you need and we will
 					run a cord to you where we can.</p>
 
-				<p><label for="gv-power">For indoor locations, what power do you need?<span class="gv-star" aria-hidden="true">*</span></label>
+				<p><label for="gv-power">What power do you need?<span class="gv-star" aria-hidden="true">*</span></label>
 					<input type="text" name="a[power_needs]" id="gv-power" maxlength="300" class="gv-in gv-w-xl" value="<?php echo esc_attr( $app['power_needs'] ?? '' ); ?>" placeholder="e.g. one 20A outlet for a warmer"></p>
 			</fieldset>
 		</div>
