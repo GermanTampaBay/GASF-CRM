@@ -677,8 +677,12 @@ function gasf_crm_vendor_craft_types() {
  */
 function gasf_crm_vendor_booths() {
 	return array(
-		'10x10_outside' => __( '10x10 outside (no electricity, and you must bring your own lighting for evening events)', 'gasf' ),
-		'8ft_inside'    => __( '8 foot table inside', 'gasf' ),
+		'10x10_outside' => __( "10'x10' outside (no electricity, and you must bring your own battery-powered lighting for evening events)", 'gasf' ),
+		// The KEY still says 8ft because signed applications store the key, not
+		// the label, and renaming it would leave every existing record pointing
+		// at a space that no longer exists. The inside pitch became a 10x10 like
+		// the outside one; only what it is CALLED has changed.
+		'8ft_inside'    => __( "10'x10' indoor space", 'gasf' ),
 	);
 }
 
@@ -1330,7 +1334,7 @@ function gasf_crm_vendor_handle() {
 			$errors[] = 'You ticked Other -- please say what kind of craft that is.';
 		}
 		if ( '' === $booth ) {
-			$errors[] = 'Please choose whether you want a 10x10 space outside or an 8 foot table inside.';
+			$errors[] = 'Please choose whether you want a 10x10 space outside or indoors.';
 		}
 	}
 
