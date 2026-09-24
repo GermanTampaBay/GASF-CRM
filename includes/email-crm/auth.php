@@ -38,27 +38,87 @@ function gasf_crm_providers() {
 }
 
 /**
- * Ask the provider to POST the result instead of putting it in the query string.
+ * Ask the provider to return the result in the URL fragment.
  *
  * This host runs ModSecurity, whose remote-file-inclusion rule rejects any
- * request with a query parameter whose value BEGINS with http:// or https://.
- * Google's callback returns
+ * request argument whose value BEGINS with http:// or https://. Google's
+ * callback carries two of them:
  *   scope=https://www.googleapis.com/auth/userinfo.email ...
- * with the URL first, so every single sign-in was being answered with a 406
- * before PHP ever ran. Mid-value URLs pass; it is specifically the leading
- * scheme that trips it.
+ *   iss=https://accounts.google.com            (RFC 9207, added by Google 2026)
+ * Mid-value URLs pass; it is specifically the leading scheme that trips it.
  *
- * The same value in a POST body sails through, because the rule inspects query
- * arguments. Both Google and Microsoft advertise form_post in their OIDC
- * discovery documents, so this is a supported mode rather than a trick — and it
- * is preferable to asking the host to weaken a firewall rule that is doing a
- * reasonable job for every other request on the site.
+ * History, so nobody walks back into it: query mode 406'd on `scope`. form_post
+ * fixed that for a while because the rule then only inspected query arguments —
+ * until the host extended it to POST bodies and Google started sending `iss`,
+ * and every sign-in 406'd again (Sept 2026) before PHP ever ran.
+ *
+ * Fragment mode is out of the firewall's reach entirely: browsers never send
+ * the part after # to the server. The callback GET arrives bare, and
+ * gasf_crm_fragment_relay() hands back a tiny page that forwards ONLY code,
+ * state and error in a same-origin POST — iss and scope are simply never
+ * transmitted. Both Google and Microsoft list fragment in their OIDC discovery
+ * documents, so this is a supported mode rather than a trick, and still
+ * preferable to asking the host to weaken a rule that protects the whole site.
  */
 function gasf_crm_response_mode() {
-	return 'form_post';
+	return 'fragment';
 }
 
-/** Read a callback value from POST (form_post) or GET (fallback). */
+/**
+ * The bare GET leg of a fragment-mode callback: relay the fragment to the
+ * server as a POST of just the parameters we use.
+ *
+ * Returns without output when there is nothing to relay (a POST, or a
+ * query-mode response that already carries its values); otherwise prints the
+ * relay page and exits. $restart is where a person is sent if the fragment is
+ * missing — almost always a reload after the state was spent.
+ */
+function gasf_crm_fragment_relay( $restart ) {
+	if ( 'GET' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) ) { return; }
+	if ( '' !== gasf_crm_cb_param( 'code' ) || '' !== gasf_crm_cb_param( 'error', '/[^A-Za-z0-9._-]/' ) ) { return; }
+
+	nocache_headers();
+	header( 'Content-Type: text/html; charset=utf-8' );
+	// The one-time code is in this page's URL until the script strips it.
+	header( 'Referrer-Policy: no-referrer' );
+	?><!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex"><title>Signing in…</title></head>
+<body style="font-family:system-ui,sans-serif;padding:2rem">
+<p id="m">Signing in…</p>
+<form id="f" method="post"></form>
+<noscript><p>Sign-in needs JavaScript. Turn it on and <a href="<?php echo esc_url( $restart ); ?>">start again</a>.</p></noscript>
+<script>
+(function () {
+	var h = new URLSearchParams(location.hash.slice(1)), f = document.getElementById('f');
+	// Take the code out of the address bar and history before anything else.
+	history.replaceState(null, '', location.pathname);
+	['code', 'state', 'error'].forEach(function (k) {
+		var v = h.get(k);
+		if (v === null) { return; }
+		var i = document.createElement('input');
+		i.type = 'hidden'; i.name = k; i.value = v;
+		f.appendChild(i);
+	});
+	if (!f.elements.length) {
+		var m = document.getElementById('m');
+		m.textContent = 'This sign-in page has already been used. ';
+		var a = document.createElement('a');
+		a.href = <?php echo wp_json_encode( esc_url_raw( $restart ) ); ?>;
+		a.textContent = 'Start again';
+		m.appendChild(a);
+		return;
+	}
+	f.action = location.pathname;
+	f.submit();
+})();
+</script>
+</body></html>
+<?php
+	exit;
+}
+
+/** Read a callback value from POST (the fragment relay) or GET (fallback). */
 function gasf_crm_cb_param( $key, $allowed = '/[^A-Za-z0-9._~\/-]/' ) {
 	$raw = null;
 	// phpcs:disable WordPress.Security.NonceVerification -- OAuth callbacks are
@@ -130,11 +190,11 @@ function gasf_crm_auth_start( $provider ) {
 		// perfectly good HTTPS request and the flag would silently be dropped.
 		'secure'   => ( 0 === strpos( home_url(), 'https://' ) ),
 		'httponly' => true,
-		// None, not Lax, because response_mode=form_post means the provider
-		// returns us via a cross-site POST — and Lax withholds cookies on
-		// anything except a top-level GET navigation. Under Lax this cookie
-		// would simply be absent on every callback and every sign-in would fail
-		// the browser-binding check. None requires Secure, which is set above.
+		// None, not Lax. With fragment mode the POST that carries the code is
+		// same-origin (the relay page), so Lax would now work — but None keeps
+		// any provider that still form_posts cross-site working too, and costs
+		// nothing: the cookie is httponly, path-scoped and useless without the
+		// state transient. None requires Secure, which is set above.
 		'samesite' => 'None',
 	) );
 
@@ -166,6 +226,8 @@ function gasf_crm_auth_callback( $provider ) {
 	$providers = gasf_crm_providers();
 	if ( ! isset( $providers[ $provider ] ) ) { gasf_crm_auth_fail( 'Unknown provider.' ); }
 	$p = $providers[ $provider ];
+
+	gasf_crm_fragment_relay( home_url( '/email' ) );
 
 	if ( '' !== gasf_crm_cb_param( 'error', '/[^A-Za-z0-9._-]/' ) ) {
 		gasf_crm_auth_fail( 'Sign-in was cancelled or refused.' );

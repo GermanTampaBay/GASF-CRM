@@ -9,12 +9,12 @@
  * client secret.
  *
  *   GET  /wp-json/gasf/v1/kiosk-auth/authorize        NUC 302s the browser here
- *   POST /wp-json/gasf/v1/kiosk-auth/google-callback  Google form_posts back here
+ *   GET  /wp-json/gasf/v1/kiosk-auth/google-callback  Google returns here (fragment), relay POSTs back
  *   POST /wp-json/gasf/v1/kiosk-auth/token            NUC redeems the code (server-to-server)
  *   GET  /wp-json/gasf/v1/kiosk-auth/userinfo         NUC reads {sub, email, name}
  *
  * Everything hard was already solved in auth.php on this exact host: PKCE +
- * state (gasf_crm_auth_start), form_post vs ModSecurity, the browser-binding
+ * state (gasf_crm_auth_start), fragment relay vs ModSecurity, the browser-binding
  * cookie, proxy-terminated-TLS Secure flags, and id_token validation
  * (gasf_crm_decode_id_token). This file reuses those functions; the new work
  * is only the thin authorization-server shim.
@@ -137,9 +137,8 @@ function gasf_kiosk_auth_authorize( WP_REST_Request $req ) {
 		// documented discovery).
 		'secure'   => ( 0 === strpos( home_url(), 'https://' ) ),
 		'httponly' => true,
-		// None, not Lax: response_mode=form_post returns via a cross-site
-		// POST, and Lax withholds cookies on anything except a top-level
-		// GET navigation. None requires Secure, set above.
+		// None, matching auth.php (see its note: the relay POST is now
+		// same-origin, so this is belt-and-braces). None requires Secure.
 		'samesite' => 'None',
 	) );
 
@@ -160,10 +159,10 @@ function gasf_kiosk_auth_authorize( WP_REST_Request $req ) {
 		'state'                 => $gstate,
 		'code_challenge'        => $challenge,
 		'code_challenge_method' => 'S256',
-		// form_post: this host's ModSecurity 406s any query value that
-		// BEGINS with http(s)://, and Google's callback puts a URL-leading
-		// scope value first. gasf_crm_response_mode documents the lesson.
-		'response_mode'         => 'form_post',
+		// Fragment + relay: this host's ModSecurity 406s any argument value
+		// that BEGINS with http(s)://, and Google's callback carries two
+		// (scope, iss). gasf_crm_response_mode documents the lesson.
+		'response_mode'         => gasf_crm_response_mode(),
 		'prompt'                => 'select_account',
 	) ) );
 	exit;
@@ -176,7 +175,12 @@ function gasf_kiosk_auth_authorize( WP_REST_Request $req ) {
 function gasf_kiosk_auth_google_callback( WP_REST_Request $req ) {
 	if ( ! gasf_kiosk_broker_ready() ) { gasf_kiosk_auth_fail( 'Kiosk sign-in is not configured.', 503 ); }
 
-	// gasf_crm_cb_param reads POST (form_post) with GET fallback and keeps
+	// Google lands here by GET with the result in the fragment; the relay page
+	// POSTs code/state back to this same route. No restart URL of our own to
+	// offer - the flow starts on the NUC - so point at the site root.
+	gasf_crm_fragment_relay( home_url( '/' ) );
+
+	// gasf_crm_cb_param reads POST (the relay) with GET fallback and keeps
 	// percent-encoded octets intact - reuse it verbatim.
 	if ( '' !== gasf_crm_cb_param( 'error', '/[^A-Za-z0-9._-]/' ) ) {
 		gasf_kiosk_auth_fail( 'Sign-in was cancelled or refused.' );
@@ -340,7 +344,7 @@ add_action( 'rest_api_init', function () {
 		'callback'            => 'gasf_kiosk_auth_authorize',
 	) );
 	register_rest_route( 'gasf/v1', '/kiosk-auth/google-callback', array(
-		'methods'             => 'POST', // response_mode=form_post
+		'methods'             => 'GET, POST', // GET from Google (fragment), POST from the relay page
 		'permission_callback' => '__return_true', // state + PKCE + browser cookie ARE the auth
 		'callback'            => 'gasf_kiosk_auth_google_callback',
 	) );
