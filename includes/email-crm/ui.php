@@ -150,6 +150,12 @@ function gasf_crm_render_signin() {
 	// do not reuse POST responses from cache, so this cannot recur however the
 	// host's caching is configured next.
 	foreach ( $providers as $key => $p ) {
+		// Google signs in by popup; see the popup section in auth.php for why a
+		// redirect can no longer get back to this host.
+		if ( 'google' === $key ) {
+			gasf_crm_render_google_popup( $p );
+			continue;
+		}
 		printf(
 			// The hidden field is insurance, not decoration. This host's
 			// ModSecurity rejects a POST it considers empty, and a form whose
@@ -162,6 +168,102 @@ function gasf_crm_render_signin() {
 		);
 	}
 	echo '</div>';
+}
+
+/**
+ * "Continue with Google", by popup.
+ *
+ * Google's library is loaded with the page rather than on click: the popup has
+ * to open inside the click itself or the browser blocks it, and there is no
+ * time to fetch a script in between.
+ *
+ * The form carries exactly three fields - mode, code, and state - and none of
+ * them can begin with https://, which is the whole point. Google's reply also
+ * carries scope, authuser, and prompt; they stay in the browser.
+ */
+function gasf_crm_render_google_popup( array $p ) {
+	?>
+	<button class="btn block" type="button" id="gsignin" data-client="<?php echo esc_attr( $p['client_id'] ); ?>">Continue with Google</button>
+	<div class="note err" id="gsimsg" hidden></div>
+	<form id="gsiform" method="post" action="<?php echo esc_url( home_url( '/email/auth/google/callback' ) ); ?>" hidden>
+		<input type="hidden" name="mode" value="popup">
+		<input type="hidden" name="code" value="">
+		<input type="hidden" name="state" value="">
+	</form>
+	<script src="https://accounts.google.com/gsi/client" async defer></script>
+	<script>
+	(function () {
+		var btn = document.getElementById('gsignin');
+		var form = document.getElementById('gsiform');
+		var msg = document.getElementById('gsimsg');
+		if (!btn || !form || !msg) { return; }
+
+		function say(t) {
+			msg.textContent = t;
+			msg.hidden = !t;
+		}
+
+		function hex(n) {
+			var a = new Uint8Array(n);
+			window.crypto.getRandomValues(a);
+			return Array.prototype.map.call(a, function (b) {
+				return ('0' + b.toString(16)).slice(-2);
+			}).join('');
+		}
+
+		btn.addEventListener('click', function () {
+			say('');
+			if (!(window.google && google.accounts && google.accounts.oauth2)) {
+				say('Google\u2019s sign-in is still loading. Wait a moment and press the button again.');
+				return;
+			}
+			// A fresh nonce per attempt, written where a cross-site form cannot
+			// reach it. The server accepts the code only if this cookie and the
+			// posted state agree.
+			var nonce = hex(16);
+			document.cookie = '__Host-gasf_gsi=' + nonce + '; Path=/; Secure; SameSite=Strict; Max-Age=900';
+
+			var client = google.accounts.oauth2.initCodeClient({
+				client_id: btn.getAttribute('data-client'),
+				scope: 'openid email profile',
+				ux_mode: 'popup',
+				select_account: true,
+				state: nonce,
+				callback: function (r) {
+					if (!r || r.error) {
+						say(r && r.error === 'access_denied'
+							? 'Sign-in was cancelled.'
+							: 'Google did not finish the sign-in. Press the button to try again.');
+						return;
+					}
+					if (r.state !== nonce) {
+						say('That reply from Google did not belong to this page. Press the button to try again.');
+						return;
+					}
+					form.elements.code.value = r.code;
+					form.elements.state.value = nonce;
+					btn.disabled = true;
+					btn.textContent = 'Signing in\u2026';
+					form.submit();
+				},
+				error_callback: function (e) {
+					var t = e && e.type;
+					if (t === 'popup_failed_to_open') {
+						say('Your browser blocked the Google window. Allow pop-ups for this site, then press the button again.');
+					} else if (t === 'popup_closed') {
+						say('The Google window was closed before sign-in finished.');
+					} else {
+						say('Google sign-in could not start. Press the button to try again.');
+					}
+				}
+			});
+			// Inside the click, synchronously: anything later is a popup the
+			// browser is entitled to block.
+			client.requestCode();
+		});
+	})();
+	</script>
+	<?php
 }
 
 /**

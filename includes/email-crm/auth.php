@@ -59,9 +59,135 @@ function gasf_crm_providers() {
  * transmitted. Both Google and Microsoft list fragment in their OIDC discovery
  * documents, so this is a supported mode rather than a trick, and still
  * preferable to asking the host to weaken a rule that protects the whole site.
+ *
+ * CORRECTION, the day after: Google lists fragment and then ignores it for
+ * response_type=code. Every Google sign-in still came back as a query string,
+ * iss and all, and 406'd exactly as before - the access log shows the
+ * authorize URL asking for fragment and the callback arriving as ?state=&iss=
+ * anyway. Nobody had sent a real Google sign-in through it. Google now uses the
+ * popup below and never redirects back to this host at all; this function
+ * stays for any provider that does honour it, and for the kiosk broker, which
+ * has the same problem and is not yet fixed.
  */
 function gasf_crm_response_mode() {
 	return 'fragment';
+}
+
+/* --------------------------------------------------------------------------
+ * Google, by popup
+ *
+ * Every way of sending Google's answer back through a REDIRECT is now closed on
+ * this host. Google adds iss=https://accounts.google.com to every response
+ * (RFC 9207), ModSecurity rejects any argument whose value begins with https://
+ * - in the query string and, since September 2026, in POST bodies - and Google
+ * ignores response_mode=fragment for the code flow. Query, form_post, and
+ * fragment were all tried, and all hand the firewall exactly what it blocks.
+ *
+ * So Google's answer no longer comes to this host as a request at all. Google's
+ * own library opens its account chooser in a popup and hands the authorization
+ * code back to JavaScript on the sign-in page through postMessage - which Google
+ * only delivers to an origin registered on the client, the same one the photo
+ * import already needed. The page then POSTs just the code and a nonce. A code
+ * looks like 4/0A..., so there is nothing left for the rule to object to.
+ *
+ * What does NOT change is the part that makes it safe: the code is still
+ * exchanged server to server with the client secret, and the id_token still
+ * comes straight back from Google's token endpoint over TLS, so the reasoning
+ * above gasf_crm_decode_id_token() holds unchanged.
+ *
+ * What replaces PKCE and the state transient is a double-submit nonce. The page
+ * mints it, writes it to a __Host- cookie, passes it to Google as `state`, and
+ * posts it back; the server accepts the code only if cookie and body agree. A
+ * cross-site form cannot set that cookie or read it, so nobody can sign a
+ * volunteer into somebody else's account by posting a code of their own - and
+ * a code minted for any other redirect_uri cannot be exchanged as `postmessage`.
+ * ------------------------------------------------------------------------ */
+
+/** The nonce cookie. __Host- so a sibling subdomain cannot plant one. */
+function gasf_crm_gsi_cookie() {
+	return '__Host-gasf_gsi';
+}
+
+/**
+ * Does the popup's reply belong to the page that asked for it?
+ *
+ * Both halves must be present, must be exactly 32 hex characters, and must
+ * agree. Agreement alone is not enough - two empty strings agree.
+ */
+function gasf_crm_gsi_nonce_ok( $cookie, $posted ) {
+	$cookie = (string) $cookie;
+	$posted = (string) $posted;
+	if ( ! preg_match( '/^[a-f0-9]{32}$/', $cookie ) || ! preg_match( '/^[a-f0-9]{32}$/', $posted ) ) {
+		return false;
+	}
+	return hash_equals( $cookie, $posted );
+}
+
+/**
+ * The token-endpoint body for a code the popup produced.
+ *
+ * redirect_uri is the literal string `postmessage`: Google requires the value
+ * the code was issued under, and a popup code is issued under that, not under
+ * any URL. No code_verifier, because the popup flow never had one.
+ */
+function gasf_crm_gsi_token_body( array $p, $code ) {
+	return array(
+		'grant_type'    => 'authorization_code',
+		'code'          => (string) $code,
+		'redirect_uri'  => 'postmessage',
+		'client_id'     => (string) $p['client_id'],
+		'client_secret' => (string) $p['secret'],
+	);
+}
+
+/**
+ * Finish a Google popup sign-in. Always ends the request.
+ */
+function gasf_crm_auth_popup_finish( $provider, array $p ) {
+	if ( 'google' !== $provider ) {
+		gasf_crm_auth_fail( 'That sign-in method does not use a popup.', 'popup: provider ' . $provider );
+	}
+
+	$code   = gasf_crm_cb_param( 'code' );
+	$state  = gasf_crm_cb_param( 'state', '/[^a-f0-9]/' );
+	$name   = gasf_crm_gsi_cookie();
+	$cookie = isset( $_COOKIE[ $name ] ) ? preg_replace( '/[^a-f0-9]/', '', (string) wp_unslash( $_COOKIE[ $name ] ) ) : '';
+
+	// Spent the moment it is read, whatever happens next. A nonce that survives
+	// a failed attempt is one the next attempt can reuse.
+	setcookie( $name, '', array(
+		'expires'  => time() - HOUR_IN_SECONDS,
+		'path'     => '/',
+		'secure'   => ( 0 === strpos( home_url(), 'https://' ) ),
+		'samesite' => 'Strict',
+	) );
+
+	if ( '' === $code ) {
+		gasf_crm_auth_fail( 'Incomplete sign-in response.', 'popup: no code' );
+	}
+	if ( ! gasf_crm_gsi_nonce_ok( $cookie, $state ) ) {
+		gasf_crm_auth_fail(
+			'That sign-in could not be matched to this page. Press "Continue with Google" again on the sign-in page.',
+			'' === $cookie ? 'popup: no nonce cookie' : 'popup: nonce mismatch'
+		);
+	}
+
+	$r = wp_remote_post( $p['token'], array(
+		'timeout' => 20,
+		'body'    => gasf_crm_gsi_token_body( $p, $code ),
+	) );
+	if ( is_wp_error( $r ) ) { gasf_crm_auth_fail( 'Could not reach the sign-in provider.' ); }
+
+	$tok = json_decode( wp_remote_retrieve_body( $r ), true );
+	if ( empty( $tok['id_token'] ) ) {
+		gasf_crm_log( 'CRM auth: popup token exchange failed for ' . $provider . ' — ' . substr( wp_remote_retrieve_body( $r ), 0, 200 ) );
+		gasf_crm_auth_fail( 'Sign-in failed at the provider.', 'popup: token exchange' );
+	}
+
+	$claims = gasf_crm_decode_id_token( $tok['id_token'], $p['client_id'] );
+	if ( is_wp_error( $claims ) ) { gasf_crm_auth_fail( $claims->get_error_message() ); }
+
+	gasf_crm_auth_complete( $provider, $claims );
 }
 
 /**
@@ -160,6 +286,15 @@ function gasf_crm_auth_start( $provider ) {
 	}
 	$p = $providers[ $provider ];
 
+	// Google does not start here any more - its answer cannot come back through
+	// a redirect on this host (see the popup section above). What arrives here
+	// is a sign-in page from before the change, still open in a tab, so it goes
+	// back to the page that works rather than into a guaranteed 406.
+	if ( 'google' === $provider ) {
+		wp_safe_redirect( home_url( '/email' ) );
+		exit;
+	}
+
 	// POST only. A GET here would be a cacheable redirect carrying a one-time
 	// value, which is exactly how this broke. Anyone arriving by GET — an old
 	// bookmark, a link in a browser's history — is simply sent to the sign-in
@@ -227,6 +362,14 @@ function gasf_crm_auth_callback( $provider ) {
 	if ( ! isset( $providers[ $provider ] ) ) { gasf_crm_auth_fail( 'Unknown provider.' ); }
 	$p = $providers[ $provider ];
 
+	// The popup's result lands on this route too - it is still "where sign-in
+	// comes back" - but it carries a different kind of proof, so it is handled
+	// whole by its own function rather than threaded through this one.
+	if ( 'POST' === ( $_SERVER['REQUEST_METHOD'] ?? '' ) && 'popup' === gasf_crm_cb_param( 'mode', '/[^a-z]/' ) ) {
+		gasf_crm_auth_popup_finish( $provider, $p );
+		return;
+	}
+
 	gasf_crm_fragment_relay( home_url( '/email' ) );
 
 	if ( '' !== gasf_crm_cb_param( 'error', '/[^A-Za-z0-9._-]/' ) ) {
@@ -284,6 +427,16 @@ function gasf_crm_auth_callback( $provider ) {
 	$claims = gasf_crm_decode_id_token( $tok['id_token'], $p['client_id'] );
 	if ( is_wp_error( $claims ) ) { gasf_crm_auth_fail( $claims->get_error_message() ); }
 
+	gasf_crm_auth_complete( $provider, $claims );
+}
+
+/**
+ * Everything after the provider has vouched for somebody: find or create the
+ * account, start the session, and record it. Shared by the redirect and popup
+ * paths, so the two can never disagree about what signing in means. Always
+ * ends the request.
+ */
+function gasf_crm_auth_complete( $provider, array $claims ) {
 	$user_id = gasf_crm_find_or_create_user( $provider, $claims );
 	if ( is_wp_error( $user_id ) ) { gasf_crm_auth_fail( $user_id->get_error_message() ); }
 

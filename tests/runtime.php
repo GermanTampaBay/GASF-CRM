@@ -2788,6 +2788,62 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * Google sign-in, by popup.
+	 *
+	 * Every redirect-based way of getting Google's answer back to this host now
+	 * 406s at the firewall before PHP runs: Google always sends
+	 * iss=https://accounts.google.com, and the host rejects any argument that
+	 * begins with https://, in the query string and in POST bodies alike. The
+	 * previous fix asked Google for fragment mode, which Google ignores for this
+	 * flow, and nobody had put a real Google sign-in through it.
+	 *
+	 * A real Google sign-in cannot run in this suite, so these pin what the fix
+	 * rests on: the nonce check, the exchange parameters, and above all what the
+	 * page posts - nothing that begins with https://.
+	 */
+	public function test_google_popup_signin() {
+		$n = str_repeat( 'a1', 16 );
+		$this->ok( gasf_crm_gsi_nonce_ok( $n, $n ), 'sign-in: a popup reply carrying the page\'s own nonce is accepted' );
+		$this->ok( ! gasf_crm_gsi_nonce_ok( $n, str_repeat( 'b2', 16 ) ), 'sign-in: a reply carrying some other nonce is refused' );
+		$this->ok(
+			! gasf_crm_gsi_nonce_ok( '', $n ) && ! gasf_crm_gsi_nonce_ok( $n, '' ) && ! gasf_crm_gsi_nonce_ok( '', '' ),
+			'sign-in: a missing cookie or a missing nonce is refused, even when both are missing and so "agree"'
+		);
+		$this->ok( ! gasf_crm_gsi_nonce_ok( 'abc', 'abc' ), 'sign-in: a nonce that is not 32 hex characters is refused even when both halves match' );
+
+		$body = gasf_crm_gsi_token_body( gasf_crm_providers()['google'], '4/0AXtest' );
+		$this->ok( 'postmessage' === $body['redirect_uri'], 'sign-in: a popup code is exchanged as postmessage, the value Google issued it under' );
+		$this->ok( ! isset( $body['code_verifier'] ), 'sign-in: and without a PKCE verifier, which the popup never had' );
+
+		if ( ! isset( gasf_crm_enabled_providers()['google'] ) || ! function_exists( 'gasf_crm_render_signin' ) ) {
+			$this->ok( false, 'sign-in: Google is enabled on this site, so the page can be checked' );
+			return;
+		}
+		ob_start();
+		gasf_crm_render_signin();
+		$html = (string) ob_get_clean();
+
+		$this->ok(
+			false !== strpos( $html, 'accounts.google.com/gsi/client' ) && false !== strpos( $html, 'initCodeClient' ),
+			'sign-in: the Google button opens Google\'s own popup'
+		);
+		$this->ok(
+			false === strpos( $html, 'action="' . esc_url( home_url( '/email/auth/google' ) ) . '"' ),
+			'sign-in: and no longer posts to the redirect start, which cannot come back past this host'
+		);
+
+		// The invariant the whole change exists for.
+		preg_match( '~<form id="gsiform"[^>]*>(.*?)</form>~s', $html, $m );
+		preg_match_all( '~name="([a-z_]+)"~', (string) ( $m[1] ?? '' ), $names );
+		$fields = $names[1];
+		sort( $fields );
+		$this->ok(
+			array( 'code', 'mode', 'state' ) === $fields,
+			'sign-in: the popup posts mode, code, and state only - nothing that can begin with https://'
+		);
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {
