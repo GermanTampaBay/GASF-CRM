@@ -3465,8 +3465,17 @@ function gasf_crm_render_inbox_script() {
 			if (!list.length) { box.innerHTML = '<span class="muted">Nobody has been named in a photo yet.</span>'; return; }
 
 			box.innerHTML = sortNames(list).map(function(p){
+				// Their face beside their name, where one has been labelled: the
+				// list is where a volunteer decides whether two entries are the
+				// same person, and a face answers that faster than a spelling.
+				// Lazy, so opening the panel does not fetch every face at once;
+				// removed on error (nobody labelled yet), leaving an empty slot
+				// so the rows still line up.
 				return '<div class="nrow" data-term="' + p.id + '">' +
 					'<div class="nmain">' +
+						'<span class="nface-slot"><img class="nface" loading="lazy" decoding="async" alt=""' +
+							' src="' + esc(faceRefUrl(p.value || p.label)) + '"' +
+							' title="The club\'s clearest photo of this person" onerror="this.remove()"></span>' +
 						'<input type="text" class="nname" value="' + esc(p.label) + '" aria-label="Name">' +
 						'<span class="nct">' + p.n + '</span>' +
 						'<button class="btn sec nsave ico" type="button" aria-label="Save" title="Save">' + ICO_SAVE + '</button>' +

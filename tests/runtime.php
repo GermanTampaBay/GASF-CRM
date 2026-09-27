@@ -778,6 +778,19 @@ final class GASF_CRM_Selftest {
 		$this->ok( $told, 'retired names: the scanner is told, so it can refile its local examples' );
 	}
 
+	/** The people list in the Photo Gallery shows each person's face. */
+	public function test_names_list_shows_faces() {
+		if ( ! function_exists( 'gasf_crm_render_inbox_script' ) ) { $this->ok( false, 'names list: the inbox script renders' ); return; }
+		ob_start();
+		gasf_crm_render_inbox_script();
+		$js = ob_get_clean();
+		$this->ok(
+			false !== strpos( $js, 'class="nface-slot"' ) && false !== strpos( $js, 'faceRefUrl(p.value || p.label)' )
+			&& false !== strpos( $js, 'loading="lazy"' ),
+			'names list: each person row asks for their face picture, lazily'
+		);
+	}
+
 	public function test_image_rev_tracks_the_served_file() {
 		$id    = $this->library_photo( 'st-image-rev' );
 		$first = gasf_crm_photo_image_rev( $id, 'full' );

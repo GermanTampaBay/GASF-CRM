@@ -347,6 +347,11 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 	font:inherit;font-size:13px;background:var(--gasf-surface);color:var(--gasf-text)}
 .nrow .ndel{color:#b02d2e}
 .nrow .nct{color:var(--gasf-muted);font-size:11px;flex:0 0 auto}
+/* Same size and corners as the editor's .pface, so a face reads the same in
+   both places. The slot keeps its size when there is no face to show. */
+.nface-slot{flex:0 0 auto;width:34px;height:34px;border-radius:3px;overflow:hidden;
+	border:1px solid var(--gasf-border);background:var(--gasf-surface)}
+.nface{display:block;width:100%;height:100%;object-fit:cover}
 .nrow button{font-size:12px;padding:4px 8px}
 .nmsg{font-size:12px;margin:6px 0 0}
 /* Places. The indent IS the information — it is what says the Bierhaus is
