@@ -1,7 +1,13 @@
 # GASF-CRM — working manifest
 
-The German-American Society of Tampa Bay's shared-inbox CRM and photo
-catalogue. A WordPress plugin serving **germantampabay.com**.
+The German-American Society's shared-inbox CRM and photo catalogue. A
+WordPress plugin serving **germantampabay.com**.
+
+**The club's name.** Informally *German-American Society* -- use this in
+general. Formally *German-American Society Friendship of Pinellas County*,
+for contracts and wherever the legal name is needed. "German-American Society
+of Tampa Bay" is **not** the club's name and must never appear in anything
+the club says, despite the domain.
 
 This file loads automatically for any session started in this directory. If you
 are reading it, you are in the right place — everything below is relative to

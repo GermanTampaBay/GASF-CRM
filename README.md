@@ -1,6 +1,6 @@
 # GASF Email CRM & Photo Catalogue
 
-The German-American Society of Tampa Bay's shared-inbox CRM and photo
+The German-American Society's shared-inbox CRM and photo
 catalogue, as a standalone WordPress plugin.
 
 Approved volunteers sign in at `/email` with Google or Microsoft, read and

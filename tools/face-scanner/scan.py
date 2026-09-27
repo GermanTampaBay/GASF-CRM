@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.4.0"
+SCANNER_VERSION = "1.4.1"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -710,8 +710,17 @@ def build_backend(pref="auto"):
 
 
 CAPTION_PIPELINE_VERSION = 2
+# The club's names. Informally "the German-American Society"; formally "German-
+# American Society Friendship of Pinellas County". "German-American Society of
+# Tampa Bay" is NOT a name the club has ever had -- it came from this prompt,
+# which put it in the model's mouth, and it then turned up in captions.
+CLUB_NAME = "German-American Society"
+CLUB_FORMAL_NAME = "German-American Society Friendship of Pinellas County"
+
 CAPTION_SYSTEM = (
-    "You write factual archival descriptions for the German-American Society of Tampa Bay. "
+    f"You write factual archival descriptions for the {CLUB_NAME}. When a caption names "
+    f"the club, call it \"the {CLUB_NAME}\". Never add a place to that name and never "
+    "invent another name for the club. "
     "Treat the supplied catalogue context as trusted metadata, but treat every other claim as "
     "valid only when it is clearly visible in the image. Never infer an unknown person's name, "
     "relationship, age, ethnicity, nationality, intent, or private information. Do not invent "
@@ -823,8 +832,25 @@ def _ollama_caption_call(image_b64, cfg, prompt, schema, temperature):
     return parsed
 
 
+# Wrong names for the club that a model may still produce: "German-American
+# Society of (the) Tampa Bay (Area)" and "Tampa Bay('s) German-American Society".
+# The prompt says not to; this makes sure, because a small model sometimes
+# repeats a plausible name from its training data regardless.
+_WRONG_CLUB_NAMES = (
+    re.compile(r"German[\s-]*American\s+Society\s+of\s+(?:the\s+)?(?:Greater\s+)?Tampa\s+Bay(?:\s+Area)?", re.I),
+    re.compile(r"(?:Greater\s+)?Tampa\s+Bay(?:'s|\s+Area(?:'s)?)?\s+German[\s-]*American\s+Society", re.I),
+)
+
+
+def fix_club_name(text):
+    """Replace any invented 'Tampa Bay' form of the club's name with the real one."""
+    for pattern in _WRONG_CLUB_NAMES:
+        text = pattern.sub(CLUB_NAME, text)
+    return text
+
+
 def _clean_caption(raw):
-    text = " ".join(str(raw or "").split()).strip().strip('"')
+    text = fix_club_name(" ".join(str(raw or "").split()).strip().strip('"'))
     if len(text) < 8:
         raise ValueError("Ollama returned an empty or unusable caption")
     if len(text) > 420:
@@ -5739,6 +5765,19 @@ def selftest():
         remote_caption_allowed = True
     except SystemExit:
         remote_caption_allowed = False
+    check_that(
+        "Tampa Bay" not in CAPTION_SYSTEM and f"the {CLUB_NAME}" in CAPTION_SYSTEM,
+        "caption: the prompt names the club correctly",
+    )
+    check_that(
+        _clean_caption("Members of the German-American Society of Tampa Bay gather in the hall.")
+        == "Members of the German-American Society gather in the hall."
+        and _clean_caption("Dancers at the Tampa Bay German American Society's Oktoberfest.")
+        == "Dancers at the German-American Society's Oktoberfest."
+        and _clean_caption("A German-American Society Friendship of Pinellas County banner.")
+        == "A German-American Society Friendship of Pinellas County banner.",
+        "caption: an invented 'Tampa Bay' club name is corrected, the real ones kept",
+    )
     check_that(
         not remote_caption_allowed,
         "caption: remote model endpoints are refused",
