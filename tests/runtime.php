@@ -718,6 +718,29 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * The image stamp the scanner's detection cache is keyed on.
+	 *
+	 * Without it a cached detection would outlive a crop or rotate and put boxes
+	 * from the old picture onto the new one. Pins the primitive: stable while the
+	 * file is unchanged, different once the served file changes, empty with no file.
+	 */
+	public function test_image_rev_tracks_the_served_file() {
+		$id    = $this->library_photo( 'st-image-rev' );
+		$first = gasf_crm_photo_image_rev( $id, 'full' );
+		$again = gasf_crm_photo_image_rev( $id, 'full' );
+		$this->ok( '' !== $first && $first === $again,
+			'image rev: a photo has a stamp, and it is stable while the file is unchanged' );
+
+		$file = gasf_crm_photo_served_path( $id, 'full' );
+		file_put_contents( $file, $this->jpeg_bytes() . str_repeat( ' ', 64 ) ); // different size
+		$this->ok( '' !== $file && gasf_crm_photo_image_rev( $id, 'full' ) !== $first,
+			'image rev: changing the served file changes the stamp, so a cached detection is not reused' );
+
+		$this->ok( '' === gasf_crm_photo_image_rev( 0, 'full' ),
+			'image rev: no file, no stamp (the scanner then simply does not cache)' );
+	}
+
 	public function test_face_records_follow_a_rename() {
 		$id  = $this->library_photo( 'st-face-rename' );
 		$old = 'Selftest Schmit ' . wp_rand();

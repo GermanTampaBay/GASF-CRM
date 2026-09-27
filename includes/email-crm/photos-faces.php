@@ -1899,6 +1899,7 @@ add_action( 'rest_api_init', function () {
 				$out[] = array(
 					'id'            => (int) $id,
 					'url'           => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+					'image_rev'     => gasf_crm_photo_image_rev( $id ),
 					'people'        => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
 					'labels'        => gasf_crm_face_labels_for( $id ),
 					'rejected'      => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
@@ -2441,6 +2442,7 @@ add_action( 'rest_api_init', function () {
 				$out[] = array(
 					'id'     => (int) $id,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+					'image_rev' => gasf_crm_photo_image_rev( $id ),
 					'people' => array_map( 'html_entity_decode', $people ),
 					'labels' => gasf_crm_face_labels_for( $id ),
 					'rejected' => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
@@ -2587,6 +2589,7 @@ add_action( 'rest_api_init', function () {
 					'id'     => (int) $id,
 					'modified' => $modified,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+					'image_rev' => gasf_crm_photo_image_rev( $id ),
 					'people' => array_map( 'html_entity_decode', $people ),
 					'labels' => $labels,
 					'pipeline' => gasf_crm_faces_photo_state( $id ),

@@ -2173,7 +2173,11 @@ function gasf_crm_photo_img_url( $attachment_id, $size = 'medium', $token = '' )
  * Send one private image, or die trying — never a redirect to the real file,
  * which would hand out the very URL this exists to withhold.
  */
-function gasf_crm_photo_send_file( $attachment_id, $size, $as_download = false ) {
+/**
+ * The file on disk that gasf_crm_photo_send_file() would serve for this size.
+ * '' when there is none.
+ */
+function gasf_crm_photo_served_path( $attachment_id, $size ) {
 	$id   = (int) $attachment_id;
 	$file = get_attached_file( $id );
 
@@ -2188,7 +2192,32 @@ function gasf_crm_photo_send_file( $attachment_id, $size, $as_download = false )
 				: trailingslashit( wp_upload_dir()['basedir'] ) . $img['path'];
 		}
 	}
-	if ( ! $file || ! file_exists( $file ) ) { status_header( 404 ); exit; }
+	return ( $file && file_exists( $file ) ) ? (string) $file : '';
+}
+
+/**
+ * A short stamp that changes whenever the served image changes.
+ *
+ * The face scanner caches what it detected on each photo so the naming page and
+ * People Discovery do not re-download and re-detect hundreds of photos on every
+ * run. A cache keyed only by photo id would go on using the OLD picture after a
+ * volunteer crops or rotates it -- boxes computed on the old geometry, saved
+ * against the new one, with no error: the "correct when read, wrong when used"
+ * trap. So the key includes this, built from the exact file the scanner is sent
+ * (its name, size, and modification time). A crop, rotate, re-encode, or the
+ * move to the private root all change it.
+ */
+function gasf_crm_photo_image_rev( $attachment_id, $size = 'large' ) {
+	$file = gasf_crm_photo_served_path( $attachment_id, $size );
+	if ( '' === $file ) { return ''; }
+	clearstatcache( true, $file );
+	return substr( md5( basename( $file ) . '|' . (int) @filesize( $file ) . '|' . (int) @filemtime( $file ) ), 0, 16 );
+}
+
+function gasf_crm_photo_send_file( $attachment_id, $size, $as_download = false ) {
+	$id   = (int) $attachment_id;
+	$file = gasf_crm_photo_served_path( $id, $size );
+	if ( '' === $file ) { status_header( 404 ); exit; }
 
 	$type = wp_check_filetype( $file );
 	// Whitelisted from our own check, never from the request: this streams a
