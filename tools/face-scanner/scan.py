@@ -824,6 +824,39 @@ def _clean_caption(raw):
     return text
 
 
+def _caption_ready_bytes(image_bytes):
+    """
+    Hand Ollama only formats it can read: JPEG and PNG pass through, anything
+    else Pillow can open is re-encoded as JPEG.
+
+    Ollama 0.32 cannot decode WebP and answers 400 "Failed to load image or
+    audio file". The library serves each photo's "large" size in whatever
+    format it was uploaded, and phones and messaging apps increasingly upload
+    WebP -- so every WebP photo failed captioning deterministically and was
+    quarantined after three runs, while its faces (decoded by Pillow) were
+    found perfectly well. Bytes Pillow cannot open go through unchanged, so
+    Ollama's own error still reports a genuinely broken file.
+    """
+    if image_bytes[:3] == b"\xff\xd8\xff" or image_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+        return image_bytes
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            im.load()
+            if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+                rgba = im.convert("RGBA")
+                flat = Image.new("RGB", rgba.size, (255, 255, 255))
+                flat.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                flat = im.convert("RGB")
+            out = io.BytesIO()
+            flat.save(out, "JPEG", quality=92)
+            return out.getvalue()
+    except Exception:
+        return image_bytes
+
+
 def local_caption(image_bytes, cfg, metadata=None):
     """Draft and optionally verify a caption against the image and trusted metadata."""
     model = cfg_caption_model(cfg)
@@ -844,7 +877,7 @@ def local_caption(image_bytes, cfg, metadata=None):
         "setting, clothing, decorations, and notable objects only when clearly visible. Copy "
         "visible signage only when legible. Return the requested JSON evidence fields as well."
     )
-    image_b64 = base64.b64encode(image_bytes).decode("ascii")
+    image_b64 = base64.b64encode(_caption_ready_bytes(image_bytes)).decode("ascii")
     draft = _ollama_caption_call(image_b64, cfg, draft_prompt, CAPTION_DRAFT_SCHEMA, 0.2)
     caption = _clean_caption(draft.get("caption"))
 
@@ -5752,6 +5785,29 @@ def selftest():
             and caption_calls[0]["json"]["format"] == CAPTION_DRAFT_SCHEMA
             and "pipeline=2" in provenance,
             "caption: trusted metadata and structured schema reach Ollama",
+        )
+
+        # WebP must reach Ollama as JPEG: Ollama 0.32 answers 400 to WebP, which
+        # failed every WebP photo's caption while its faces scanned fine.
+        from PIL import Image as _Image, features as _features
+
+        if _features.check("webp"):
+            buf = io.BytesIO()
+            _Image.new("RGBA", (8, 8), (200, 40, 40, 128)).save(buf, "WEBP")
+            caption_calls.clear()
+            local_caption(buf.getvalue(), cap_cfg, {})
+            sent = base64.b64decode(caption_calls[0]["json"]["images"][0])
+            check_that(
+                sent[:3] == b"\xff\xd8\xff" and len(caption_calls) == 2,
+                "caption: WebP is re-encoded as JPEG before it reaches Ollama",
+            )
+        jpeg = io.BytesIO()
+        _Image.new("RGB", (8, 8), (10, 20, 30)).save(jpeg, "JPEG")
+        caption_calls.clear()
+        local_caption(jpeg.getvalue(), cap_cfg, {})
+        check_that(
+            base64.b64decode(caption_calls[0]["json"]["images"][0]) == jpeg.getvalue(),
+            "caption: JPEG reaches Ollama byte-for-byte unchanged",
         )
     finally:
         requests.post = original_post
