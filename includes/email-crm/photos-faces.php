@@ -946,27 +946,32 @@ function gasf_crm_face_reject( $attachment_id, $name ) {
 	return $changed;
 }
 
-/** Promote very high-confidence suggestions into person tags and label hints. */
-function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
-	$id  = (int) $attachment_id;
-	$out = array( 'names' => 0, 'labels' => 0 );
-	$min = gasf_crm_faces_auto_accept_threshold();
-	if ( ! $id || $min < 1 || ! $suggestions ) { return $out; }
+/**
+ * Put these people on the photo as person tags, skipping anyone already on it
+ * (by normalised name) and anyone a volunteer has rejected for it.
+ *
+ * Shared by the scanner's auto-accept and by every route where a PERSON names a
+ * face -- the scanner's naming page, People Discovery, and the editor's box
+ * mapping. Those human names used to stop at _gasf_face_labels: training data
+ * only, never on the photo, not even offered as a suggestion. So a machine match
+ * above the threshold tagged the photo while a name a volunteer typed did not,
+ * and the volunteer then had to find and tag the same people again in the
+ * Gallery. Only ever ADDS: removing a tag stays a deliberate act in the editor.
+ *
+ * @return int How many names were added.
+ */
+function gasf_crm_face_tag_people( $attachment_id, array $names ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || ! $names ) { return 0; }
 
 	$labels = array();
-	foreach ( $suggestions as $s ) {
-		$pct  = (int) ( $s['confidence'] ?? 0 );
-		$name = trim( sanitize_text_field( (string) ( $s['name'] ?? '' ) ) );
-		$box  = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
-		if ( $pct < $min || '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
-		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
-		$labels[] = array( 'name' => $name, 'box' => array_values( $box ) );
+	foreach ( $names as $n ) {
+		$n = trim( sanitize_text_field( (string) $n ) );
+		if ( '' === $n || gasf_crm_face_is_rejected( $id, $n ) ) { continue; }
+		$labels[] = array( 'name' => $n );
 	}
-	if ( ! $labels ) { return $out; }
-
-	if ( function_exists( 'gasf_crm_face_person_terms_ensure' ) ) {
-		gasf_crm_face_person_terms_ensure( wp_list_pluck( $labels, 'name' ) );
-	}
+	if ( ! $labels ) { return 0; }
+	$out = array( 'names' => 0 );
 
 	$have = array();
 	$raw_have = wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) );
@@ -1003,6 +1008,32 @@ function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
 			if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $id ); }
 		}
 	}
+	return (int) $out['names'];
+}
+
+/** Promote very high-confidence suggestions into person tags and label hints. */
+function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
+	$id  = (int) $attachment_id;
+	$out = array( 'names' => 0, 'labels' => 0 );
+	$min = gasf_crm_faces_auto_accept_threshold();
+	if ( ! $id || $min < 1 || ! $suggestions ) { return $out; }
+
+	$labels = array();
+	foreach ( $suggestions as $s ) {
+		$pct  = (int) ( $s['confidence'] ?? 0 );
+		$name = trim( sanitize_text_field( (string) ( $s['name'] ?? '' ) ) );
+		$box  = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
+		if ( $pct < $min || '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
+		$labels[] = array( 'name' => $name, 'box' => array_values( $box ) );
+	}
+	if ( ! $labels ) { return $out; }
+
+	if ( function_exists( 'gasf_crm_face_person_terms_ensure' ) ) {
+		gasf_crm_face_person_terms_ensure( wp_list_pluck( $labels, 'name' ) );
+	}
+
+	$out['names'] = gasf_crm_face_tag_people( $id, wp_list_pluck( $labels, 'name' ) );
 
 	if ( function_exists( 'gasf_crm_face_labels_store' ) ) {
 		$out['labels'] = (int) gasf_crm_face_labels_store( $id, $labels );
@@ -1221,6 +1252,11 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		gasf_crm_faces_learning_touch( $id );
 	}
 	gasf_crm_face_person_terms_ensure( wp_list_pluck( $next, 'name' ) );
+	// A name a volunteer typed onto a face is a fact about the photo, not a
+	// suggestion to be confirmed a second time in the Gallery.
+	if ( $human_verified && $next ) {
+		gasf_crm_face_tag_people( $id, wp_list_pluck( $next, 'name' ) );
+	}
 	return $changed;
 }
 

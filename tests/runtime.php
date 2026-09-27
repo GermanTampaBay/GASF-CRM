@@ -1685,6 +1685,11 @@ final class GASF_CRM_Selftest {
 			array( 'i' => 1, 'name' => 'Juergen Example' ),
 		) );
 		$this->ok( 2 === $n1, 'faces: two explicit labels are stored on first save' );
+		$lab_people = (array) wp_get_object_terms( $lab, 'gasf_photo_person', array( 'fields' => 'names' ) );
+		$this->ok(
+			(bool) array_filter( $lab_people, function ( $n ) { return false !== stripos( html_entity_decode( $n ), 'Example' ); } ),
+			'faces: a face a volunteer names in the scanner tags the photo with that person'
+		);
 		$this->ok( 0 === $n2, 'faces: saving the same explicit labels again is idempotent' );
 		$this->ok(
 			$label_modified === (string) get_post_field( 'post_modified_gmt', $lab ),
@@ -1698,6 +1703,10 @@ final class GASF_CRM_Selftest {
 			&& 'Corrected Example' === (string) ( gasf_crm_face_labels_for( $lab )[0]['name'] ?? '' )
 			&& (string) get_post_field( 'post_modified_gmt', $lab ) > $label_modified,
 			'faces: replacing a corrected label advances the incremental learning cursor'
+		);
+		$this->ok(
+			! in_array( 'Corrected Example', (array) wp_get_object_terms( $lab, 'gasf_photo_person', array( 'fields' => 'names' ) ), true ),
+			'faces: a label written without a volunteer behind it does not tag the photo'
 		);
 		$corrected_modified = (string) get_post_field( 'post_modified_gmt', $lab );
 		$cleared = gasf_crm_face_labels_store( $lab, array(), true );

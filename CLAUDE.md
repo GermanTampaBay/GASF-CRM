@@ -353,7 +353,7 @@ shape generally — a negative signal wired into a positive test can invert it.
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.35.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.55.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
