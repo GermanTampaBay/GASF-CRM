@@ -191,6 +191,13 @@ they run:
 
 - One task runs at a time, so the flag combinations `scan.py` refuses cannot be
   chosen.
+- The list is grouped by the steps in the *How it works* strip: **Step 2 -
+  Suggest** and **Step 3 - Teach**. Step 1, studying tagged photos, has no
+  button; it happens at the start of those tasks.
+- **Which version am I running?** The top of *Advanced settings* shows the
+  version of the `scan.py` it will run, and warns in amber when that copy is
+  older than the one beside the launcher, or predates version numbers (older
+  than 1.4.0). From a terminal: `python scan.py --version`.
 - The *How it works* strip at the top can be hidden once it has done its job,
   and brought back from the header.
 - In **Name faces it does not know**, leave *Fill in familiar faces before the

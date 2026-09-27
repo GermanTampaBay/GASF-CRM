@@ -11,6 +11,7 @@ be expressed at all. Output streams into the same window.
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -92,6 +93,23 @@ def resolve_scan_py():
 SCAN_PY = resolve_scan_py()
 
 
+def read_scanner_version(path):
+    """
+    The SCANNER_VERSION a scan.py declares, read as text rather than imported.
+
+    Importing would run the scanner's module-level code and drag in numpy; the
+    launcher only wants the one line. Returns "" for a file that has no version
+    line, which means it predates versioning -- i.e. it is older than 1.4.0.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(256 * 1024)
+    except OSError:
+        return ""
+    m = re.search(r'^SCANNER_VERSION\s*=\s*["\']([^"\']+)["\']', head, re.M)
+    return m.group(1) if m else ""
+
+
 # ---------------------------------------------------------------------------
 # Look and feel
 
@@ -131,7 +149,7 @@ COLORS = {
 TASKS = [
     {
         "key": "scan",
-        "group": "Everyday",
+        "group": "Step 2 · Suggest",
         "title": "Suggest names for new photos",
         "short": "Find who is in photos it has not looked at yet.",
         "about": (
@@ -147,8 +165,24 @@ TASKS = [
         "dates": True,
     },
     {
+        "key": "watch",
+        "group": "Step 2 · Suggest",
+        "title": "Keep running on a timer",
+        "short": "Repeat the suggesting on a schedule until you stop it.",
+        "about": (
+            "Does everything \"Suggest names for new photos\" does, then waits and "
+            "does it again, over and over, until you press Stop or close this "
+            "window. New tags from volunteers are studied at the start of every "
+            "round."
+        ),
+        "when": "Use this to leave the scanner working during an event or overnight.",
+        "button": "Start the timer",
+        "running": "Running on a timer. Press Stop to end it...",
+        "dates": True,
+    },
+    {
         "key": "label",
-        "group": "Everyday",
+        "group": "Step 3 · Teach",
         "title": "Name faces it does not know",
         "short": "Tell it who the faces are that it cannot place.",
         "about": (
@@ -164,7 +198,7 @@ TASKS = [
     },
     {
         "key": "discover",
-        "group": "Everyday",
+        "group": "Step 3 · Teach",
         "title": "Group lookalike faces",
         "short": "Name a whole group of similar faces at once.",
         "about": (
@@ -177,22 +211,6 @@ TASKS = [
         "when": "Use this to catch up quickly on people who appear in many photos.",
         "button": "Open the groups page",
         "running": "Grouping faces. Your browser will open when they are ready...",
-        "dates": True,
-    },
-    {
-        "key": "watch",
-        "group": "Everyday",
-        "title": "Keep running on a timer",
-        "short": "Repeat the suggesting on a schedule until you stop it.",
-        "about": (
-            "Does everything \"Suggest names for new photos\" does, then waits and "
-            "does it again, over and over, until you press Stop or close this "
-            "window. New tags from volunteers are studied at the start of every "
-            "round."
-        ),
-        "when": "Use this to leave the scanner working during an event or overnight.",
-        "button": "Start the timer",
-        "running": "Running on a timer. Press Stop to end it...",
         "dates": True,
     },
     {
@@ -237,10 +255,16 @@ SETTINGS_ITEM = {
     "short": "Recognition engine, scanner file, and troubleshooting.",
 }
 
+# The strip is the idea; the sidebar is what you can do. The last field says
+# where each step lives, because side by side they read as a one-to-one map --
+# and step 1 has no button at all.
 HOW_IT_WORKS = [
-    ("1", "Study", "It learns what each person looks like from photos volunteers have already tagged."),
-    ("2", "Suggest", "It looks at new photos and suggests who is in them."),
-    ("3", "Teach", "When it is unsure, you name the faces yourself, and it gets better."),
+    ("1", "Study", "It learns what each person looks like from photos volunteers have already tagged.",
+     "Automatic. No button: it happens at the start of the tasks below."),
+    ("2", "Suggest", "It looks at new photos and suggests who is in them.",
+     "Tasks under Step 2 on the left."),
+    ("3", "Teach", "When it is unsure, you name the faces yourself, and it gets better.",
+     "Tasks under Step 3 on the left."),
 ]
 
 ENGINE_CHOICES = [
@@ -297,6 +321,7 @@ class ScanGui(tk.Tk):
         self.v_engine_label = tk.StringVar(value=ENGINE_CHOICES[0][0])
         self.v_scan_py = tk.StringVar(value=SCAN_PY)
         self.v_python = tk.StringVar(value="")
+        self.v_version = tk.StringVar(value="")
 
         self._fonts()
         self._styles()
@@ -525,7 +550,7 @@ class ScanGui(tk.Tk):
         steps = self._card(self.intro_holder, fill="x", pady=(12, 0))
         steps_row = tk.Frame(steps, bg=c["surface"])
         steps_row.pack(fill="x", padx=(16, 8), pady=12)
-        for i, (n, name, blurb) in enumerate(HOW_IT_WORKS):
+        for i, (n, name, blurb, where) in enumerate(HOW_IT_WORKS):
             steps_row.columnconfigure(i, weight=1, uniform="step")
             cell = tk.Frame(steps_row, bg=c["surface"])
             cell.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 14, 0))
@@ -535,6 +560,7 @@ class ScanGui(tk.Tk):
             words.pack(side="left", fill="both", expand=True, padx=(10, 0))
             self._text(words, name, font=self.f_bold).pack(fill="x")
             self._text(words, blurb, font=self.f_small, color="muted", wrap=True).pack(fill="x")
+            self._text(words, where, font=self.f_small, color="accent", wrap=True).pack(fill="x", pady=(3, 0))
         ttk.Button(steps_row, text="Hide", style="Link.TButton",
                    command=lambda: self._show_intro(False)).grid(row=0, column=len(HOW_IT_WORKS), sticky="ne")
 
@@ -552,7 +578,7 @@ class ScanGui(tk.Tk):
             if item["group"] != last_group:
                 last_group = item["group"]
                 self._text(side, item["group"].upper(), font=self.f_group, color="faint").pack(
-                    fill="x", padx=18, pady=(14 if item is TASKS[0] else 12, 4)
+                    fill="x", padx=18, pady=(12 if item is TASKS[0] else 9, 2)
                 )
             self.nav_items[item["key"]] = self._nav_item(side, item)
 
@@ -605,7 +631,7 @@ class ScanGui(tk.Tk):
         bar = tk.Frame(row, bg=c["surface"], width=4)
         bar.pack(side="left", fill="y")
         words = tk.Frame(row, bg=c["surface"])
-        words.pack(side="left", fill="x", expand=True, padx=(10, 10), pady=7)
+        words.pack(side="left", fill="x", expand=True, padx=(10, 10), pady=5)
         title = self._text(words, item["title"], font=self.f_nav)
         title.pack(fill="x")
         short = self._text(words, item["short"], font=self.f_small, color="muted", wrap=True)
@@ -725,6 +751,16 @@ class ScanGui(tk.Tk):
         self._text(pad, "You should not normally need anything on this page. These apply to every task.",
                    color="muted", wrap=True).pack(fill="x", pady=(4, 6))
 
+        ver = tk.Frame(pad, bg=c["accent_soft"])
+        ver.pack(fill="x", pady=(0, 8))
+        self._text(ver, "Scanner version", font=self.f_small, color="muted", bg="accent_soft").pack(
+            side="left", padx=(14, 10), pady=10)
+        self.lbl_version = self._text(ver, "", font=self.f_h2, color="accent", bg="accent_soft",
+                                      textvariable=self.v_version)
+        self.lbl_version.pack(side="left", pady=6)
+        self.lbl_version_note = self._text(ver, "", font=self.f_small, color="muted", bg="accent_soft", wrap=True)
+        self.lbl_version_note.pack(side="left", fill="x", expand=True, padx=(14, 14))
+
         grid = tk.Frame(pad, bg=c["surface"])
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
@@ -808,6 +844,7 @@ class ScanGui(tk.Tk):
         exactly the situation that goes unnoticed - two copies of the same file,
         one of them months old, and nothing on screen distinguishing them.
         """
+        self._refresh_version()
         if not getattr(self, "lbl_scan_note", None) or not self.lbl_scan_note.winfo_exists():
             return
         note = ""
@@ -820,6 +857,29 @@ class ScanGui(tk.Tk):
                 "That is fine if it is deliberate; it is worth checking if it is not."
             )
         self.lbl_scan_note.config(text=note)
+
+    def _refresh_version(self):
+        """Show the version of the scanner that will actually run, and say so if it is behind."""
+        current = self._current_scan_py()
+        mine = read_scanner_version(current) if os.path.isfile(current) else ""
+        beside = read_scanner_version(ADJACENT_SCAN_PY) if os.path.isfile(ADJACENT_SCAN_PY) else ""
+        same_file = os.path.normcase(current) == os.path.normcase(ADJACENT_SCAN_PY)
+        self.v_version.set(mine or "Unknown")
+        if not os.path.isfile(current):
+            note, warn = "The scanner file is missing.", True
+        elif not mine:
+            note = "This copy predates version numbers, so it is older than 1.4.0."
+            if beside:
+                note += f" The scanner beside this launcher is {beside}: use it below."
+            warn = True
+        elif not same_file and beside and beside != mine:
+            note = f"The scanner beside this launcher is {beside}."
+            warn = True
+        else:
+            note, warn = "", False
+        if getattr(self, "lbl_version_note", None) and self.lbl_version_note.winfo_exists():
+            self.lbl_version_note.configure(text=note, fg=COLORS["warn" if warn else "muted"])
+            self.lbl_version.configure(fg=COLORS["warn" if warn else "accent"])
 
     def _apply_scan_py(self, path, remember):
         path = str(Path(path).resolve())

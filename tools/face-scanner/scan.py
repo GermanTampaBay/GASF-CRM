@@ -109,6 +109,14 @@ except ImportError:
 HERE = Path(__file__).resolve().parent
 DB_PATH = HERE / "faces.db"
 
+# The scanner's version. Bump it with every change to this folder, the same way
+# the plugin header is bumped: it is the only way to tell from the scanning PC
+# which copy is running. The launcher reads it from this line with a regex
+# (without importing this file), so keep it a plain string literal on one line.
+# Numbering starts at 1.4.0 so it never looks older than the "1.3" in
+# USER_AGENT below -- which is NOT a version, just a string mod_security allows.
+SCANNER_VERSION = "1.4.0"
+
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
 # in it — with a 406 before WordPress ever sees the request. This UA gets
@@ -4818,7 +4826,7 @@ def check(cfg):
         ok = ok and good
         print(f"  [{'PASS' if good else 'FAIL'}] {label}" + (f" — {detail}" if detail else ""))
 
-    print("GASF face scanner — preflight\n")
+    print(f"GASF face scanner {SCANNER_VERSION} — preflight\n")
 
     py = sys.version_info
     line(py >= (3, 8), "Python", f"{py.major}.{py.minor}.{py.micro}")
@@ -6231,6 +6239,7 @@ def main():
             pass
 
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
+    ap.add_argument("--version", action="version", version=f"GASF face scanner {SCANNER_VERSION}")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
     ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
     ap.add_argument("--label-flow", action="store_true",
