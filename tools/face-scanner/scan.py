@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.4.1"
+SCANNER_VERSION = "1.4.2"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -610,10 +610,19 @@ class InsightFaceBackend(Backend):
         from insightface.app import FaceAnalysis  # heavy; imported on demand
         import onnxruntime as ort
 
+        import contextlib
+
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
         use_cuda = "CUDAExecutionProvider" in providers
-        self._app = FaceAnalysis(name="buffalo_l", providers=providers or ["CPUExecutionProvider"])
-        self._app.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
+        self.device = "GPU" if use_cuda else "CPU"
+        chatter = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(chatter):
+                self._app = FaceAnalysis(name="buffalo_l", providers=providers or ["CPUExecutionProvider"])
+                self._app.prepare(ctx_id=0 if use_cuda else -1, det_size=(640, 640))
+        except Exception:
+            sys.stderr.write(chatter.getvalue())
+            raise
     def embed_rgb(self, rgb):
         # InsightFace expects BGR. Apply EXIF orientation first: browsers do so
         # automatically, and boxes from unrotated source pixels land elsewhere.
@@ -2678,10 +2687,18 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
     items = []
     total = len(photos)
     current = 0
+    if total:
+        # The longest silence in the whole tool: every photo is downloaded and
+        # face-detected before the page can open. Say so, once, up front.
+        print(
+            f"Getting the naming page ready: checking {total} photo(s) for faces. "
+            "Your browser opens when this finishes; progress follows every 15 seconds.",
+            flush=True,
+        )
     beat = _HeartbeatTicker(
         total > 0,
         15,
-        lambda: f"label prep heartbeat: working on {current}/{total}, {len(items)} ready",
+        lambda: f"  preparing the naming page: photo {current} of {total}, {len(items)} with faces to review so far",
     )
     beat.start()
     try:
@@ -4167,6 +4184,8 @@ def learn(api, conn, backend, verbose=True):
     The watermark is per engine, so switching backends relearns from scratch
     into that engine's own vectors rather than trusting the other's homework.
     """
+    if verbose:
+        print("Studying photos volunteers have tagged since the last run...", flush=True)
     wk_mod = state_key(backend.name, "learned_modified")
     wk_id = state_key(backend.name, "learned_id")
     since_mod = state_get(conn, wk_mod, "")
@@ -4411,18 +4430,20 @@ def scan(
         caption_results = []
         batch_now = 0
         batch_total = len(photos)
+        photo_started = time.time()
         beat = _HeartbeatTicker(
             verbose and batch_total > 0,
             15,
             lambda: (
-                f"scan heartbeat: working on {batch_now}/{batch_total} "
-                f"in this batch, {total_seen} sent, {total_kept} kept"
+                f"scan heartbeat: photo {batch_now}/{batch_total} in this batch, "
+                f"{time.time() - photo_started:.0f}s on it so far; {total_seen} sent, {total_kept} kept"
             ),
         )
         beat.start()
         try:
             for idx, p in enumerate(photos, start=1):
                 batch_now = idx
+                photo_started = time.time()
                 photo_id = int(p["id"])
                 needs_faces = bool(p.get("needs_faces", True)) if caption_endpoint else True
                 needs_caption = bool(caption_key) and bool(p.get("needs_caption", True))
@@ -6325,11 +6346,26 @@ def main():
     if args.engine:
         cfg = {**cfg, "engine": args.engine}
     engine = cfg_engine(cfg)
+    verbose = not args.quiet
+    if verbose:
+        print(f"GASF face scanner {SCANNER_VERSION}")
+        print(
+            "Loading the face-recognition models. This takes a minute or so "
+            "(longer the first time after a restart) and nothing else happens until it finishes...",
+            flush=True,
+        )
+    started = time.time()
     backend = build_backend(engine)
+    if verbose:
+        where = getattr(backend, "device", "")
+        print(
+            f"Face recognition ready ({backend.name}{' on the ' + where if where else ''}) "
+            f"in {time.time() - started:.0f}s.",
+            flush=True,
+        )
     tolerance = cfg_tolerance(cfg, engine)
     api = Api(url, key)
     conn = db()
-    verbose = not args.quiet
     uploaded_after = parse_ymd(args.uploaded_after, "--uploaded-after")
     uploaded_before = parse_ymd(args.uploaded_before, "--uploaded-before")
     if uploaded_after and uploaded_before and uploaded_after > uploaded_before:
