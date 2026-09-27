@@ -725,6 +725,59 @@ final class GASF_CRM_Selftest {
 	 * from the old picture onto the new one. Pins the primitive: stable while the
 	 * file is unchanged, different once the served file changes, empty with no file.
 	 */
+	/**
+	 * A merged-away name stays gone.
+	 *
+	 * Merging a typo into the right name used to clean only photos TAGGED with
+	 * the typo. A suggestion on an untagged photo kept it (64 of them for one
+	 * real typo), the scanner kept suggesting it, and a backfill re-created two
+	 * merged-away people from leftover labels. Pins: the untagged suggestion is
+	 * renamed; the old name maps to the new everywhere a name comes in; it is
+	 * never re-created; and the scanner is told.
+	 */
+	public function test_merged_name_stays_gone() {
+		$this->snapshot_option( GASF_CRM_PERSON_RETIRED_OPTION );
+		$tagged   = $this->library_photo( 'st-retire-tagged' );
+		$untagged = $this->library_photo( 'st-retire-untagged' );
+		$other    = $this->library_photo( 'st-retire-other' );
+		$typo  = 'Selftest Kerm ' . wp_rand();
+		$right = 'Selftest Kern ' . wp_rand();
+		$from  = $this->person_term( $typo );
+		$into  = $this->person_term( $right );
+		if ( is_wp_error( $from ) || is_wp_error( $into ) ) { $this->ok( false, 'retired names: fixtures' ); return; }
+		wp_set_object_terms( $tagged, array( (int) $from['term_id'] ), 'gasf_photo_person', false );
+		update_post_meta( $untagged, '_gasf_face_suggestions', array(
+			array( 'name' => $typo, 'confidence' => 80, 'box' => array( 10, 10, 40, 40 ) ),
+		) );
+
+		$merged = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action' => 'merge', 'term' => (int) $from['term_id'], 'name' => $typo,
+			'into' => $right, 'into_term' => (int) $into['term_id'],
+			'op_id' => 'selftest-retire-' . wp_rand(),
+		) );
+		$sugg = (array) get_post_meta( $untagged, '_gasf_face_suggestions', true );
+		$this->ok( ! is_wp_error( $merged ) && $right === (string) ( $sugg[0]['name'] ?? '' ),
+			'retired names: a merge renames the old name on photos that were never tagged with it' );
+		$this->ok( $right === gasf_crm_person_current( $typo ),
+			'retired names: the old spelling now resolves to the name it was merged into' );
+
+		gasf_crm_face_labels_store( $other, array( array( 'name' => $typo, 'box' => array( 5, 5, 30, 30 ) ) ), false, true );
+		$labels = wp_list_pluck( gasf_crm_face_labels_for( $other ), 'name' );
+		$this->ok(
+			in_array( $right, $labels, true ) && ! in_array( $typo, $labels, true )
+			&& ! term_exists( $typo, 'gasf_photo_person' )
+			&& gasf_crm_photo_has_person_term( $other, (int) $into['term_id'] ),
+			'retired names: a name typed with the old spelling lands on the new person and never re-creates the old one'
+		);
+
+		$people  = $this->rest_get( '/gasf/v1/crm/photos/faces/people' );
+		$told    = false;
+		foreach ( (array) ( $people['retired'] ?? array() ) as $row ) {
+			if ( $typo === ( $row['from'] ?? '' ) && $right === ( $row['to'] ?? '' ) ) { $told = true; }
+		}
+		$this->ok( $told, 'retired names: the scanner is told, so it can refile its local examples' );
+	}
+
 	public function test_image_rev_tracks_the_served_file() {
 		$id    = $this->library_photo( 'st-image-rev' );
 		$first = gasf_crm_photo_image_rev( $id, 'full' );

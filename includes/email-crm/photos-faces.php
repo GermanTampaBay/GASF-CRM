@@ -190,6 +190,97 @@ function gasf_crm_face_canonical_key( $name ) {
 	return $keys ? (string) $keys[0] : '';
 }
 
+/*
+ * Retired names.
+ *
+ * Merging "Susanne Kerm-McColley" into "Susanne Kern-McColley" moved the tags,
+ * but nothing remembered that the one BECAME the other. Face data carries the
+ * name as a string in places no merge walks -- a suggestion on a photo that
+ * was never tagged, a label typed before labels tagged photos, the scanner's
+ * own local examples -- and any of them could bring the typo straight back:
+ * the scanner kept suggesting it, and a backfill re-created two merged-away
+ * people. So every merge, rename, and removal records old -> new here ('' for
+ * removed), and every way a name comes IN is passed through
+ * gasf_crm_person_current() first.
+ */
+const GASF_CRM_PERSON_RETIRED_OPTION = 'gasf_crm_person_retired';
+
+function gasf_crm_person_retired_map() {
+	$map = get_option( GASF_CRM_PERSON_RETIRED_OPTION, array() );
+	return is_array( $map ) ? $map : array();
+}
+
+/** Record that $from is now $to ('' when the name was removed outright). */
+function gasf_crm_person_retire( $from, $to ) {
+	$from = trim( sanitize_text_field( (string) $from ) );
+	$to   = trim( sanitize_text_field( (string) $to ) );
+	$key  = gasf_crm_face_canonical_key( $from );
+	if ( '' === $key || ( '' !== $to && gasf_crm_face_name_same( $from, $to ) ) ) { return false; }
+	$map = gasf_crm_person_retired_map();
+	// Anything that pointed at $from now points where $from went, so a chain of
+	// corrections (Tresslerr -> Tressler -> ...) resolves in one step.
+	foreach ( $map as $k => $row ) {
+		if ( '' !== (string) ( $row['to'] ?? '' ) && gasf_crm_face_name_same( (string) $row['to'], $from ) ) {
+			$map[ $k ]['to'] = $to;
+		}
+	}
+	// The destination is a live name again, whatever it once was.
+	unset( $map[ gasf_crm_face_canonical_key( $to ) ] );
+	$map[ $key ] = array( 'from' => $from, 'to' => $to, 'at' => time() );
+	update_option( GASF_CRM_PERSON_RETIRED_OPTION, $map, false );
+	return true;
+}
+
+/**
+ * The name to use for $name now: itself, the name it became, or '' if removed.
+ *
+ * A retired name that exists again as a real person -- somebody deliberately
+ * created it in the library -- is honoured as that person, not redirected.
+ */
+function gasf_crm_person_current( $name ) {
+	$name = trim( sanitize_text_field( (string) $name ) );
+	if ( '' === $name ) { return ''; }
+	$map = gasf_crm_person_retired_map();
+	if ( ! $map ) { return $name; }
+	$seen = array();
+	for ( $i = 0; $i < 10; $i++ ) {
+		$key = gasf_crm_face_canonical_key( $name );
+		if ( '' === $key || ! isset( $map[ $key ] ) || isset( $seen[ $key ] ) ) { return $name; }
+		$live = function_exists( 'gasf_photo_person_term_by_exact_name' )
+			? gasf_photo_person_term_by_exact_name( $name )
+			: get_term_by( 'name', $name, 'gasf_photo_person' );
+		if ( $live && ! is_wp_error( $live ) ) { return $name; }
+		$seen[ $key ] = true;
+		$name = (string) ( $map[ $key ]['to'] ?? '' );
+		if ( '' === $name ) { return ''; }
+	}
+	return $name;
+}
+
+/**
+ * Every photo whose face data mentions $name, tagged with it or not.
+ *
+ * A merge used to clean only the photos TAGGED with the old name, but a
+ * suggestion, prediction, rejection, or label can name somebody on a photo
+ * that was never tagged with them -- which is where the typo survived.
+ * LIKE finds candidates; gasf_crm_face_person_renamed() matches names exactly.
+ */
+function gasf_crm_face_posts_mentioning( $name ) {
+	global $wpdb;
+	$name = trim( (string) $name );
+	if ( '' === $name ) { return array(); }
+	$ids = array();
+	foreach ( array_unique( array( $name, esc_html( $name ) ) ) as $needle ) {
+		$ids = array_merge( $ids, $wpdb->get_col( $wpdb->prepare(
+			"SELECT DISTINCT post_id FROM {$wpdb->postmeta}
+			  WHERE meta_key IN ('_gasf_face_labels','_gasf_face_suggestions','_gasf_face_rejections','_gasf_face_predictions')
+			    AND meta_value LIKE %s",
+			'%' . $wpdb->esc_like( $needle ) . '%'
+		) ) );
+	}
+	return array_values( array_unique( array_map( 'intval', $ids ) ) );
+}
+
 function gasf_crm_face_box_iou( array $a, array $b ) {
 	if ( 4 !== count( $a ) || 4 !== count( $b ) ) { return 0.0; }
 	$a = array_map( 'intval', array_values( $a ) );
@@ -966,7 +1057,7 @@ function gasf_crm_face_tag_people( $attachment_id, array $names ) {
 
 	$labels = array();
 	foreach ( $names as $n ) {
-		$n = trim( sanitize_text_field( (string) $n ) );
+		$n = gasf_crm_person_current( (string) $n );
 		if ( '' === $n || gasf_crm_face_is_rejected( $id, $n ) ) { continue; }
 		$labels[] = array( 'name' => $n );
 	}
@@ -1063,7 +1154,7 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_name
 	$auto_labels = 0;
 
 	foreach ( $faces as $f ) {
-		$name = trim( sanitize_text_field( (string) ( $f['name'] ?? '' ) ) );
+		$name = gasf_crm_person_current( (string) ( $f['name'] ?? '' ) );
 		$conf = (float) ( $f['confidence'] ?? 0 );
 		if ( '' === $name || $conf < GASF_CRM_FACES_MIN_CONFIDENCE ) { continue; }
 		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
@@ -1182,7 +1273,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 
 	$next = array();
 	foreach ( $labels as $l ) {
-		$name = trim( sanitize_text_field( (string) ( $l['name'] ?? '' ) ) );
+		$name = gasf_crm_person_current( (string) ( $l['name'] ?? '' ) );
 		$box  = array_map( 'intval', (array) ( $l['box'] ?? array() ) );
 		if ( '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 		if ( function_exists( 'gasf_crm_face_is_rejected' ) && gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
@@ -1270,7 +1361,8 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 function gasf_crm_face_person_terms_ensure( array $names ) {
 	$want = array();
 	foreach ( $names as $n ) {
-		$n = trim( sanitize_text_field( (string) $n ) );
+		// A retired name is never re-created: it becomes the name it was merged into.
+		$n = gasf_crm_person_current( (string) $n );
 		if ( '' === $n ) { continue; }
 		$k = function_exists( 'gasf_photo_person_key' )
 			? gasf_photo_person_key( $n, true )
@@ -2485,7 +2577,13 @@ add_action( 'rest_api_init', function () {
 				$kb = function_exists( 'gasf_photo_translit' ) ? gasf_photo_translit( $b ) : $b;
 				return strnatcasecmp( $ka, $kb ) ?: strnatcasecmp( $a, $b );
 			} );
-			return array( 'people' => array_values( $out ) );
+			// Old spellings and removed names, so the scanner can refile or drop
+			// the local examples it learned under them.
+			$retired = array();
+			foreach ( gasf_crm_person_retired_map() as $row ) {
+				$retired[] = array( 'from' => (string) ( $row['from'] ?? '' ), 'to' => gasf_crm_person_current( (string) ( $row['to'] ?? '' ) ) );
+			}
+			return array( 'people' => array_values( $out ), 'retired' => $retired );
 		},
 	) );
 

@@ -1418,9 +1418,12 @@ add_action( 'rest_api_init', function () {
 				 */
 				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
 				$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
+				// Every photo whose face data names them, tagged or not.
+				$face_posts = array_values( array_unique( array_merge( $posts, gasf_crm_face_posts_mentioning( $term->name ) ) ) );
 				$faces_moved = function_exists( 'gasf_crm_face_person_renamed_across' )
-					? gasf_crm_face_person_renamed_across( $posts, $term->name, $to )
+					? gasf_crm_face_person_renamed_across( $face_posts, $term->name, $to )
 					: 0;
+				gasf_crm_person_retire( $term->name, $to );
 
 				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s), %d face record(s) — user %d',
 					$term->name, $to, $n, $faces_moved, get_current_user_id() ) );
@@ -1488,8 +1491,14 @@ add_action( 'rest_api_init', function () {
 				// person stay filed under the retired spelling and the merged
 				// person's training corpus stays split in two. Only for photos
 				// that actually moved: the others still carry the old name.
-				$faces_moved = ( $moved && function_exists( 'gasf_crm_face_person_renamed_across' ) )
-					? gasf_crm_face_person_renamed_across( $moved, $term->name, $dest->name )
+				// Also every untagged photo whose face data names them -- a
+				// suggestion or label there is exactly where a typo used to survive.
+				$face_posts = array_values( array_diff(
+					array_unique( array_merge( $moved, gasf_crm_face_posts_mentioning( $term->name ) ) ),
+					$failed
+				) );
+				$faces_moved = ( $face_posts && function_exists( 'gasf_crm_face_person_renamed_across' ) )
+					? gasf_crm_face_person_renamed_across( $face_posts, $term->name, $dest->name )
 					: 0;
 
 				// The old name goes only when nothing carries it any more --
@@ -1518,6 +1527,8 @@ add_action( 'rest_api_init', function () {
 						array( 'status' => 500 )
 					);
 				}
+				// From now on the old spelling means the new one, wherever it turns up.
+				gasf_crm_person_retire( $term->name, $dest->name );
 
 				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s), %d face record(s) — user %d',
 					$term->name, $dest->name, count( $posts ), $faces_moved, get_current_user_id() ) );
@@ -1561,9 +1572,11 @@ add_action( 'rest_api_init', function () {
 				// And the face records go with the name. An empty target means
 				// remove rather than rename: a name that turned out to be nobody
 				// must not stay behind as a training example of somebody.
+				$face_posts = array_values( array_unique( array_merge( $posts, gasf_crm_face_posts_mentioning( $term->name ) ) ) );
 				$faces_cleared = function_exists( 'gasf_crm_face_person_renamed_across' )
-					? gasf_crm_face_person_renamed_across( $posts, $term->name, '' )
+					? gasf_crm_face_person_renamed_across( $face_posts, $term->name, '' )
 					: 0;
+				gasf_crm_person_retire( $term->name, '' );
 
 				gasf_crm_log( sprintf( 'Photo library: removed the name “%s” from %d photo(s), %d face record(s) — user %d',
 					$term->name, count( $posts ), $faces_cleared, get_current_user_id() ) );
