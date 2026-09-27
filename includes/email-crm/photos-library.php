@@ -872,6 +872,59 @@ function gasf_crm_photo_zip_sweep() {
 }
 add_action( 'gasf_crm_sync_event', 'gasf_crm_photo_zip_sweep', 30 );
 
+/**
+ * Whether a photo carries a person term, read from the database.
+ *
+ * Deliberately not has_term(): that answers from the object-term cache, and the
+ * question here is "did the write just now actually land" -- a cache that says
+ * yes about a write that did not happen is exactly the answer to distrust.
+ */
+function gasf_crm_photo_has_person_term( $post_id, $term_id ) {
+	global $wpdb;
+	return (bool) $wpdb->get_var( $wpdb->prepare(
+		"SELECT 1 FROM {$wpdb->term_relationships} tr
+		   JOIN {$wpdb->term_taxonomy} tt ON tt.term_taxonomy_id = tr.term_taxonomy_id
+		  WHERE tr.object_id = %d AND tt.term_id = %d AND tt.taxonomy = 'gasf_photo_person'
+		  LIMIT 1",
+		(int) $post_id,
+		(int) $term_id
+	) );
+}
+
+/**
+ * Move one photo from one person to another, and prove it.
+ *
+ * The merge used to add the destination, remove the source, and trust both.
+ * wp_set_object_terms() silently skips a term id that does not exist and
+ * returns no error, so if the add did not land but the remove did, the photo
+ * simply lost the person -- no error, no log, just a member missing from a
+ * picture. Now the source is removed only once the destination is confirmed on
+ * the photo, and the removal is confirmed too. A photo that fails keeps the
+ * source name, so nothing is ever lost: running the merge again finishes it.
+ *
+ * @return bool True when the photo now carries $to_term_id and not $from_term_id.
+ */
+function gasf_crm_photo_person_move( $post_id, $from_term_id, $to_term_id ) {
+	$post_id = (int) $post_id;
+	$from    = (int) $from_term_id;
+	$to      = (int) $to_term_id;
+	if ( ! $post_id || ! $from || ! $to || $from === $to ) { return false; }
+
+	if ( ! gasf_crm_photo_has_person_term( $post_id, $to ) ) {
+		$r = wp_set_object_terms( $post_id, array( $to ), 'gasf_photo_person', true );
+		if ( is_wp_error( $r ) || ! gasf_crm_photo_has_person_term( $post_id, $to ) ) {
+			return false; // the source stays: nothing lost
+		}
+	}
+	if ( gasf_crm_photo_has_person_term( $post_id, $from ) ) {
+		$r = wp_remove_object_terms( $post_id, array( $from ), 'gasf_photo_person' );
+		if ( is_wp_error( $r ) || gasf_crm_photo_has_person_term( $post_id, $from ) ) {
+			return false; // both names on it for now: still nothing lost
+		}
+	}
+	return true;
+}
+
 /* =====================================================================
  * REST
  * ================================================================== */
@@ -1338,6 +1391,14 @@ add_action( 'rest_api_init', function () {
 					gasf_crm_op_finish( $op, false );
 					return $res;
 				}
+				clean_term_cache( (int) $term->term_id, 'gasf_photo_person' );
+				$check = get_term( (int) $term->term_id, 'gasf_photo_person' );
+				if ( ! $check || is_wp_error( $check ) || $to !== (string) $check->name ) {
+					// Face records are keyed by the name string: moving them to a
+					// spelling the person does not actually have would orphan them.
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error( 'gasf_crm_save', 'The new spelling did not save. Nothing else was changed; try again.', array( 'status' => 500 ) );
+				}
 
 				// Same $term->count trap as the panel had. Worse here: this one
 				// was writing "across 0 photo(s)" into the audit log, where a
@@ -1409,21 +1470,54 @@ add_action( 'rest_api_init', function () {
 
 				// Appended, never replacing: a photo may well have four other
 				// people on it, and merging one of them must not clear the rest.
+				// Each move is verified, and a photo that fails keeps the old
+				// name rather than losing the person (gasf_crm_photo_person_move).
+				$moved  = array();
+				$failed = array();
 				foreach ( $posts as $pid ) {
-					wp_set_object_terms( $pid, array( (int) $dest->term_id ), 'gasf_photo_person', true );
-					wp_remove_object_terms( $pid, array( (int) $term->term_id ), 'gasf_photo_person' );
-					if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+					if ( gasf_crm_photo_person_move( $pid, (int) $term->term_id, (int) $dest->term_id ) ) {
+						$moved[] = $pid;
+						if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
+					} else {
+						$failed[] = $pid;
+					}
 				}
-
-				wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
 
 				// The face records carry the name as a string, so they do not
 				// follow the term. Without this the scanner's examples of this
 				// person stay filed under the retired spelling and the merged
-				// person's training corpus stays split in two.
-				$faces_moved = function_exists( 'gasf_crm_face_person_renamed_across' )
-					? gasf_crm_face_person_renamed_across( $posts, $term->name, $dest->name )
+				// person's training corpus stays split in two. Only for photos
+				// that actually moved: the others still carry the old name.
+				$faces_moved = ( $moved && function_exists( 'gasf_crm_face_person_renamed_across' ) )
+					? gasf_crm_face_person_renamed_across( $moved, $term->name, $dest->name )
 					: 0;
+
+				// The old name goes only when nothing carries it any more --
+				// re-read, since a photo may have been tagged with it meanwhile.
+				clean_term_cache( (int) $term->term_id, 'gasf_photo_person' );
+				$still = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
+				$still = is_wp_error( $still ) ? $failed : array_map( 'intval', (array) $still );
+				if ( $failed || $still ) {
+					gasf_crm_log( sprintf( 'Photo library: merge of “%s” into “%s” incomplete — %d photo(s) moved, %d still carry the old name — user %d',
+						$term->name, $dest->name, count( $moved ), count( array_unique( array_merge( $failed, $still ) ) ), get_current_user_id() ) );
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error(
+						'gasf_crm_partial',
+						sprintf( 'Moved %d photo(s) to “%s”, but %d still have “%s”. Nothing was lost. Merge again to finish.',
+							count( $moved ), $dest->name, count( array_unique( array_merge( $failed, $still ) ) ), $term->name ),
+						array( 'status' => 500 )
+					);
+				}
+
+				$del = wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
+				if ( is_wp_error( $del ) || ! $del || term_exists( (int) $term->term_id, 'gasf_photo_person' ) ) {
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error(
+						'gasf_crm_save',
+						sprintf( 'Every photo moved to “%s”, but the old name “%s” could not be removed. Merge again to finish.', $dest->name, $term->name ),
+						array( 'status' => 500 )
+					);
+				}
 
 				gasf_crm_log( sprintf( 'Photo library: merged “%s” into “%s” across %d photo(s), %d face record(s) — user %d',
 					$term->name, $dest->name, count( $posts ), $faces_moved, get_current_user_id() ) );
@@ -1450,7 +1544,13 @@ add_action( 'rest_api_init', function () {
 				$posts = get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' );
 				$posts = is_wp_error( $posts ) ? array() : array_map( 'intval', $posts );
 
-				wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
+				$del = wp_delete_term( (int) $term->term_id, 'gasf_photo_person' );
+				if ( is_wp_error( $del ) || ! $del || term_exists( (int) $term->term_id, 'gasf_photo_person' ) ) {
+					// Clearing the face records for a name that is still there
+					// would strip its training examples and leave the tags.
+					gasf_crm_op_finish( $op, false );
+					return new WP_Error( 'gasf_crm_save', 'The name could not be removed. Nothing was changed; try again.', array( 'status' => 500 ) );
+				}
 
 				// Titles and download names are built from the people on a photo,
 				// so they are now wrong on every one of these until rebuilt.

@@ -668,6 +668,56 @@ final class GASF_CRM_Selftest {
 	 * examples stayed in two piles — the matcher got worse every time somebody
 	 * tidied the names panel, silently, because nothing failed.
 	 */
+	/**
+	 * Merging people moves each photo only when the move is proven.
+	 *
+	 * The merge used to add the destination, remove the source, and trust both;
+	 * wp_set_object_terms() silently skips a term id that does not exist, so a
+	 * failed add followed by a successful remove lost the person from the photo
+	 * with no error. Pins the primitive (a move to a term that is not there keeps
+	 * the source) and the end-to-end merge.
+	 */
+	public function test_person_merge_is_verified() {
+		$p1 = $this->library_photo( 'st-merge-a' );
+		$p2 = $this->library_photo( 'st-merge-b' );
+		$from = $this->person_term( 'Selftest Merge From ' . wp_rand() );
+		$into = $this->person_term( 'Selftest Merge Into ' . wp_rand() );
+		if ( is_wp_error( $from ) || is_wp_error( $into ) ) { $this->ok( false, 'merge: fixtures' ); return; }
+		$from_id = (int) $from['term_id'];
+		$into_id = (int) $into['term_id'];
+		wp_set_object_terms( $p1, array( $from_id ), 'gasf_photo_person', false );
+		wp_set_object_terms( $p2, array( $from_id ), 'gasf_photo_person', false );
+
+		$missing = 2147480000 + wp_rand( 0, 1000 ); // no such term
+		$this->ok(
+			false === gasf_crm_photo_person_move( $p1, $from_id, $missing )
+			&& gasf_crm_photo_has_person_term( $p1, $from_id ),
+			'merge: a move to a person that does not exist fails and keeps the photo\'s person'
+		);
+		$this->ok(
+			true === gasf_crm_photo_person_move( $p1, $from_id, $into_id )
+			&& gasf_crm_photo_has_person_term( $p1, $into_id )
+			&& ! gasf_crm_photo_has_person_term( $p1, $from_id ),
+			'merge: a verified move puts the new person on and only then takes the old one off'
+		);
+
+		$merged = $this->rest_post( '/gasf/v1/crm/photos/person', array(
+			'action'    => 'merge',
+			'term'      => $from_id,
+			'name'      => get_term( $from_id, 'gasf_photo_person' )->name,
+			'into'      => get_term( $into_id, 'gasf_photo_person' )->name,
+			'into_term' => $into_id,
+			'op_id'     => 'selftest-verified-merge-' . wp_rand(),
+		) );
+		$this->ok(
+			! is_wp_error( $merged )
+			&& gasf_crm_photo_has_person_term( $p1, $into_id )
+			&& gasf_crm_photo_has_person_term( $p2, $into_id )
+			&& ! term_exists( $from_id, 'gasf_photo_person' ),
+			'merge: every photo ends up on the destination and the old name is removed'
+		);
+	}
+
 	public function test_face_records_follow_a_rename() {
 		$id  = $this->library_photo( 'st-face-rename' );
 		$old = 'Selftest Schmit ' . wp_rand();
