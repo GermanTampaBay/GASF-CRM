@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.5.2"
+SCANNER_VERSION = "1.5.3"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -155,6 +155,9 @@ MIN_REFERENCES = 3
 # still cannot use. One click, no recognition. The board exists to grow the
 # reference set, and below this it is not doing that.
 MIN_DISCOVERY_CLUSTER = MIN_REFERENCES
+# Crops the discovery board keeps in memory for the life of one board: at
+# ~15 KB each, 1,200 is under 20 MB and covers a full 1,000-photo preparation.
+DISCOVERY_CROP_CACHE = 1200
 MAX_ACTIVE_REFERENCES = 12
 MIN_ACTIVE_QUALITY = 0.28
 ACTIVE_LEARNING_THRESHOLD = 0.45
@@ -2218,12 +2221,14 @@ main{padding:20px}.notice{max-width:900px;margin:0 0 18px;padding:12px 14px;back
 <script>
 const TOKEN=__DISCOVERY_TOKEN__;
 let meta={clusters:[],people:[]}, current=null, viewRevision=0, busy=false;
+const cropUrls=new Map(), cropPending=new Map();
 const byId=id=>document.getElementById(id);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function call(path,options={}){options.headers={...(options.headers||{}),'X-GASF-Discovery-Token':TOKEN};if(options.body)options.headers['Content-Type']='application/json';const r=await fetch(path,options);let data=null;try{data=await r.json()}catch(e){}if(!r.ok)throw new Error(data?.error||`Request failed (${r.status})`);return data}
-async function putCrop(img,id,revision){try{const r=await fetch(`/api/crop?id=${encodeURIComponent(id)}`,{headers:{'X-GASF-Discovery-Token':TOKEN}});if(!r.ok)throw new Error();const blob=await r.blob();if(revision!==viewRevision)return;img.src=URL.createObjectURL(blob)}catch(e){if(revision===viewRevision)img.alt='Crop unavailable'}}
+async function putCrop(img,id,revision){const known=cropUrls.get(id);if(known){if(revision===viewRevision)img.src=known;return}let pending=cropPending.get(id);if(!pending){pending=(async()=>{const r=await fetch(`/api/crop?id=${encodeURIComponent(id)}`,{headers:{'X-GASF-Discovery-Token':TOKEN}});if(!r.ok)throw new Error();const url=URL.createObjectURL(await r.blob());cropUrls.set(id,url);return url})().finally(()=>cropPending.delete(id));cropPending.set(id,pending)}try{const url=await pending;if(revision===viewRevision)img.src=url}catch(e){if(revision===viewRevision)img.alt='Crop unavailable'}}
+function pruneCropCache(){const keep=new Set();meta.clusters.forEach(c=>c.occurrences.forEach(o=>keep.add(Number(o.id))));for(const [id,url] of cropUrls){if(keep.has(Number(id)))continue;URL.revokeObjectURL(url);cropUrls.delete(id)}}
 function contextText(o){const c=o.context||{};return [...(c.events||[]),...(c.places||[])].slice(0,2).join(' / ')}
-function render(next){meta=next;const revision=++viewRevision;const root=byId('clusters');root.innerHTML='';byId('empty').hidden=meta.clusters.length>0;byId('people').innerHTML=(meta.people||[]).map(n=>`<option value="${esc(n)}">`).join('');
+function render(next){meta=next;pruneCropCache();const revision=++viewRevision;const root=byId('clusters');root.innerHTML='';byId('empty').hidden=meta.clusters.length>0;byId('people').innerHTML=(meta.people||[]).map(n=>`<option value="${esc(n)}">`).join('');
 /* Groups smaller than the reference floor are not offered: naming one gives a
    person the matcher still cannot use. Said out loud so the board never reads
    as "that is everything" when it is not. */
@@ -2236,7 +2241,7 @@ function selected(){return [...byId('occurrences').querySelectorAll('input:check
 function setBusy(value){busy=value;document.body.classList.toggle('busy',value)}
 async function applyName(){if(busy)return;const ids=selected(),name=byId('personName').value.trim();if(!ids.length){byId('message').textContent='Select at least one face.';return}if(!name){byId('message').textContent='Type the one name to apply to all selected faces.';return}if(!confirm(`Apply "${name}" to ${ids.length} selected face${ids.length===1?'':'s'}?`))return;setBusy(true);try{const out=await call('/api/name',{method:'POST',body:JSON.stringify({cluster:current.id,name,selected:ids})});byId('modal').classList.remove('on');render(out.meta);if(out.pending)alert(`${out.applied} face(s) saved. ${out.pending} stayed pending because WordPress reported them busy.`)}catch(e){byId('message').textContent=e.message}finally{setBusy(false)}}
 async function dismissSelected(){if(busy)return;const ids=selected();if(!ids.length){byId('message').textContent='Select at least one face to dismiss.';return}if(!confirm(`Dismiss ${ids.length} selected occurrence${ids.length===1?'':'s'} locally? The WordPress photos are not deleted or changed.`))return;setBusy(true);try{const out=await call('/api/dismiss',{method:'POST',body:JSON.stringify({cluster:current.id,selected:ids})});byId('modal').classList.remove('on');render(out.meta)}catch(e){byId('message').textContent=e.message}finally{setBusy(false)}}
-async function closeBoard(){try{await call('/api/close',{method:'POST',body:'{}'});document.body.innerHTML='<main><div class="notice"><strong>People Discovery closed.</strong> You may close this tab.</div></main>'}catch(e){alert(e.message)}}
+async function closeBoard(){try{await call('/api/close',{method:'POST',body:'{}'});for(const [,url] of cropUrls)URL.revokeObjectURL(url);cropUrls.clear();document.body.innerHTML='<main><div class="notice"><strong>People Discovery closed.</strong> You may close this tab.</div></main>'}catch(e){alert(e.message)}}
 byId('closeModal').onclick=()=>{byId('modal').classList.remove('on');++viewRevision};byId('applyName').onclick=applyName;byId('dismissSelected').onclick=dismissSelected;byId('closeBoard').onclick=closeBoard;
 call('/api/meta').then(render).catch(e=>{byId('clusters').innerHTML=`<div class="notice">${esc(e.message)}</div>`});
 </script></body></html>"""
@@ -2250,6 +2255,10 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
         "lock": threading.Lock(),
         "db_lock": threading.RLock(),
         "image_cache": OrderedDict(),
+        # Finished JPEG crops by occurrence id, so reopening a group or
+        # re-rendering after a name does not re-download and re-crop. Bytes
+        # only, in memory, gone when the board closes. ~15 KB each.
+        "crop_cache": OrderedDict(),
         "people": list(people),
         "observation_ids": {int(value) for value in observation_ids},
     }
@@ -2276,10 +2285,12 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
         }
 
     class DiscoveryHandler(BaseHTTPRequestHandler):
-        def _write(self, code, payload, ctype="application/json; charset=utf-8"):
+        def _write(self, code, payload, ctype="application/json; charset=utf-8", extra_headers=None):
             body = payload if isinstance(payload, (bytes, bytearray)) else payload.encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            for key, value in (extra_headers or {}).items():
+                self.send_header(str(key), str(value))
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -2354,6 +2365,12 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
                     return self._json(400, {"error": "Invalid occurrence id."})
                 if occurrence_id not in state["observation_ids"]:
                     return self._json(404, {"error": "No such occurrence in this discovery run."})
+                with state["lock"]:
+                    cached_crop = state["crop_cache"].get(occurrence_id)
+                    if cached_crop is not None:
+                        state["crop_cache"].move_to_end(occurrence_id)
+                if cached_crop is not None:
+                    return self._write(200, cached_crop, "image/jpeg", {"X-GASF-Crop-Cache": "hit"})
                 with state["db_lock"]:
                     row = conn.execute(
                         """SELECT photo_id, image_url, box_x, box_y, box_w, box_h
@@ -2381,7 +2398,12 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
                     crop = _discovery_crop(image_bytes, row[2:6])
                 except (OSError, ValueError) as e:
                     return self._json(422, {"error": str(e)})
-                return self._write(200, crop, "image/jpeg")
+                with state["lock"]:
+                    state["crop_cache"][occurrence_id] = crop
+                    state["crop_cache"].move_to_end(occurrence_id)
+                    while len(state["crop_cache"]) > DISCOVERY_CROP_CACHE:
+                        state["crop_cache"].popitem(last=False)
+                return self._write(200, crop, "image/jpeg", {"X-GASF-Crop-Cache": "miss"})
             return self._json(404, {"error": "Not found"})
 
         def do_POST(self):
@@ -2438,6 +2460,9 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
                         )
                     delete_unknown_observations(conn, ids)
                     state["observation_ids"].difference_update(ids)
+                    with state["lock"]:
+                        for observation_id in ids:
+                            state["crop_cache"].pop(int(observation_id), None)
                     cluster_unknown_faces(
                         conn,
                         backend,
@@ -2485,6 +2510,9 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
                     with state["db_lock"]:
                         delete_unknown_observations(conn, applied_ids)
                         state["observation_ids"].difference_update(applied_ids)
+                        with state["lock"]:
+                            for observation_id in applied_ids:
+                                state["crop_cache"].pop(int(observation_id), None)
                         cluster_unknown_faces(
                             conn,
                             backend,
@@ -6251,10 +6279,26 @@ def selftest():
                 headers=headers,
                 timeout=3,
             )
+            crop_again = requests.get(
+                base + f"/api/crop?id={occurrence_id}",
+                headers=headers,
+                timeout=3,
+            )
             check_that(
                 crop.status_code == 200
                 and crop.headers.get("Content-Type") == "image/jpeg",
                 "discovery UI: representative crops are generated locally",
+            )
+            check_that(
+                crop.headers.get("X-GASF-Crop-Cache") == "miss"
+                and crop_again.headers.get("X-GASF-Crop-Cache") == "hit"
+                and crop_again.content == crop.content,
+                "discovery UI: a crop is made once and then served from memory",
+            )
+            _disc_html = _discovery_ui_html("selftest-token")
+            check_that(
+                "URL.revokeObjectURL" in _disc_html and "pruneCropCache()" in _disc_html,
+                "discovery UI: the browser frees crops that are no longer on screen",
             )
             named = requests.post(
                 base + "/api/name",

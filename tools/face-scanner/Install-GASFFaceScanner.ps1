@@ -26,7 +26,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 2
-$payload = Join-Path $PSScriptRoot "payload"
+# Set by Resolve-PayloadRoot below: payload\ as built, or the script's own
+# folder when the ZIP was extracted flat.
+$payload = $null
 $requiredPayload = @(
     "scan.py",
     "scan-gui.py",
@@ -36,6 +38,21 @@ $requiredPayload = @(
     "config.example.json",
     "README.md"
 )
+
+function Resolve-PayloadRoot([string]$ScriptRoot, [string[]]$RequiredFiles) {
+    # The ZIP holds payload\ beside this script, but extracting "flat" (or
+    # copying the files by hand) puts them next to it instead. Accept either,
+    # so long as every required file is actually there.
+    foreach ($candidate in @((Join-Path $ScriptRoot "payload"), $ScriptRoot)) {
+        if (-not (Test-Path $candidate -PathType Container)) { continue }
+        $complete = $true
+        foreach ($name in $RequiredFiles) {
+            if (-not (Test-Path (Join-Path $candidate $name) -PathType Leaf)) { $complete = $false; break }
+        }
+        if ($complete) { return $candidate }
+    }
+    return $null
+}
 
 function Invoke-Native(
     [string]$FilePath,
@@ -244,11 +261,13 @@ function New-ScannerShortcut([string]$ShortcutPath, [string]$Pythonw, [string]$A
     $shortcut.Save()
 }
 
-foreach ($name in $requiredPayload) {
-    $path = Join-Path $payload $name
-    if (-not (Test-Path $path -PathType Leaf)) {
-        throw "Installer payload is incomplete: $name is missing. Extract the entire ZIP before running."
-    }
+$payload = Resolve-PayloadRoot -ScriptRoot $PSScriptRoot -RequiredFiles $requiredPayload
+if (-not $payload) {
+    # Report against the folder the files were evidently meant to be in.
+    $looked = Join-Path $PSScriptRoot "payload"
+    if (-not (Test-Path $looked -PathType Container)) { $looked = $PSScriptRoot }
+    $missing = @($requiredPayload | Where-Object { -not (Test-Path (Join-Path $looked $_) -PathType Leaf) })
+    throw ("Installer files are incomplete: " + ($missing -join ", ") + " not found in '" + $PSScriptRoot + "\payload' or next to this script. Extract the entire ZIP before running.")
 }
 if ($CaptionTimeout -lt 15 -or $CaptionTimeout -gt 300) {
     throw "CaptionTimeout must be between 15 and 300 seconds."
