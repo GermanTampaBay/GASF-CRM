@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.5.1"
+SCANNER_VERSION = "1.5.2"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -4629,6 +4629,11 @@ def scan(
                     })
 
                 caption_done = False
+                # Quarantine also sets caption_done (the photo is reported so it
+                # stops coming round), but nothing was written. Without this the
+                # summary line said "caption drafted and verified" straight after
+                # "caption quarantined" -- 283 photos went that way unnoticed.
+                caption_gave_up = False
                 caption_item = None
                 # Once the captioner has refused a connection, it is not going to
                 # start mid-run. Asking again per photo bought nothing but a
@@ -4668,8 +4673,12 @@ def scan(
                                 }
                                 _clear_caption_failure(conn, caption_key, photo_id)
                                 caption_done = True
+                                caption_gave_up = True
                                 if verbose:
-                                    print(f"  #{photo_id}: caption quarantined after {n} deterministic failures")
+                                    print(
+                                        f"  #{photo_id}: gave up on a description after {n} failed attempts; "
+                                        "it will not be tried again automatically"
+                                    )
                             else:
                                 _defer(deferred_ids, backoff_ids, photo_id, back_off=False)
                                 if verbose:
@@ -4696,7 +4705,9 @@ def scan(
                     if needs_faces:
                         names = ", ".join(f["name"] for f in faces) or "no one recognised"
                         parts.append(f"{len(found)} face(s) — {names}")
-                    if caption_done:
+                    if caption_gave_up:
+                        parts.append("no description (gave up)")
+                    elif caption_done:
                         parts.append("caption drafted and verified")
                     print(f"  {photos_done + idx}/{grand_total}  #{photo_id}: " + "; ".join(parts))
                 if (face_results or caption_results) and time.time() - last_flush >= SCAN_FLUSH_SECONDS:

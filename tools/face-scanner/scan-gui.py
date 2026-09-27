@@ -93,6 +93,33 @@ def resolve_scan_py():
 SCAN_PY = resolve_scan_py()
 
 
+def version_key(v):
+    """'1.5.1' -> (1, 5, 1). A missing version sorts before every real one."""
+    try:
+        return tuple(int(x) for x in str(v).split("."))
+    except ValueError:
+        return ()
+
+
+def stale_remembered_scanner(remembered, adjacent):
+    """
+    The scanner beside the launcher's version, when the remembered one is older.
+
+    Returns "" when there is nothing to offer: no remembered choice, the same
+    file, no adjacent scanner, or the remembered copy is as new or newer. A
+    remembered copy with no version at all predates 1.4.0 and counts as older.
+    """
+    if not remembered or not adjacent or not os.path.isfile(adjacent):
+        return ""
+    if os.path.normcase(os.path.abspath(remembered)) == os.path.normcase(os.path.abspath(adjacent)):
+        return ""
+    beside = read_scanner_version(adjacent)
+    if not beside:
+        return ""
+    mine = read_scanner_version(remembered) if os.path.isfile(remembered) else ""
+    return beside if version_key(mine) < version_key(beside) else ""
+
+
 def read_scanner_version(path):
     """
     The SCANNER_VERSION a scan.py declares, read as text rather than imported.
@@ -350,6 +377,31 @@ class ScanGui(tk.Tk):
         self.v_python.set("Runs with " + self._python_label())
         self._select("scan")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(400, self._offer_newer_scanner)
+
+    def _offer_newer_scanner(self):
+        """
+        Ask, once at start-up, to leave a remembered scanner that is out of date.
+
+        The remembered choice exists so an old folder cannot silently win -- but
+        it then did exactly that the other way round: a launcher updated in place
+        kept running a months-old scan.py from an abandoned worktree, and the only
+        sign was an amber line inside Advanced settings. A stale choice is worth
+        interrupting for; a deliberate newer one is left alone.
+        """
+        newer = stale_remembered_scanner(load_saved_scan_py(), ADJACENT_SCAN_PY)
+        if not newer:
+            return
+        current = self._current_scan_py()
+        mine = read_scanner_version(current) or "an unversioned copy, older than 1.4.0"
+        if messagebox.askyesno(
+            "A newer scanner is here",
+            "This launcher is set to run an older copy of the scanner:\n\n"
+            f"{current}\n(version: {mine})\n\n"
+            f"The scanner beside this launcher is version {newer}.\n\n"
+            "Switch to the newer one? (Yes is almost always right.)",
+        ):
+            self._use_adjacent()
 
     # -- look ---------------------------------------------------------------
 
