@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.5.3"
+SCANNER_VERSION = "1.6.1"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -1015,6 +1015,24 @@ def _migrate(conn):
                updated_at INTEGER NOT NULL
            )"""
     )
+    # What was detected on each photo, so the naming page and People Discovery
+    # do not re-download and re-detect every photo on every run. Keyed by the
+    # server's image_rev as well as the photo, so a cropped or rotated photo is
+    # a miss rather than old boxes on a new picture. Local only, like every
+    # other vector in this file.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS face_detections (
+               photo_id INTEGER NOT NULL,
+               engine TEXT NOT NULL,
+               image_rev TEXT NOT NULL,
+               width INTEGER NOT NULL,
+               height INTEGER NOT NULL,
+               faces TEXT NOT NULL,
+               thumb TEXT NOT NULL DEFAULT '',
+               stored_at INTEGER NOT NULL,
+               PRIMARY KEY (photo_id, engine)
+           )"""
+    )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS unknown_dismissals (
                id INTEGER PRIMARY KEY,
@@ -1077,6 +1095,10 @@ def _migrate(conn):
         # not less, so it lives in exactly the same place and travels no further.
         # Empty on rows written before this existed; those fill in as they relearn.
         "thumb": "BLOB",
+        # 1 once quality was measured, 2 once measuring was tried and could not
+        # be done (photo gone or changed), 0 for rows still at the 0.5 default
+        # the quality column was added with -- see backfill_reference_quality.
+        "quality_measured": "INTEGER NOT NULL DEFAULT 0",
     }
     cols = {row[1] for row in conn.execute("PRAGMA table_info(refs)")}
     for column, declaration in ref_additions.items():
@@ -1314,6 +1336,92 @@ def _reference_duplicate_threshold(engine):
 def _captured_year(raw):
     match = re.match(r"^\s*(\d{4})", str(raw or ""))
     return int(match.group(1)) if match else 0
+
+
+# How many photos' worth of old references to re-measure per learning run.
+# Each is one download and one detection; 20 keeps a run's extra time small.
+QUALITY_BACKFILL_PHOTOS = 20
+# Same photo, same engine: the stored vector and a fresh one are near-identical.
+# Anything further apart means the picture changed, and the row is left alone.
+QUALITY_BACKFILL_MATCH = 0.15
+
+
+def backfill_reference_quality(api, conn, backend, limit=QUALITY_BACKFILL_PHOTOS, verbose=True):
+    """
+    Re-measure reference faces still carrying the 0.5 placeholder quality.
+
+    Quality (size, sharpness, clipping) decides which of a person's examples
+    the matcher actually uses. Rows learned before quality existed were given a
+    flat 0.5 and only get a real score if their photo happens to be relearned,
+    so the good and the poor ones among them compete as equals. A few photos
+    per run fixes that gradually. The face is found again by its own vector,
+    not by box, so a crop or rotate since cannot mismatch it: no close match,
+    and the row is marked 2 (tried, could not) instead of guessed at.
+
+    Returns (rows measured, rows that could not be, rows still waiting).
+    """
+    # Rows written with a real score since quality existed are measured already.
+    conn.execute(
+        "UPDATE refs SET quality_measured = 1 WHERE quality_measured = 0 AND ABS(quality - 0.5) > 1e-9"
+    )
+    conn.commit()
+    photo_ids = [
+        int(r[0]) for r in conn.execute(
+            """SELECT DISTINCT photo_id FROM refs
+                WHERE engine = ? AND quality_measured = 0
+                ORDER BY photo_id LIMIT ?""",
+            (backend.name, int(limit)),
+        )
+    ]
+    measured = failed = 0
+    touched = set()
+    for photo_id in photo_ids:
+        rows = conn.execute(
+            "SELECT id, person, vector FROM refs WHERE engine = ? AND photo_id = ? AND quality_measured = 0",
+            (backend.name, photo_id),
+        ).fetchall()
+        try:
+            pixels = display_rgb_array(api.image(f"{api.base}/image?photo={photo_id}"))
+            found = backend.embed_rgb(pixels)
+        except Exception:
+            found, pixels = [], None
+        for ref_id, person, blob in rows:
+            vec = np.frombuffer(blob, dtype=np.float32)
+            best = None
+            if found and pixels is not None and len(vec) == backend.dim:
+                matrix = np.vstack([np.asarray(v, dtype=np.float32) for _, v in found])
+                dists = backend.distances(matrix, vec)
+                i = int(np.argmin(dists))
+                if float(dists[i]) <= QUALITY_BACKFILL_MATCH:
+                    best = found[i][0]
+            if best is None:
+                conn.execute("UPDATE refs SET quality_measured = 2 WHERE id = ?", (ref_id,))
+                failed += 1
+                continue
+            m = reference_quality(pixels, best)
+            conn.execute(
+                """UPDATE refs SET face_width = ?, face_height = ?, sharpness = ?, clipping = ?,
+                                   quality = ?, quality_measured = 1
+                    WHERE id = ?""",
+                (int(m["face_width"]), int(m["face_height"]), float(m["sharpness"]),
+                 float(m["clipping"]), float(m["quality"]), ref_id),
+            )
+            measured += 1
+            touched.add(person)
+        conn.commit()
+    if touched:
+        refresh_reference_selection(conn, backend.name, touched)
+    waiting = int(conn.execute(
+        "SELECT COUNT(*) FROM refs WHERE engine = ? AND quality_measured = 0", (backend.name,)
+    ).fetchone()[0])
+    if verbose and (measured or failed):
+        print(
+            f"re-measured quality for {measured} older reference face(s)"
+            + (f", {failed} could not be (photo gone or changed)" if failed else "")
+            + f"; {waiting} still waiting",
+            flush=True,
+        )
+    return measured, failed, waiting
 
 
 def refresh_reference_selection(conn, engine=None, people=None):
@@ -2053,10 +2161,9 @@ def prepare_unknown_faces(
     for index, photo in enumerate(photos, start=1):
         photo_id = int(photo["id"])
         try:
-            image_bytes = api.image(photo["url"])
-            pixels = display_rgb_array(image_bytes)
-            found = backend.embed_rgb(pixels)
-            image_height, image_width = pixels.shape[:2]
+            det = detect_photo(api, conn, backend, photo)
+            found = det.found
+            image_height, image_width = det.height, det.width
             unknown = unresolved_observations(
                 photo,
                 found,
@@ -2681,6 +2788,90 @@ class _HeartbeatTicker:
         self._thread.join(timeout=1.0)
 
 
+class Detection:
+    """Faces found on one photo: from the cache, or freshly detected."""
+
+    __slots__ = ("found", "width", "height", "qualities", "thumb", "cached")
+
+    def __init__(self, found, width, height, qualities, thumb, cached):
+        self.found = found            # [(box_css, vector)], as backend.embed_rgb returns
+        self.width = int(width)
+        self.height = int(height)
+        self.qualities = qualities    # one reference_quality()["quality"] per face
+        self.thumb = thumb            # small data-URI preview for gallery cards
+        self.cached = cached
+
+
+def remember_detection(conn, backend, photo, image_bytes, pixels, found):
+    """Store what was just detected on a photo, if the server stamped its image."""
+    rev = str(photo.get("image_rev") or "")
+    if not rev:
+        return None
+    height, width = pixels.shape[:2]
+    faces = []
+    qualities = []
+    for box_css, vector in found:
+        q = float(reference_quality(pixels, box_css)["quality"])
+        qualities.append(q)
+        faces.append({
+            "box": [int(v) for v in box_css],
+            "v": base64.b64encode(np.asarray(vector, dtype=np.float32).tobytes()).decode("ascii"),
+            "q": q,
+        })
+    thumb = _thumb_data_uri(image_bytes) if image_bytes is not None else ""
+    conn.execute(
+        """INSERT OR REPLACE INTO face_detections
+               (photo_id, engine, image_rev, width, height, faces, thumb, stored_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (int(photo["id"]), backend.name, rev, int(width), int(height),
+         json.dumps(faces, separators=(",", ":")), thumb, int(time.time())),
+    )
+    conn.commit()
+    return Detection(found, width, height, qualities, thumb, cached=False)
+
+
+def detect_photo(api, conn, backend, photo):
+    """
+    Faces on one photo, from the local cache when its image is unchanged.
+
+    A hit needs the same photo, the same engine, and the same image_rev the
+    server reports now; anything else downloads and detects afresh and replaces
+    the row. A server that sends no image_rev (older plugin) is never cached.
+    """
+    photo_id = int(photo["id"])
+    rev = str(photo.get("image_rev") or "")
+    if rev:
+        row = conn.execute(
+            """SELECT width, height, faces, thumb FROM face_detections
+                WHERE photo_id = ? AND engine = ? AND image_rev = ?""",
+            (photo_id, backend.name, rev),
+        ).fetchone()
+        if row is not None:
+            try:
+                faces = json.loads(row[2])
+                found = [
+                    (tuple(int(v) for v in f["box"]),
+                     np.frombuffer(base64.b64decode(f["v"]), dtype=np.float32).copy())
+                    for f in faces
+                ]
+                if all(len(v) == backend.dim for _, v in found):
+                    return Detection(found, row[0], row[1], [float(f["q"]) for f in faces], row[3], cached=True)
+            except (ValueError, KeyError, TypeError):
+                pass  # unreadable row: fall through and rebuild it
+    image_bytes = api.image(photo["url"])
+    pixels = display_rgb_array(image_bytes)
+    found = backend.embed_rgb(pixels)
+    stored = remember_detection(conn, backend, photo, image_bytes, pixels, found)
+    if stored is not None:
+        return stored
+    height, width = pixels.shape[:2]
+    return Detection(
+        found, width, height,
+        [float(reference_quality(pixels, b)["quality"]) for b, _ in found],
+        _thumb_data_uri(image_bytes), cached=False,
+    )
+
+
 def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after="", uploaded_before=""):
     limit = max(1, min(1000, int(limit)))
     q = {"limit": limit}
@@ -2715,6 +2906,7 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
     items = []
     total = len(photos)
     current = 0
+    reused = 0
     if total:
         # The longest silence in the whole tool: every photo is downloaded and
         # face-detected before the page can open. Say so, once, up front.
@@ -2735,20 +2927,20 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
             photo_id = int(p["id"])
             people = [str(n).strip() for n in (p.get("people") or []) if str(n).strip()]
             try:
-                image_bytes = api.image(p["url"])
-                display_pixels = display_rgb_array(image_bytes)
-                found = backend.embed_rgb(display_pixels)
+                det = detect_photo(api, conn, backend, p)
             except Exception as e:
                 print(f"#{photo_id}: skipped ({e})")
                 continue
+            reused += int(det.cached)
+            found = [(b, v, q) for (b, v), q in zip(det.found, det.qualities)]
             if not found:
                 continue
 
-            image_height, image_width = display_pixels.shape[:2]
+            image_height, image_width = det.height, det.width
             boxes = []
             kept_found = []
             ignored_boxes = p.get("ignored") or []
-            for box_css, vector in found:
+            for box_css, vector, face_quality in found:
                 box = clamp_box_xywh(css_box_to_xywh(box_css), image_width, image_height)
                 if box is None:
                     continue
@@ -2757,28 +2949,27 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                 if _face_box_ignored(box, image_width, image_height, ignored_boxes):
                     continue
                 boxes.append(box)
-                kept_found.append((box_css, vector))
+                kept_found.append((box_css, vector, face_quality))
             found = kept_found
             if not found:
                 continue
             hints = []
             active_faces = []
             rejected = p.get("rejected") or []
-            for i, (box_css, vec) in enumerate(found):
+            for i, (box_css, vec, face_quality) in enumerate(found):
                 nearest_name, distance = nearest_reference(vec, refs, backend)
                 name = nearest_name if nearest_name and distance <= tolerance else None
                 conf = confidence(distance, tolerance) if name else 0
                 if _face_name_rejected(name, rejected):
                     name, conf = None, 0
                 hints.append({"index": i, "name": name or "", "confidence": int(round(conf * 100)) if name else 0})
-                metrics = reference_quality(display_pixels, box_css)
                 active_faces.append(
                     {
                         "index": i,
                         "vector": np.asarray(vec, dtype=np.float32),
                         "nearest_name": nearest_name or "",
                         "distance": float(distance),
-                        "quality": float(metrics["quality"]),
+                        "quality": float(face_quality),
                         "recognized": bool(name),
                     }
                 )
@@ -2830,12 +3021,12 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                         or str(p.get("uploaded_at") or "")
                     ),
                     # Lightweight preview only. Full image is loaded on demand per photo.
-                    "thumb": _thumb_data_uri(image_bytes),
+                    "thumb": det.thumb,
                 }
             )
             people_names.extend(people)
             if n % 25 == 0 or n == total:
-                print(f"label prep: {n}/{total} photos checked, {len(items)} ready")
+                print(f"label prep: {n}/{total} photos checked ({reused} from the local cache), {len(items)} ready")
     finally:
         beat.stop()
     prioritize_active_learning(items, conn, backend, tolerance)
@@ -4374,6 +4565,11 @@ def learn(api, conn, backend, verbose=True):
         except Exception as e:
             if verbose:
                 print(f"learned marker push skipped: {e}")
+    try:
+        backfill_reference_quality(api, conn, backend, verbose=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"quality re-measure skipped this run: {e}")
     return added
 
 
@@ -4557,6 +4753,10 @@ def scan(
                         if needs_faces:
                             display_pixels = display_rgb_array(image_bytes)
                             found = backend.embed_rgb(display_pixels)
+                            try:
+                                remember_detection(conn, backend, p, image_bytes, display_pixels, found)
+                            except Exception:
+                                pass  # a cache that cannot be written is only a cache
                         else:
                             found = []
                         err = None
@@ -5229,6 +5429,80 @@ def selftest():
         _def == {11, 12, 13} and _back == {13},
         "scanner: a downed captioner defers a photo without counting toward the stop",
     )
+
+    # The detection cache: one download per photo while its image is unchanged,
+    # a fresh one when the server's image_rev changes, and no caching at all
+    # when the server sends no stamp.
+    from PIL import Image as _DetImage
+
+    _det_jpeg = io.BytesIO()
+    _DetImage.new("RGB", (32, 24), (120, 110, 100)).save(_det_jpeg, "JPEG")
+
+    class _DetApi:
+        def __init__(self):
+            self.downloads = 0
+
+        def image(self, _url):
+            self.downloads += 1
+            return _det_jpeg.getvalue()
+
+    with sqlite3.connect(":memory:") as _dconn:
+        _migrate(_dconn)
+        _dapi = _DetApi()
+        _p = {"id": 77, "url": "u77", "image_rev": "rev-a"}
+        _d1 = detect_photo(_dapi, _dconn, backend, _p)
+        _d2 = detect_photo(_dapi, _dconn, backend, _p)
+        _d3 = detect_photo(_dapi, _dconn, backend, {**_p, "image_rev": "rev-b"})
+        _d4 = detect_photo(_dapi, _dconn, backend, {"id": 78, "url": "u78"})
+        _d5 = detect_photo(_dapi, _dconn, backend, {"id": 78, "url": "u78"})
+        check_that(
+            not _d1.cached and _d2.cached and not _d3.cached and _dapi.downloads == 4
+            and not _d4.cached and not _d5.cached,
+            "detection cache: reused while the image is unchanged, redone when it changes, never without a stamp",
+        )
+        check_that(
+            [b for b, _ in _d2.found] == [tuple(b) for b, _ in _d1.found]
+            and all(np.array_equal(a, b) for (_, a), (_, b) in zip(_d1.found, _d2.found))
+            and _d2.qualities == _d1.qualities and (_d2.width, _d2.height) == (32, 24)
+            and _d2.thumb.startswith("data:image/"),
+            "detection cache: a cached result is identical to the fresh one it replaced",
+        )
+
+    # Quality backfill: an old 0.5 row whose face is found again gets a real
+    # score; one whose face is not there is marked tried-and-failed, not guessed.
+    class _QApi:
+        base = "https://example.invalid/faces"
+
+        def image(self, _url):
+            return _det_jpeg.getvalue()
+
+    with sqlite3.connect(":memory:") as _qconn:
+        _migrate(_qconn)
+        _stub_vec = np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()
+        _far_vec = np.array([9.0, 9.0, 9.0], dtype=np.float32).tobytes()
+        _qconn.execute(
+            "INSERT INTO refs (person, photo_id, engine, face_key, vector) VALUES ('Anna', 5, ?, '0', ?)",
+            (backend.name, _stub_vec),
+        )
+        _qconn.execute(
+            "INSERT INTO refs (person, photo_id, engine, face_key, vector) VALUES ('Bert', 6, ?, '0', ?)",
+            (backend.name, _far_vec),
+        )
+        _qconn.execute(
+            "INSERT INTO refs (person, photo_id, engine, face_key, vector, quality) VALUES ('Cora', 7, ?, '0', ?, 0.83)",
+            (backend.name, _stub_vec),
+        )
+        _qres = backfill_reference_quality(_QApi(), _qconn, backend, verbose=False)
+        _qrows = dict(
+            (r[0], r[1:]) for r in _qconn.execute("SELECT person, quality_measured, quality, face_width FROM refs")
+        )
+        check_that(
+            _qres == (1, 1, 0)
+            and _qrows["Anna"][0] == 1 and _qrows["Anna"][2] > 0
+            and _qrows["Bert"][0] == 2 and abs(_qrows["Bert"][1] - 0.5) < 1e-9
+            and _qrows["Cora"][0] == 1 and abs(_qrows["Cora"][1] - 0.83) < 1e-9,
+            "quality backfill: an old default is re-measured, an unmatched face is marked not guessed, a real score is kept",
+        )
 
     # Results go up as they finish, not only when a batch ends. Driven through
     # the real scan() with a fake site: with the flush interval at zero, three
