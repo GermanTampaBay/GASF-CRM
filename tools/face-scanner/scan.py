@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.5.0"
+SCANNER_VERSION = "1.5.1"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -4377,7 +4377,7 @@ def scan(
     if verbose:
         print(f"reference set: {len(references)} person(s) with {MIN_REFERENCES}+ examples [{backend.name}]")
         if not include_captions:
-            print("caption pipeline: deferred until after labeling")
+            print("photo descriptions: not this run (add --describe to write them)")
         if caption_key:
             print(
                 f"caption pipeline: {cfg_caption_model(cfg)}, "
@@ -4491,14 +4491,10 @@ def scan(
             return total_seen
 
         batch_no += 1
+        # The whole run so far plus this batch plus what the site says is left.
+        grand_total = photos_done + len(photos) + int(data.get("remaining", 0))
         if verbose:
-            print(
-                batch_progress_line(
-                    batch_no, len(photos), int(data.get("remaining", 0)),
-                    photos_done, time.time() - run_started,
-                ),
-                flush=True,
-            )
+            print(progress_line(photos_done, grand_total, time.time() - run_started), flush=True)
         face_results = []
         caption_results = []
         committed_any = False
@@ -4510,7 +4506,7 @@ def scan(
             verbose and batch_total > 0,
             15,
             lambda: (
-                f"scan heartbeat: photo {batch_now}/{batch_total} in this batch, "
+                f"  still working: photo {photos_done + batch_now} of {grand_total}, "
                 f"{time.time() - photo_started:.0f}s on it so far; {total_seen} sent, "
                 f"{total_kept} face suggestion(s), {total_captions} caption(s) stored"
             ),
@@ -4702,7 +4698,7 @@ def scan(
                         parts.append(f"{len(found)} face(s) — {names}")
                     if caption_done:
                         parts.append("caption drafted and verified")
-                    print(f"  #{photo_id}: " + "; ".join(parts))
+                    print(f"  {photos_done + idx}/{grand_total}  #{photo_id}: " + "; ".join(parts))
                 if (face_results or caption_results) and time.time() - last_flush >= SCAN_FLUSH_SECONDS:
                     if not post_results(face_results, caption_results, caption_endpoint):
                         return total_seen
@@ -5882,12 +5878,11 @@ def selftest():
     except SystemExit:
         remote_caption_allowed = False
     check_that(
-        batch_progress_line(1, 25, 340, 0, 0)
-        == "Batch 1: 25 photo(s). 340 more waiting after this (about 14 more batches)."
-        and batch_progress_line(3, 25, 25, 50, 3000)
-        == "Batch 3: 25 photo(s). 25 more waiting after this (about 1 more batch); at the pace so far, about 50m to go."
-        and batch_progress_line(9, 7, 0, 200, 400).startswith("Batch 9: 7 photo(s). 0 more waiting after this;"),
-        "scan: each batch says how many remain and, once there is a pace, how long",
+        progress_line(0, 339, 0) == "339 photo(s) waiting."
+        and progress_line(50, 339, 3000) == "50 of 339 photo(s) done; at the pace so far, about 4h 49m to go."
+        and progress_line(339, 339, 900).endswith("about 0s to go.")
+        and "batch" not in progress_line(25, 339, 100).lower(),
+        "scan: progress is told in photos of the whole run, with time left once there is a pace",
     )
     check_that(
         "Tampa Bay" not in CAPTION_SYSTEM and f"the {CLUB_NAME}" in CAPTION_SYSTEM,
@@ -6343,23 +6338,20 @@ def _duration(seconds):
     return f"{s}s"
 
 
-def batch_progress_line(batch_no, batch_size, remaining_after, photos_done, seconds_spent):
+def progress_line(done, total, seconds_spent):
     """
-    One line at the start of each batch: where the run is, and how far to go.
+    Where the whole run stands, in photos -- not in batches.
 
-    remaining_after is the server's count of photos still waiting AFTER this
-    batch. The time estimate only appears once a batch has finished, because
-    until then there is no pace to extrapolate from -- and the pace varies ten-
-    fold between face-only and caption work, so a guess would mislead.
+    The scanner asks the site for work 25 photos at a time (small requests the
+    host's firewall tolerates, and each round picks up anything newly uploaded),
+    but that is plumbing. What a volunteer wants is "how many, and how long".
+    The estimate appears only once some photos are done: before that there is no
+    pace, and caption work runs far slower than face work, so a guess misleads.
     """
-    more_batches = -(-remaining_after // batch_size) if batch_size else 0
-    line = f"Batch {batch_no}: {batch_size} photo(s). {remaining_after} more waiting after this"
-    if remaining_after:
-        line += f" (about {more_batches} more batch{'es' if more_batches != 1 else ''})"
-    if photos_done > 0 and seconds_spent > 0:
-        left = (remaining_after + batch_size) * (seconds_spent / photos_done)
-        line += f"; at the pace so far, about {_duration(left)} to go"
-    return line + "."
+    if done <= 0 or seconds_spent <= 0:
+        return f"{total} photo(s) waiting."
+    left = max(0, total - done) * (seconds_spent / done)
+    return f"{done} of {total} photo(s) done; at the pace so far, about {_duration(left)} to go."
 
 
 def run_label_refinement(
@@ -6455,13 +6447,16 @@ def main():
     ap.add_argument("--engine", choices=["auto", "insightface", "face_recognition"],
                     help="override the recognition backend for this run")
     ap.add_argument("--quiet", action="store_true")
-    ap.add_argument(
-        "--no-captions", action="store_true",
-        help="suggest names only; leave photo descriptions for a --describe run",
-    )
+    # Names only unless descriptions are asked for. Captions take a minute or
+    # more a photo with the large model against well under a second for faces,
+    # and a plain run is what a volunteer types to get name suggestions.
     ap.add_argument(
         "--describe", action="store_true",
-        help="write photo descriptions with the local caption model (slow; best left running)",
+        help="also write photo descriptions with the local caption model (slow; best left running)",
+    )
+    ap.add_argument(
+        "--no-captions", action="store_true",
+        help="names only -- the default since 1.5.1; kept so older commands still work",
     )
     args = ap.parse_args()
     if args.discover and (args.label or args.label_flow or args.learn or args.watch):
@@ -6493,11 +6488,18 @@ def main():
         cfg = {**cfg, "engine": args.engine}
     engine = cfg_engine(cfg)
     verbose = not args.quiet
-    if args.describe and not cfg_caption_model(cfg):
-        sys.exit(
-            "No caption model is set up, so there is nothing to describe photos with.\n"
-            "Set \"caption_model\" in config.json (for example \"qwen3-vl:8b\") and run Check my setup."
+    describe = args.describe
+    if describe and not cfg_caption_model(cfg):
+        # Warn and carry on with names rather than fail: the scheduled task
+        # passes --describe, and a laptop without a caption model must still
+        # get its name suggestions every run.
+        print(
+            "No caption model is set up, so no photo descriptions will be written this run; "
+            "suggesting names only. To add descriptions, set \"caption_model\" in config.json "
+            "(for example \"qwen3-vl:8b\") and run Check my setup.",
+            flush=True,
         )
+        describe = False
     if verbose:
         print(f"GASF face scanner {SCANNER_VERSION}")
         print(
@@ -6582,7 +6584,7 @@ def main():
             learn(api, conn, backend, verbose)
         scan(
             api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before,
-            include_captions=not args.no_captions,
+            include_captions=describe,
         )
         if not args.watch:
             break

@@ -153,10 +153,9 @@ face rectangles use the same orientation Edge displays.
 
 | Command | What it does |
 |---|---|
-| `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
+| `python scan.py` | Learn if the reference set is empty, then suggest names for whatever is waiting, then stop. Names only: no photo descriptions. |
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
-| `python scan.py --no-captions` | Faces only: suggest names and skip photo descriptions. Seconds a photo. |
-| `python scan.py --describe` | Write photo descriptions with the local caption model (and scan any faces still waiting). Slow — a minute or more a photo with `qwen3-vl:30b` — so best left running. Refuses to start if no caption model is set. |
+| `python scan.py --describe` | Names **and** photo descriptions from the local caption model. Slow — a minute or more a photo with `qwen3-vl:30b` — so best left running. With no caption model set, it says so and does names only. The scheduled task (`run.ps1`) passes this by default. |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
 | `python scan.py --label --label-flow` | Mature refinement pass: learn corrections, face-scan new photos, label only unresolved work, relearn those labels, then run the full face/caption scan. |
 | `python scan.py --discover` | Refresh unresolved observations, cluster them locally, and open the loopback-only People Discovery contact-sheet board. |
@@ -183,11 +182,11 @@ they run:
 
 | Task in the window | What it runs |
 |---|---|
-| **Suggest names for new photos** | `--no-captions` (with `--learn` when *Study newly tagged photos first* is ticked) |
+| **Suggest names for new photos** | `scan.py` (with `--learn` when *Study newly tagged photos first* is ticked) |
 | **Write photo descriptions** | `--describe` |
 | **Name faces it does not know** | `--label` (with `--label-flow` when *Fill in familiar faces before the page opens* is ticked) |
 | **Group lookalike faces** | `--discover` |
-| **Keep running on a timer** | `--watch`, entered in minutes (plus `--no-captions` when *Also write photo descriptions* is unticked) |
+| **Keep running on a timer** | `--watch`, entered in minutes (plus `--describe` when *Also write photo descriptions* is ticked) |
 | **Show progress** | `--status` |
 | **Check my setup** | `--check` |
 | **Advanced settings** | `--engine`, `--quiet`, the scanner-file choice, and `--selftest` |

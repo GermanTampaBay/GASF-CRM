@@ -15,7 +15,9 @@
     legacy code page, and a stray Unicode dash breaks parsing.
 #>
 param(
-    [string]$ScanArgs = "--learn --quiet"
+    # --describe: unattended runs are where the slow photo descriptions belong.
+    # A PC with no caption model set simply does names (scan.py says so).
+    [string]$ScanArgs = "--learn --describe --quiet"
 )
 
 $ErrorActionPreference = "Stop"

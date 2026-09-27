@@ -1001,7 +1001,6 @@ class ScanGui(tk.Tk):
         if key == "scan":
             if self.v_study_first.get():
                 cmd.append("--learn")
-            cmd.append("--no-captions")
         elif key == "describe":
             cmd.append("--describe")
         elif key == "label":
@@ -1015,8 +1014,8 @@ class ScanGui(tk.Tk):
         elif key == "watch":
             minutes = self._whole(self.v_watch_minutes.get(), "Check every", 1, 1440)
             cmd += ["--watch", str(minutes * 60)]
-            if not self.v_watch_captions.get():
-                cmd.append("--no-captions")
+            if self.v_watch_captions.get():
+                cmd.append("--describe")
         elif key in ("status", "check", "selftest"):
             cmd.append("--" + key)
         else:
