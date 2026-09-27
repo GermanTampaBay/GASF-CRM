@@ -163,11 +163,11 @@ face rectangles use the same orientation Edge displays.
 | `python scan.py --status` | Active/retained corpus counts and quality, what is waiting, and the latest conservative calibration recommendation. No ML is loaded. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
 | `python scan.py --selftest` | Exercise the non-ML plumbing. Needs no backend, no config, no network. |
-| `python scan-gui.py` | Checkbox launcher UI for `scan.py` (blocks unsupported option combos, shows inline output). |
+| `python scan-gui.py` | The launcher window: every mode above as a plainly described task, with its output shown in the same window. |
 
 `--engine insightface|face_recognition|auto` overrides the backend for one run.
 
-### Simple launcher UI
+### The launcher window
 
 If you prefer not to remember CLI flags:
 
@@ -175,9 +175,28 @@ If you prefer not to remember CLI flags:
 python scan-gui.py
 ```
 
-- Tick options, click **Start**, and it runs `scan.py`.
-- It blocks unsupported combinations (for example `--learn` + `--label`).
-- In label mode, leave **Refinement flow: Learn → Scan → Label → Learn → Scan** on. Familiar high-confidence faces are resolved before the browser opens, so the default gallery concentrates on unknown and uncertain faces.
+The desktop shortcut the installer creates opens the same window. Pick a task
+on the left, read what it does, and press its button. The tasks, and the flags
+they run:
+
+| Task in the window | What it runs |
+|---|---|
+| **Suggest names for new photos** | `scan.py` (with `--learn` when *Study newly tagged photos first* is ticked) |
+| **Name faces it does not know** | `--label` (with `--label-flow` when *Fill in familiar faces before the page opens* is ticked) |
+| **Group lookalike faces** | `--discover` |
+| **Keep running on a timer** | `--watch`, entered in minutes |
+| **Show progress** | `--status` |
+| **Check my setup** | `--check` |
+| **Advanced settings** | `--engine`, `--quiet`, the scanner-file choice, and `--selftest` |
+
+- One task runs at a time, so the flag combinations `scan.py` refuses cannot be
+  chosen.
+- The *How it works* strip at the top can be hidden once it has done its job,
+  and brought back from the header.
+- In **Name faces it does not know**, leave *Fill in familiar faces before the
+  page opens* ticked. Familiar high-confidence faces are resolved before the
+  browser opens, so the default gallery concentrates on unknown and uncertain
+  faces.
 - Three answers close a photo, and they are not interchangeable:
   - **Not a person** puts ONE rectangle down - a poster on the wall, a
     reflection, or the detector finding a face in a curtain. The photo carries
@@ -203,10 +222,10 @@ python scan-gui.py
   labeler that closed it.
 - The label gallery keeps its existing filters and adds optional **Active learning**. It ranks a bounded top subset using unresolved-cluster size, corpus weakness, boundary uncertainty, appearance novelty, crop quality, and underrepresented dates when known. The score and every embedding stay local.
 - In discovery mode, each contact sheet is a conservative, engine-isolated cluster from the current date/limit preparation scope. Open it, deselect mistakes, type one known or new person name, and confirm. That one name applies to every selected face. Unselected faces remain unknown and are reclustered; **Dismiss selected locally** suppresses the same local face using its rectangle and embedding, even if detector order changes, without changing or deleting the WordPress photo.
-- Optional upload-date bounds (`Uploaded after`, `Uploaded before`) let you skip old uploads (`YYYY-MM-DD`).
+- **Which photos** lets you limit a task to photos uploaded between two dates (`YYYY-MM-DD`, both days included), with *Last 7 days* and *Last 30 days* shortcuts.
 - The labeler has live outline/opacity settings plus zoom, fit, center, and pan controls. You can also drag the image to pan, double-click to fit, and use Ctrl+wheel to zoom.
 - In the WordPress photo editor, **Not in photo** removes one wrong person suggestion and remembers that photo/person rejection. Later scans may suggest other people, but cannot resurrect that rejected person or auto-accept them on that photo.
-- The launcher finds `scan.py` beside itself, so the folder can move without editing code.
+- The launcher finds `scan.py` beside itself, so the folder can move without editing code. If a different `scan.py` has been chosen under *Advanced settings*, that page says so in yellow.
 
 Optional single-file EXE (Windows):
 
