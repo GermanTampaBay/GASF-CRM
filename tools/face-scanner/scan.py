@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.1"
+SCANNER_VERSION = "1.6.2"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -1344,6 +1344,53 @@ QUALITY_BACKFILL_PHOTOS = 20
 # Same photo, same engine: the stored vector and a fresh one are near-identical.
 # Anything further apart means the picture changed, and the row is left alone.
 QUALITY_BACKFILL_MATCH = 0.15
+
+
+def apply_retired_names(api, conn, verbose=True):
+    """
+    Refile local examples learned under a name that has since been merged or
+    renamed, and drop the ones whose name was removed.
+
+    The website records every retired name (v2.58.0) and sends the list with
+    the people. Without this the scanner kept 20 examples of a merged-away typo
+    and went on suggesting it: only photos the site flags as changed are ever
+    relearned, and most of those examples came from photos nobody touched.
+    """
+    try:
+        data = api.get("/people")
+    except Exception:
+        return 0
+    retired = data.get("retired") if isinstance(data, dict) else None
+    if not retired:
+        return 0
+    moved = dropped = 0
+    touched = set()
+    for row in retired:
+        old = str((row or {}).get("from") or "").strip()
+        new = str((row or {}).get("to") or "").strip()
+        if not old or old.casefold() == new.casefold():
+            continue
+        if new:
+            n = conn.execute(
+                "UPDATE refs SET person = ? WHERE person = ? COLLATE NOCASE", (new, old)
+            ).rowcount
+            moved += n
+            if n:
+                touched.add(new)
+        else:
+            dropped += conn.execute(
+                "DELETE FROM refs WHERE person = ? COLLATE NOCASE", (old,)
+            ).rowcount
+    conn.commit()
+    if touched or dropped:
+        refresh_reference_selection(conn, None, touched or None)
+    if verbose and (moved or dropped):
+        print(
+            f"retired names: {moved} example(s) refiled under the current spelling"
+            + (f", {dropped} dropped for removed names" if dropped else ""),
+            flush=True,
+        )
+    return moved + dropped
 
 
 def backfill_reference_quality(api, conn, backend, limit=QUALITY_BACKFILL_PHOTOS, verbose=True):
@@ -4405,6 +4452,7 @@ def learn(api, conn, backend, verbose=True):
     """
     if verbose:
         print("Studying photos volunteers have tagged since the last run...", flush=True)
+    apply_retired_names(api, conn, verbose)
     wk_mod = state_key(backend.name, "learned_modified")
     wk_id = state_key(backend.name, "learned_id")
     since_mod = state_get(conn, wk_mod, "")
@@ -4595,6 +4643,9 @@ def scan(
     uploaded_before="",
     include_captions=True,
 ):
+    # Before loading references: a plain run that skips learning must not go on
+    # suggesting a name that was merged away.
+    apply_retired_names(api, conn, verbose)
     references = load_references(conn, backend.name)
     dismissal_threshold = cfg_discovery_tolerance(cfg, backend.name)
     caption_key = caption_scan_key(cfg) if include_captions else ""
@@ -5502,6 +5553,32 @@ def selftest():
             and _qrows["Bert"][0] == 2 and abs(_qrows["Bert"][1] - 0.5) < 1e-9
             and _qrows["Cora"][0] == 1 and abs(_qrows["Cora"][1] - 0.83) < 1e-9,
             "quality backfill: an old default is re-measured, an unmatched face is marked not guessed, a real score is kept",
+        )
+
+    # Retired names: examples under a merged-away spelling are refiled under the
+    # current one, and those under a removed name are dropped.
+    class _RetiredApi:
+        def get(self, path, **_kw):
+            if path == "/people":
+                return {"people": ["Susanne Kern"], "retired": [
+                    {"from": "Susanne Kerm", "to": "Susanne Kern"},
+                    {"from": "Nobody Really", "to": ""},
+                ]}
+            return {}
+
+    with sqlite3.connect(":memory:") as _rconn:
+        _migrate(_rconn)
+        _v = np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()
+        for _i, _who in enumerate(["Susanne Kerm", "susanne kerm", "Susanne Kern", "Nobody Really", "Kept Person"]):
+            _rconn.execute(
+                "INSERT INTO refs (person, photo_id, engine, face_key, vector) VALUES (?, ?, ?, '0', ?)",
+                (_who, 100 + _i, backend.name, _v),
+            )
+        apply_retired_names(_RetiredApi(), _rconn, verbose=False)
+        _names = sorted(r[0] for r in _rconn.execute("SELECT person FROM refs"))
+        check_that(
+            _names == ["Kept Person", "Susanne Kern", "Susanne Kern", "Susanne Kern"],
+            "retired names: local examples of a merged-away spelling are refiled, a removed name's are dropped",
         )
 
     # Results go up as they finish, not only when a batch ends. Driven through
@@ -6639,9 +6716,9 @@ def selftest():
             None, None, None, 0.5, {}, 500, "", "", verbose=False
         )
         check_that(
-            flow_events == ["learn", "scan-faces", "label", "learn", "scan-full"]
+            flow_events == ["learn", "scan-faces", "label", "learn", "scan-faces"]
             and flow_stored == 2,
-            "label flow: learn and face-scan before labeling, then relearn and fully scan",
+            "label flow: learn and face-scan before labeling, then relearn and face-scan again (no captions)",
         )
     finally:
         globals()["learn"] = original_learn
@@ -6727,7 +6804,7 @@ def run_label_refinement(
         print(f"label flow 4/5: learning {stored} explicit label change(s)")
     learn(api, conn, backend, verbose)
     if verbose:
-        print("label flow 5/5: final face and caption scan with refreshed references")
+        print("label flow 5/5: final face scan with refreshed references (descriptions are their own task)")
     scan(
         api,
         conn,
@@ -6737,7 +6814,7 @@ def run_label_refinement(
         verbose,
         uploaded_after,
         uploaded_before,
-        include_captions=True,
+        include_captions=False,
     )
     return stored
 
