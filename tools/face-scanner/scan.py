@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.4.2"
+SCANNER_VERSION = "1.4.3"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -4391,6 +4391,9 @@ def scan(
     # Latched the first time the local captioner refuses a connection: it will
     # not come up mid-run, and asking once per photo costs a timeout each.
     captioner_down = False
+    batch_no = 0
+    run_started = time.time()
+    photos_done = 0
 
     while True:
         qp = {}
@@ -4426,6 +4429,15 @@ def scan(
                     print(f"calibration: could not refresh report ({e})")
             return total_seen
 
+        batch_no += 1
+        if verbose:
+            print(
+                batch_progress_line(
+                    batch_no, len(photos), int(data.get("remaining", 0)),
+                    photos_done, time.time() - run_started,
+                ),
+                flush=True,
+            )
         face_results = []
         caption_results = []
         batch_now = 0
@@ -4436,7 +4448,8 @@ def scan(
             15,
             lambda: (
                 f"scan heartbeat: photo {batch_now}/{batch_total} in this batch, "
-                f"{time.time() - photo_started:.0f}s on it so far; {total_seen} sent, {total_kept} kept"
+                f"{time.time() - photo_started:.0f}s on it so far; {total_seen} sent, "
+                f"{total_kept} face suggestion(s), {total_captions} caption(s) stored"
             ),
         )
         beat.start()
@@ -4678,6 +4691,7 @@ def scan(
             )
             return total_seen
         total_seen += len(processed) + fallback_seen
+        photos_done += batch_total
         if len(backoff_ids) >= 100:
             if verbose:
                 print(
@@ -5787,6 +5801,14 @@ def selftest():
     except SystemExit:
         remote_caption_allowed = False
     check_that(
+        batch_progress_line(1, 25, 340, 0, 0)
+        == "Batch 1: 25 photo(s). 340 more waiting after this (about 14 more batches)."
+        and batch_progress_line(3, 25, 25, 50, 3000)
+        == "Batch 3: 25 photo(s). 25 more waiting after this (about 1 more batch); at the pace so far, about 50m to go."
+        and batch_progress_line(9, 7, 0, 200, 400).startswith("Batch 9: 7 photo(s). 0 more waiting after this;"),
+        "scan: each batch says how many remain and, once there is a pace, how long",
+    )
+    check_that(
         "Tampa Bay" not in CAPTION_SYSTEM and f"the {CLUB_NAME}" in CAPTION_SYSTEM,
         "caption: the prompt names the club correctly",
     )
@@ -6226,6 +6248,37 @@ def selftest():
 
 
 # --------------------------------------------------------------------------- main
+
+
+def _duration(seconds):
+    """'3h 20m', '12m', '45s' -- for progress lines a person reads."""
+    seconds = int(max(0, seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m"
+    if m:
+        return f"{m}m"
+    return f"{s}s"
+
+
+def batch_progress_line(batch_no, batch_size, remaining_after, photos_done, seconds_spent):
+    """
+    One line at the start of each batch: where the run is, and how far to go.
+
+    remaining_after is the server's count of photos still waiting AFTER this
+    batch. The time estimate only appears once a batch has finished, because
+    until then there is no pace to extrapolate from -- and the pace varies ten-
+    fold between face-only and caption work, so a guess would mislead.
+    """
+    more_batches = -(-remaining_after // batch_size) if batch_size else 0
+    line = f"Batch {batch_no}: {batch_size} photo(s). {remaining_after} more waiting after this"
+    if remaining_after:
+        line += f" (about {more_batches} more batch{'es' if more_batches != 1 else ''})"
+    if photos_done > 0 and seconds_spent > 0:
+        left = (remaining_after + batch_size) * (seconds_spent / photos_done)
+        line += f"; at the pace so far, about {_duration(left)} to go"
+    return line + "."
 
 
 def run_label_refinement(
