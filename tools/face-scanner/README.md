@@ -36,7 +36,9 @@ extract it, and double-click `Install-GASFFaceScanner.cmd`. The installer:
 2. Copies only the runtime scripts to `%LOCALAPPDATA%\GASF Face Scanner`.
 3. Creates a private `.venv` and installs InsightFace, ONNX Runtime, and the
    scanner's core packages.
-4. Downloads `qwen3-vl:8b`, writes `config.json` after a hidden scanner-key
+4. Downloads a caption model sized to the GPU (`qwen3-vl:30b` with 16 GB or
+   more of video memory, otherwise `qwen3-vl:8b`; pass `-CaptionModel` to
+   choose), writes `config.json` after a hidden scanner-key
    prompt, and runs the full preflight.
 5. Adds **GASF Face Scanner** to the Desktop and Start Menu.
 
@@ -129,7 +131,7 @@ If you want a full bootstrap on Windows, use:
 powershell -ExecutionPolicy Bypass -File install-ollama.ps1 `
   -ScannerKey "gasf_face_xxxxx" `
   -SiteUrl "https://germantampabay.com" `
-  -CaptionModel "qwen3-vl:8b"
+  -CaptionModel "qwen3-vl:30b"
 ```
 
 That script installs Ollama (if missing), starts/verifies the local API, pulls
@@ -220,8 +222,15 @@ Then run `dist\scan-gui.exe`.
 If you run a local vision model in Ollama, the scanner can submit a short
 caption suggestion with each scanned photo.
 
-1. In `config.json`, set `"caption_model"` (`qwen3-vl:8b` is recommended for
-   the scanner machine's 16 GB GPU).
+1. In `config.json`, set `"caption_model"` (`qwen3-vl:30b` is recommended for
+   the scanner machine's 16 GB GPU). It is a mixture-of-experts model with about
+   3B parameters active per token, so it stays usable when part of it spills
+   into system RAM; it needs roughly 20 GB of VRAM and RAM combined. It is
+   slow: about 85 seconds a photo on that GPU, against about 2 seconds for
+   `qwen3-vl:8b`. On a smaller machine, use `qwen3-vl:8b`. Keep to a vision
+   model: a text-only model such as `gpt-oss` cannot see the photo.
+   Changing the model does not redo existing captions; it applies to new
+   photos and to photos flagged for a caption refresh.
 2. Leave `caption_url` at `http://127.0.0.1:11434/api/generate` unless your
    local Ollama installation uses another loopback address. Remote endpoints
    are refused so club photos cannot be sent to an external model by mistake.

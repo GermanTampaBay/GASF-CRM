@@ -13,7 +13,8 @@ param(
     [string]$InstallDirectory = (Join-Path $env:LOCALAPPDATA "GASF Face Scanner"),
     [string]$SiteUrl = "https://germantampabay.com",
     [Security.SecureString]$ScannerKey,
-    [string]$CaptionModel = "qwen3-vl:8b",
+    # Empty means "choose from this PC's GPU": see Select-CaptionModel.
+    [string]$CaptionModel = "",
     [int]$CaptionTimeout = 300,
     [switch]$InstallScheduledTask,
     [int]$TaskIntervalMinutes = 30,
@@ -92,6 +93,32 @@ function Resolve-Python {
         }
     }
     return $null
+}
+
+function Select-CaptionModel {
+    # qwen3-vl:30b writes better captions but needs about 20 GB between the
+    # GPU and system RAM. Measured on a 16 GB RTX 4070 Ti SUPER it takes about
+    # 85 seconds a photo with 30% of it spilled to the CPU; on a smaller GPU
+    # it would run up against the 300-second caption timeout and every
+    # caption would fail. Below 16 GB, or with no NVIDIA GPU, use the 8b
+    # model, which fits entirely on the card and takes seconds.
+    $smi = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
+    if ($smi) {
+        $lines = & $smi.Source --query-gpu=memory.total --format=csv,noheader,nounits 2>$null
+        $best = 0
+        foreach ($line in @($lines)) {
+            $mib = 0
+            if ([int]::TryParse(([string]$line).Trim(), [ref]$mib) -and $mib -gt $best) { $best = $mib }
+        }
+        if ($best -ge 15000) {
+            Write-Host "GPU memory: $best MiB. Using the larger caption model."
+            return "qwen3-vl:30b"
+        }
+        if ($best -gt 0) { Write-Host "GPU memory: $best MiB. Using the smaller caption model." }
+    } else {
+        Write-Host "No NVIDIA GPU found. Using the smaller caption model."
+    }
+    return "qwen3-vl:8b"
 }
 
 function Resolve-Ollama {
@@ -227,6 +254,10 @@ if ($CaptionTimeout -lt 15 -or $CaptionTimeout -gt 300) {
     throw "CaptionTimeout must be between 15 and 300 seconds."
 }
 if ($TaskIntervalMinutes -lt 1) { throw "TaskIntervalMinutes must be at least 1." }
+
+if ([string]::IsNullOrWhiteSpace($CaptionModel)) {
+    $CaptionModel = Select-CaptionModel
+}
 
 if ($ValidateOnly) {
     Write-Host "Installer bundle is complete."

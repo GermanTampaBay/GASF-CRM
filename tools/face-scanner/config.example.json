@@ -2,7 +2,7 @@
   "url": "https://germantampabay.com",
   "key": "gasf_face_paste_the_key_from_wp_admin_here",
 
-  "_comment": "engine, tolerance, discovery_*, calibration_*, and caption_* are optional. qwen3-vl:8b is recommended for a 16 GB GPU.",
+  "_comment": "engine, tolerance, discovery_*, calibration_*, and caption_* are optional. qwen3-vl:30b is recommended for a 16 GB GPU; qwen3-vl:8b for smaller machines.",
   "engine": "auto",
   "tolerance": null,
   "discovery_tolerance": null,

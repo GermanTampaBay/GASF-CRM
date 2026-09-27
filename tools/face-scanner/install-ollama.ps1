@@ -4,7 +4,7 @@
     What it does:
       1) installs Ollama (via winget) if missing
       2) starts/verifies the local Ollama API
-      3) pulls a vision model (default: qwen3-vl:8b)
+      3) pulls a vision model (default: qwen3-vl:30b)
       4) installs Python dependencies for scan.py
       5) writes/updates config.json for scanner + captions
       6) runs scan.py --check
@@ -13,7 +13,7 @@
       powershell -ExecutionPolicy Bypass -File install-ollama.ps1 `
         -ScannerKey "gasf_face_xxxxx" `
         -SiteUrl "https://germantampabay.com" `
-        -CaptionModel "qwen3-vl:8b"
+        -CaptionModel "qwen3-vl:30b"
 
     NOTE: keep this file ASCII-only. Windows PowerShell 5.1 reads .ps1 as the
     legacy code page, and non-ASCII punctuation can break parsing.
@@ -21,7 +21,7 @@
 param(
     [string]$SiteUrl = "https://germantampabay.com",
     [string]$ScannerKey = "",
-    [string]$CaptionModel = "qwen3-vl:8b",
+    [string]$CaptionModel = "qwen3-vl:30b",
     [string]$CaptionUrl = "http://127.0.0.1:11434/api/generate",
     [int]$CaptionTimeout = 300
 )

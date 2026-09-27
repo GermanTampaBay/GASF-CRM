@@ -4,8 +4,10 @@ GASF FACE SCANNER - LAPTOP INSTALL
 1. Copy this ZIP to the laptop and extract all files.
 2. Double-click Install-GASFFaceScanner.cmd.
 3. Paste the scanner key when prompted. The key entry is hidden.
-4. Leave the window open while Python packages, Ollama, qwen3-vl:8b, and the
-   InsightFace model are downloaded. This can take a while.
+4. Leave the window open while Python packages, Ollama, the caption model,
+   and the InsightFace model are downloaded. This can take a while. The
+   caption model is qwen3-vl:30b on a PC with 16 GB or more of GPU memory,
+   otherwise qwen3-vl:8b.
 5. Launch "GASF Face Scanner" from the Desktop or Start Menu.
 
 The installer does not need Git or a source checkout. It installs the runtime
