@@ -155,6 +155,8 @@ face rectangles use the same orientation Edge displays.
 |---|---|
 | `python scan.py` | Learn if the reference set is empty, then scan whatever is waiting, then stop. |
 | `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
+| `python scan.py --no-captions` | Faces only: suggest names and skip photo descriptions. Seconds a photo. |
+| `python scan.py --describe` | Write photo descriptions with the local caption model (and scan any faces still waiting). Slow — a minute or more a photo with `qwen3-vl:30b` — so best left running. Refuses to start if no caption model is set. |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |
 | `python scan.py --label --label-flow` | Mature refinement pass: learn corrections, face-scan new photos, label only unresolved work, relearn those labels, then run the full face/caption scan. |
 | `python scan.py --discover` | Refresh unresolved observations, cluster them locally, and open the loopback-only People Discovery contact-sheet board. |
@@ -181,16 +183,23 @@ they run:
 
 | Task in the window | What it runs |
 |---|---|
-| **Suggest names for new photos** | `scan.py` (with `--learn` when *Study newly tagged photos first* is ticked) |
+| **Suggest names for new photos** | `--no-captions` (with `--learn` when *Study newly tagged photos first* is ticked) |
+| **Write photo descriptions** | `--describe` |
 | **Name faces it does not know** | `--label` (with `--label-flow` when *Fill in familiar faces before the page opens* is ticked) |
 | **Group lookalike faces** | `--discover` |
-| **Keep running on a timer** | `--watch`, entered in minutes |
+| **Keep running on a timer** | `--watch`, entered in minutes (plus `--no-captions` when *Also write photo descriptions* is unticked) |
 | **Show progress** | `--status` |
 | **Check my setup** | `--check` |
 | **Advanced settings** | `--engine`, `--quiet`, the scanner-file choice, and `--selftest` |
 
 - One task runs at a time, so the flag combinations `scan.py` refuses cannot be
   chosen.
+- Names and descriptions are separate tasks on purpose. Face matching takes
+  seconds a photo; the caption model can take a minute or more. Run together,
+  every batch of name suggestions waited behind the slow part.
+- Results go to the website as they finish -- at least once a minute -- not
+  only at the end of each batch of 25, so stopping a slow run part way loses
+  nothing already finished.
 - The list is grouped by the steps in the *How it works* strip: **Step 2 -
   Suggest** and **Step 3 - Teach**. Step 1, studying tagged photos, has no
   button; it happens at the start of those tasks.

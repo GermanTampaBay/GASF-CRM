@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.4.3"
+SCANNER_VERSION = "1.5.0"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -4352,6 +4352,14 @@ def learn(api, conn, backend, verbose=True):
 # --------------------------------------------------------------------------- scan
 
 
+# Send finished results at least this often, not only at the end of a batch.
+# A face-only batch finishes in seconds, so it still goes up as one request and
+# the host is not asked for more than before. Caption work takes a minute a
+# photo with the large model, so a batch of 25 used to sit on the PC for half
+# an hour -- invisible in the Gallery, and lost if the run was stopped.
+SCAN_FLUSH_SECONDS = 60
+
+
 def scan(
     api,
     conn,
@@ -4394,6 +4402,59 @@ def scan(
     batch_no = 0
     run_started = time.time()
     photos_done = 0
+
+    def post_results(face_results, caption_results, caption_endpoint):
+        """Send what is ready and empty the lists. False if the host refused it."""
+        nonlocal total_seen, total_kept, total_captions
+        if not face_results and not caption_results:
+            return True
+        processed = set()
+        fallback_seen = 0
+        # A status that survived _send's backoff means the host is properly
+        # unwell rather than merely busy. Say so in a sentence and stop: a
+        # traceback after two hundred photos reads as though the run was wasted,
+        # and it was not. Everything acknowledged is saved, and anything not
+        # acknowledged is still pending server-side and comes round again.
+        try:
+            if face_results:
+                out = api.post("/suggest", {"photos": face_results})
+                acknowledged = out.get("processed_ids")
+                if isinstance(acknowledged, list):
+                    processed.update(int(photo_id) for photo_id in acknowledged)
+                else:
+                    fallback_seen += int(out.get("photos", 0))
+                # The server naming rows it could not take IS the back-off signal.
+                for busy in (out.get("busy_ids") or []):
+                    _defer(deferred_ids, backoff_ids, int(busy))
+                total_kept += int(out.get("suggestions", 0))
+                if not caption_endpoint:
+                    total_captions += int(out.get("captions", 0))
+            if caption_results:
+                out = api.post("/caption", {"photos": caption_results})
+                acknowledged = out.get("processed_ids")
+                if isinstance(acknowledged, list):
+                    processed.update(int(photo_id) for photo_id in acknowledged)
+                else:
+                    fallback_seen += int(out.get("photos", 0))
+                # The server naming rows it could not take IS the back-off signal.
+                for busy in (out.get("busy_ids") or []):
+                    _defer(deferred_ids, backoff_ids, int(busy))
+                total_captions += int(out.get("captions", 0))
+        except requests.RequestException as e:
+            total_seen += len(processed) + fallback_seen
+            print("the server could not take this batch: " + _http_error_line(e))
+            print(
+                "  It was asked %d times over several seconds first, so this is the host "
+                "rather than a blip. Everything it acknowledged is saved; the rest is "
+                "still pending and comes round again. Wait a few minutes and run again."
+                % Api.SOFT_RETRIES
+            )
+            return False
+        finally:
+            face_results.clear()
+            caption_results.clear()
+        total_seen += len(processed) + fallback_seen
+        return True
 
     while True:
         qp = {}
@@ -4440,6 +4501,8 @@ def scan(
             )
         face_results = []
         caption_results = []
+        committed_any = False
+        last_flush = time.time()
         batch_now = 0
         batch_total = len(photos)
         photo_started = time.time()
@@ -4640,57 +4703,21 @@ def scan(
                     if caption_done:
                         parts.append("caption drafted and verified")
                     print(f"  #{photo_id}: " + "; ".join(parts))
+                if (face_results or caption_results) and time.time() - last_flush >= SCAN_FLUSH_SECONDS:
+                    if not post_results(face_results, caption_results, caption_endpoint):
+                        return total_seen
+                    committed_any = True
+                    last_flush = time.time()
         finally:
             beat.stop()
 
-        if not face_results and not caption_results:
+        if not committed_any and not face_results and not caption_results:
             if verbose:
                 print("no scan results were safe to commit; leaving this batch in queue for retry")
             return total_seen
 
-        processed = set()
-        fallback_seen = 0
-        # A status that survived _send's backoff means the host is properly
-        # unwell rather than merely busy. Say so in a sentence and stop: a
-        # traceback after two hundred photos reads as though the run was wasted,
-        # and it was not. Everything acknowledged is saved, and anything not
-        # acknowledged is still pending server-side and comes round again.
-        try:
-            if face_results:
-                out = api.post("/suggest", {"photos": face_results})
-                acknowledged = out.get("processed_ids")
-                if isinstance(acknowledged, list):
-                    processed.update(int(photo_id) for photo_id in acknowledged)
-                else:
-                    fallback_seen += int(out.get("photos", 0))
-                # The server naming rows it could not take IS the back-off signal.
-                for busy in (out.get("busy_ids") or []):
-                    _defer(deferred_ids, backoff_ids, int(busy))
-                total_kept += int(out.get("suggestions", 0))
-                if not caption_endpoint:
-                    total_captions += int(out.get("captions", 0))
-            if caption_results:
-                out = api.post("/caption", {"photos": caption_results})
-                acknowledged = out.get("processed_ids")
-                if isinstance(acknowledged, list):
-                    processed.update(int(photo_id) for photo_id in acknowledged)
-                else:
-                    fallback_seen += int(out.get("photos", 0))
-                # The server naming rows it could not take IS the back-off signal.
-                for busy in (out.get("busy_ids") or []):
-                    _defer(deferred_ids, backoff_ids, int(busy))
-                total_captions += int(out.get("captions", 0))
-        except requests.RequestException as e:
-            total_seen += len(processed) + fallback_seen
-            print("the server could not take this batch: " + _http_error_line(e))
-            print(
-                "  It was asked %d times over several seconds first, so this is the host "
-                "rather than a blip. Everything it acknowledged is saved; the rest is "
-                "still pending and comes round again. Wait a few minutes and run again."
-                % Api.SOFT_RETRIES
-            )
+        if not post_results(face_results, caption_results, caption_endpoint):
             return total_seen
-        total_seen += len(processed) + fallback_seen
         photos_done += batch_total
         if len(backoff_ids) >= 100:
             if verbose:
@@ -5167,6 +5194,60 @@ def selftest():
         _def == {11, 12, 13} and _back == {13},
         "scanner: a downed captioner defers a photo without counting toward the stop",
     )
+
+    # Results go up as they finish, not only when a batch ends. Driven through
+    # the real scan() with a fake site: with the flush interval at zero, three
+    # photos are three sends; with it at an hour, they are one, as before.
+    from PIL import Image as _FlushImage
+
+    _jpeg = io.BytesIO()
+    _FlushImage.new("RGB", (16, 16), (90, 90, 90)).save(_jpeg, "JPEG")
+
+    class _FlushApi:
+        def __init__(self):
+            self.posts = []
+            self.served = False
+
+        def get(self, path, **_kw):
+            if path == "/queue":
+                if self.served:
+                    return {"photos": [], "remaining": 0}
+                self.served = True
+                return {
+                    "photos": [{"id": i, "url": f"u{i}", "needs_faces": True} for i in (1, 2, 3)],
+                    "remaining": 0,
+                    "caption_endpoint": True,
+                }
+            return {}
+
+        def post(self, path, payload):
+            ids = [int(x["id"]) for x in payload.get("photos", [])]
+            self.posts.append((path, ids))
+            return {"processed_ids": ids, "suggestions": 0}
+
+        def image(self, _url):
+            return _jpeg.getvalue()
+
+    _flush_saved = globals()["SCAN_FLUSH_SECONDS"]
+    _flush_calib = globals()["sync_calibration"]
+    try:
+        globals()["sync_calibration"] = lambda *a, **k: {}
+        _flush_counts = []
+        for _interval in (0, 3600):
+            globals()["SCAN_FLUSH_SECONDS"] = _interval
+            _fapi = _FlushApi()
+            with sqlite3.connect(":memory:") as _fconn:
+                _migrate(_fconn)
+                _seen = scan(_fapi, _fconn, backend, 1.0, {}, verbose=False, include_captions=False)
+            _flush_counts.append(([p for p in _fapi.posts if p[0] == "/suggest"], _seen))
+        check_that(
+            [ids for _, ids in _flush_counts[0][0]] == [[1], [2], [3]] and _flush_counts[0][1] == 3
+            and [ids for _, ids in _flush_counts[1][0]] == [[1, 2, 3]] and _flush_counts[1][1] == 3,
+            "scan: finished results are sent as they go, and a fast batch is still one send",
+        )
+    finally:
+        globals()["SCAN_FLUSH_SECONDS"] = _flush_saved
+        globals()["sync_calibration"] = _flush_calib
 
     # 503 lives in RETRYABLE_HTTP, and used to be retried on the image route and
     # nowhere else - so a photo survived a bad minute and the captions made from
@@ -6374,9 +6455,21 @@ def main():
     ap.add_argument("--engine", choices=["auto", "insightface", "face_recognition"],
                     help="override the recognition backend for this run")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument(
+        "--no-captions", action="store_true",
+        help="suggest names only; leave photo descriptions for a --describe run",
+    )
+    ap.add_argument(
+        "--describe", action="store_true",
+        help="write photo descriptions with the local caption model (slow; best left running)",
+    )
     args = ap.parse_args()
     if args.discover and (args.label or args.label_flow or args.learn or args.watch):
         ap.error("--discover cannot be combined with --label, --label-flow, --learn, or --watch")
+    if args.describe and args.no_captions:
+        ap.error("--describe and --no-captions contradict each other")
+    if (args.describe or args.no_captions) and (args.label or args.discover):
+        ap.error("--describe and --no-captions apply to scanning, not to --label or --discover")
 
     # These three never touch the ML backend or the network unnecessarily.
     if args.selftest:
@@ -6400,6 +6493,11 @@ def main():
         cfg = {**cfg, "engine": args.engine}
     engine = cfg_engine(cfg)
     verbose = not args.quiet
+    if args.describe and not cfg_caption_model(cfg):
+        sys.exit(
+            "No caption model is set up, so there is nothing to describe photos with.\n"
+            "Set \"caption_model\" in config.json (for example \"qwen3-vl:8b\") and run Check my setup."
+        )
     if verbose:
         print(f"GASF face scanner {SCANNER_VERSION}")
         print(
@@ -6482,7 +6580,10 @@ def main():
         # asked, or when there is nothing to compare against yet.
         if args.learn or args.watch or not load_references(conn, backend.name):
             learn(api, conn, backend, verbose)
-        scan(api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before)
+        scan(
+            api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before,
+            include_captions=not args.no_captions,
+        )
         if not args.watch:
             break
         if verbose:

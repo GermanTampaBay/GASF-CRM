@@ -156,12 +156,30 @@ TASKS = [
             "Goes through library photos the scanner has not seen yet and works out "
             "who is in each one. Confident matches are tagged automatically; the "
             "rest wait as suggestions in the photo editor for a volunteer to accept "
-            "or reject. If a caption model is set up, it also drafts a short "
-            "description of each photo."
+            "or reject. Quick: a few seconds a photo. Photo descriptions are a "
+            "separate, slower task below, so they never hold this up."
         ),
         "when": "Use this after new photos have been added to the library.",
         "button": "Start suggesting",
         "running": "Looking through new photos...",
+        "dates": True,
+    },
+    {
+        "key": "describe",
+        "group": "Step 2 \u00b7 Suggest",
+        "title": "Write photo descriptions",
+        "short": "Draft a short description of each photo. Slow.",
+        "about": (
+            "Uses the caption model on this computer to write a short, factual "
+            "description of each photo that does not have one yet, using the event, "
+            "place, date, and people already tagged. Each one appears in the photo "
+            "editor as a suggestion for a volunteer to accept or edit. It is slow \u2014 "
+            "often a minute or more a photo \u2014 so each description is sent as soon as "
+            "it is written, and stopping part way loses nothing already finished."
+        ),
+        "when": "Best left running in the background or overnight.",
+        "button": "Start describing",
+        "running": "Writing photo descriptions...",
         "dates": True,
     },
     {
@@ -173,7 +191,8 @@ TASKS = [
             "Does everything \"Suggest names for new photos\" does, then waits and "
             "does it again, over and over, until you press Stop or close this "
             "window. New tags from volunteers are studied at the start of every "
-            "round."
+            "round. It can write photo descriptions in the same rounds, which suits "
+            "leaving it running overnight."
         ),
         "when": "Use this to leave the scanner working during an event or overnight.",
         "button": "Start the timer",
@@ -252,7 +271,8 @@ SETTINGS_ITEM = {
     "key": "settings",
     "group": "Settings",
     "title": "Advanced settings",
-    "short": "Recognition engine, scanner file, and troubleshooting.",
+    # No subtitle: the list is full, and this is the one entry whose title says it all.
+    "short": "",
 }
 
 # The strip is the idea; the sidebar is what you can do. The last field says
@@ -314,6 +334,7 @@ class ScanGui(tk.Tk):
         self.v_label_limit = tk.StringVar(value="500")
         self.v_discovery_limit = tk.StringVar(value="1000")
         self.v_watch_minutes = tk.StringVar(value="15")
+        self.v_watch_captions = tk.BooleanVar(value=True)
         self.v_range = tk.StringVar(value="all")
         self.v_uploaded_after = tk.StringVar(value="")
         self.v_uploaded_before = tk.StringVar(value="")
@@ -635,7 +656,8 @@ class ScanGui(tk.Tk):
         title = self._text(words, item["title"], font=self.f_nav)
         title.pack(fill="x")
         short = self._text(words, item["short"], font=self.f_small, color="muted", wrap=True)
-        short.pack(fill="x")
+        if item["short"]:
+            short.pack(fill="x")
         parts = (row, words, title, short)
 
         def paint(bg):
@@ -704,6 +726,11 @@ class ScanGui(tk.Tk):
                          "the most recent library photos, up to 1,000")
         elif key == "watch":
             self._number(opts, "Check every", self.v_watch_minutes, 1, 1440, 5, "minutes")
+            self._check(
+                opts, self.v_watch_captions, "Also write photo descriptions",
+                "Adds a minute or more a photo, so each round takes much longer. Good "
+                "overnight; untick it to keep rounds quick during the day.",
+            )
 
         if task["dates"]:
             self._build_range(pad)
@@ -974,6 +1001,9 @@ class ScanGui(tk.Tk):
         if key == "scan":
             if self.v_study_first.get():
                 cmd.append("--learn")
+            cmd.append("--no-captions")
+        elif key == "describe":
+            cmd.append("--describe")
         elif key == "label":
             limit = self._whole(self.v_label_limit.get(), "Photos to load", 1, 1000)
             cmd += ["--label", "--label-limit", str(limit)]
@@ -985,12 +1015,14 @@ class ScanGui(tk.Tk):
         elif key == "watch":
             minutes = self._whole(self.v_watch_minutes.get(), "Check every", 1, 1440)
             cmd += ["--watch", str(minutes * 60)]
+            if not self.v_watch_captions.get():
+                cmd.append("--no-captions")
         elif key in ("status", "check", "selftest"):
             cmd.append("--" + key)
         else:
             raise ValueError(f"Unknown task: {key}")
 
-        if key in ("scan", "label", "discover", "watch") and self.v_range.get() == "dates":
+        if key in ("scan", "describe", "label", "discover", "watch") and self.v_range.get() == "dates":
             after = self.v_uploaded_after.get().strip()
             before = self.v_uploaded_before.get().strip()
             if not after and not before:
