@@ -46,8 +46,15 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
  *                       values in both modes, never as fields. Defaults to
  *                       whatever settings say, so a caller that does not care
  *                       still renders the right document.
+ * @param string $type   'craft' or 'food', in 'record' mode: the agreement
+ *                       that vendor actually signed. A craft vendor's omits the
+ *                       INSURANCE clause, which applies to food vendors only.
+ *                       '' renders the full agreement, which is
+ *                       right for a caller that does not know - and for any
+ *                       agreement signed before the clause became food-only,
+ *                       when every vendor was shown it.
  */
-function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $locked = null ) {
+function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $locked = null, $type = '' ) {
 	if ( ! is_array( $locked ) ) { $locked = gasf_crm_vendor_locked_values(); }
 	gasf_crm_vendor_ctx( array( 'mode' => $mode, 'values' => $values, 'locked' => $locked ) );
 	$b = 'gasf_crm_vendor_blank';
@@ -206,6 +213,27 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 		permit these premises or any part thereof to be used in a manner contrary to the laws, ordinances or
 		regulations of the United States, the State of Florida, County of Pinellas or City of Pinellas Park.</p>
 
+<?php
+/*
+ * INSURANCE is the club's term for FOOD vendors only.
+ *
+ * On the form it rides the same food branch as the certificate upload, so the
+ * script that hides one hides the other; with no script, everything shows, as
+ * the rest of the form does. In a record it is left out of a craft vendor's
+ * agreement outright, because the snapshot is the agreement they signed, and
+ * one that said they had agreed to carry a million dollars of cover would be a
+ * lie about a contract.
+ *
+ * The control lines sit at column 0 on purpose. `?>` swallows the newline after
+ * it, so they put nothing into the output, and the full agreement renders
+ * byte-for-byte as before - which matters because the auto-generated terms
+ * version is a hash of exactly this render.
+ */
+?>
+<?php if ( 'form' === $mode ) : ?>
+<div class="gv-branch" data-for="food">
+<?php endif; ?>
+<?php if ( 'form' === $mode || 'craft' !== $type ) : ?>
 	<h3 class="gv-ul">INSURANCE</h3>
 	<p>The <strong>Vendor</strong> must have General Liability, including Damage to Premises Rented To You, and
 		Liquor Liability (if applicable) Insurance, with the <strong>German-American Society</strong> named as
@@ -218,6 +246,10 @@ function gasf_crm_vendor_contract( $mode = 'form', array $values = array(), $loc
 		<p class="gv-note"><strong>Food vendors:</strong> attach your certificate of insurance at the bottom of
 			this form, after the signature. The Society does not require one from craft vendors.</p>
 	<?php endif; ?>
+<?php endif; ?>
+<?php if ( 'form' === $mode ) : ?>
+</div>
+<?php endif; ?>
 
 	<h3 class="gv-ul">INDEMNIFICATION</h3>
 	<p>The <strong>Vendor</strong> shall indemnify, defend, and hold harmless

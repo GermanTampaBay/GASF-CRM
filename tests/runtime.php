@@ -2785,6 +2785,54 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The INSURANCE clause itself is food-only, not just the upload.
+	 *
+	 * The certificate upload was already food-only, but the clause demanding the
+	 * cover sat in every vendor's agreement - and so in every craft vendor's
+	 * stored copy, the snapshot that IS the agreement they signed. A craft
+	 * vendor's record must not say they agreed to carry a million dollars of
+	 * cover.
+	 *
+	 * And the default render must not move: the full agreement is every food
+	 * vendor's snapshot and the input to the auto-generated terms version, so
+	 * "unknown" and "food" are checked to be the same bytes, rather than merely
+	 * both containing the clause.
+	 */
+	public function test_vendor_insurance_clause_is_food_only() {
+		$render = function ( $mode, $type ) {
+			ob_start();
+			gasf_crm_vendor_contract( $mode, array( 'vendor_legal' => 'Selftest Clause GmbH' ), array(), $type );
+			return (string) ob_get_clean();
+		};
+		$craft = $render( 'record', 'craft' );
+		$food  = $render( 'record', 'food' );
+		$any   = $render( 'record', '' );
+
+		$this->ok(
+			false === strpos( $craft, 'INSURANCE' ) && false === strpos( $craft, 'Additional Insured' ),
+			'insurance clause: a craft vendor\'s signed copy does not contain it'
+		);
+		$this->ok(
+			false !== strpos( $food, 'INSURANCE' ) && false !== strpos( $food, 'Additional Insured' ),
+			'insurance clause: a food vendor\'s signed copy does'
+		);
+		$this->ok( $food === $any, 'insurance clause: and the full agreement renders byte-for-byte as before' );
+		$this->ok(
+			false !== strpos( $craft, 'INDEMNIFICATION' ) && false !== strpos( $craft, 'I HEREBY AGREE' ),
+			'insurance clause: nothing else leaves a craft vendor\'s agreement'
+		);
+
+		// On the form, the heading sits inside a branch only food vendors see.
+		$form = $render( 'form', '' );
+		$pos  = strpos( $form, '<h3 class="gv-ul">INSURANCE</h3>' );
+		$open = false === $pos ? false : strrpos( substr( $form, 0, $pos ), '<div class="gv-branch"' );
+		$this->ok(
+			false !== $open && false !== strpos( substr( $form, $open, 60 ), 'data-for="food"' ),
+			'insurance clause: on the form it rides the food branch, so a craft vendor never sees it'
+		);
+	}
+
+	/**
 	 * Every vendor is asked where they are standing.
 	 *
 	 * The space question used to live inside the craft branch, so picking "food

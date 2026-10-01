@@ -1640,7 +1640,9 @@ function gasf_crm_vendor_handle() {
 	 * is the difference between a record and an assertion.
 	 */
 	ob_start();
-	gasf_crm_vendor_contract( 'record', $values, $locked );
+	// $type, so a craft vendor's signed copy carries the agreement THEY were
+	// shown: without the food-only INSURANCE clause.
+	gasf_crm_vendor_contract( 'record', $values, $locked, $type );
 	$snapshot = ob_get_clean();
 
 	$cfg = gasf_crm_vendor_cfg();
