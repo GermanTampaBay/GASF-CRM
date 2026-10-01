@@ -75,7 +75,95 @@ function gasf_crm_vendor_cfg() {
 		'fee'           => '',
 		'fee_outside'   => '',
 		'fee_inside'    => '',
+		// Where this event's applications are announced, as validated addresses
+		// joined with ", ". In ADDITION to the people who hold Contracts access:
+		// the event's organizer changes from one market to the next, and the
+		// people who look after contracts all year should not drop off the list
+		// because somebody typed in this year's coordinator.
+		'notify_to'     => '',
 	) );
+}
+
+/**
+ * Turn what was typed into "Send new applications to" into addresses.
+ *
+ * All or nothing. One bad entry refuses the lot, and the caller keeps the old
+ * setting: saving the good half of "market@example.org, bob@" would look saved
+ * and quietly leave the next event's applications going somewhere other than
+ * where somebody thinks they told it.
+ *
+ * Split on whitespace as well as commas and semicolons, which is also what
+ * keeps this safe to hand to wp_mail: a newline cannot survive into an address,
+ * so neither can a header smuggled in after one.
+ *
+ * @return string[]|WP_Error An empty array clears the destination.
+ */
+function gasf_crm_vendor_parse_destinations( $raw ) {
+	$parts = preg_split( '/[\s,;]+/', trim( (string) $raw ), -1, PREG_SPLIT_NO_EMPTY );
+	$out   = array();
+	$seen  = array();
+	foreach ( (array) $parts as $p ) {
+		if ( ! is_email( $p ) ) {
+			return new WP_Error( 'gasf_vendor_dest',
+				sprintf( 'Not saved: "%s" is not an email address. New applications are still going where they went before.', $p ) );
+		}
+		$k = strtolower( $p );
+		if ( isset( $seen[ $k ] ) ) { continue; }
+		$seen[ $k ] = true;
+		$out[]      = $p;
+	}
+	if ( count( $out ) > 5 ) {
+		return new WP_Error( 'gasf_vendor_dest',
+			'Not saved: five addresses at most. New applications are still going where they went before.' );
+	}
+	return $out;
+}
+
+/**
+ * Everyone a new application is emailed to: this event's destination, plus the
+ * people who hold Contracts access.
+ *
+ * gasf_crm_area_notify_addresses() falls back to the site's admin address when
+ * nobody holds the area, so that a notice never goes nowhere. With a destination
+ * set it cannot go nowhere, so that fallback is skipped rather than surprising
+ * whoever reads the site's admin mail with a market they know nothing about.
+ */
+function gasf_crm_vendor_notify_to() {
+	$cfg  = gasf_crm_vendor_cfg();
+	$dest = gasf_crm_vendor_parse_destinations( $cfg['notify_to'] );
+	if ( is_wp_error( $dest ) ) { $dest = array(); } // the stored value was validated on the way in
+
+	$staff = ( $dest && ! gasf_crm_area_grantees( 'contracts' ) )
+		? array()
+		: gasf_crm_area_notify_addresses( 'contracts' );
+
+	$out  = array();
+	$seen = array();
+	foreach ( array_merge( $dest, $staff ) as $a ) {
+		$k = strtolower( $a );
+		if ( isset( $seen[ $k ] ) ) { continue; }
+		$seen[ $k ] = true;
+		$out[]      = $a;
+	}
+	return $out;
+}
+
+/**
+ * A one-shot message for the settings form, held for whoever saved it.
+ *
+ * The form posts, redirects, and re-renders, so a refusal has to survive the
+ * redirect to be seen at all. Pass a message to set it; call with nothing to
+ * read it, which also clears it.
+ */
+function gasf_crm_vendor_settings_flash( $set = null ) {
+	$key = 'gasf_crm_vendor_settings_msg_' . get_current_user_id();
+	if ( null !== $set ) {
+		set_transient( $key, (string) $set, 5 * MINUTE_IN_SECONDS );
+		return '';
+	}
+	$msg = (string) get_transient( $key );
+	if ( '' !== $msg ) { delete_transient( $key ); }
+	return $msg;
 }
 
 /**
@@ -429,7 +517,7 @@ function gasf_crm_vendor_notify( $id ) {
 	$row = gasf_crm_vendor_get( $id );
 	if ( ! $row ) { return false; }
 
-	$to = gasf_crm_area_notify_addresses( 'contracts' );
+	$to = gasf_crm_vendor_notify_to();
 	if ( ! $to ) {
 		gasf_crm_log( 'CRM vendor: application ' . (int) $id . ' has nobody to notify.' );
 		return false;
@@ -1844,6 +1932,28 @@ function gasf_crm_vendor_handle_settings() {
 		$cfg['terms_url'] = esc_url_raw( wp_unslash( $_POST['terms_url'] ) );
 	}
 
+	// Validated whole, and refused whole - see gasf_crm_vendor_parse_destinations().
+	// The other settings on the form still save; only the destination keeps its
+	// old value, and the pane says so. Any change is logged with both values,
+	// because "where do the applications go" is exactly what somebody will need
+	// to reconstruct after an application went somewhere unexpected.
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+	if ( isset( $_POST['notify_to'] ) ) {
+		$dest = gasf_crm_vendor_parse_destinations( wp_unslash( $_POST['notify_to'] ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput -- every entry must pass is_email
+		if ( is_wp_error( $dest ) ) {
+			gasf_crm_vendor_settings_flash( $dest->get_error_message() );
+		} else {
+			$new = implode( ', ', $dest );
+			if ( $new !== (string) $cfg['notify_to'] ) {
+				gasf_crm_log( sprintf(
+					'CRM vendor: user %d changed where new applications are sent, from "%s" to "%s"',
+					get_current_user_id(), (string) $cfg['notify_to'], $new
+				) );
+			}
+			$cfg['notify_to'] = $new;
+		}
+	}
+
 	update_option( 'gasf_crm_vendor', $cfg, false );
 	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' updated the event settings' );
 
@@ -1861,6 +1971,13 @@ function gasf_crm_vendor_render_settings() {
 		<?php wp_nonce_field( 'gasf_vendor_settings', 'gasf_vendor_settings_nonce' ); ?>
 		<input type="hidden" name="gasf_vendor_settings" value="1">
 
+		<?php
+		$flash = gasf_crm_vendor_settings_flash();
+		if ( '' !== $flash ) :
+			?>
+			<p class="note err"><?php echo esc_html( $flash ); ?></p>
+		<?php endif; ?>
+
 		<p class="muted">These print straight onto the agreement, so a vendor never types the name of the event,
 			guesses its date, or writes down what they think the pitch costs. The fee follows the space they
 			choose, and is shown beside each option as they pick. Leave the event name or date blank and that
@@ -1876,6 +1993,14 @@ function gasf_crm_vendor_render_settings() {
 			<label>Indoor fee
 				<input type="text" name="fee_inside" value="<?php echo esc_attr( $cfg['fee_inside'] ); ?>" placeholder="100"></label>
 		</div>
+
+		<?php $gv_to = gasf_crm_vendor_notify_to(); ?>
+		<p><label>Send new applications to
+			<input type="email" multiple name="notify_to" value="<?php echo esc_attr( $cfg['notify_to'] ); ?>" placeholder="vendors@example.org" autocomplete="off"></label>
+			<span class="muted">Whoever is looking after this event's vendors. One address, or several separated by
+				commas &mdash; change it when the next event has a different organizer. Everyone with Contracts access
+				is told as well. Right now a new application is emailed to
+				<strong><?php echo esc_html( $gv_to ? wp_sprintf( '%l', $gv_to ) : 'nobody' ); ?></strong>.</span></p>
 
 		<p><label>Agreement version <span class="muted">(optional)</span>
 			<input type="text" name="terms_version" value="<?php echo esc_attr( $cfg['terms_version'] ); ?>" placeholder="leave blank to work it out automatically"></label>

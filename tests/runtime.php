@@ -2833,6 +2833,56 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * Each event says where its applications go.
+	 *
+	 * The organizer changes from one market to the next, so the destination is a
+	 * setting in the Contracts pane beside the event name and the fees - ADDED to
+	 * the people who hold Contracts access rather than replacing them, so typing
+	 * in this year's coordinator cannot quietly drop the people who look after
+	 * contracts all year.
+	 *
+	 * Mostly the refusals. A destination that saved its good half and dropped the
+	 * typo would look saved and send the next event's applications somewhere
+	 * nobody chose.
+	 */
+	public function test_vendor_notify_destination() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+
+		$ok = gasf_crm_vendor_parse_destinations( 'Market@Example.org, second@example.org; market@example.org' );
+		$this->ok(
+			array( 'Market@Example.org', 'second@example.org' ) === $ok,
+			'destination: commas and semicolons both separate, and a repeat is kept once'
+		);
+		$this->ok(
+			is_wp_error( gasf_crm_vendor_parse_destinations( 'good@example.org, bob@' ) ),
+			'destination: one bad address refuses the whole entry, not just itself'
+		);
+		$this->ok(
+			is_wp_error( gasf_crm_vendor_parse_destinations( "a@example.org\r\nBcc: x@example.net" ) ),
+			'destination: a mail header smuggled in after a newline is refused'
+		);
+		$this->ok(
+			is_wp_error( gasf_crm_vendor_parse_destinations( 'a@e.org,b@e.org,c@e.org,d@e.org,e@e.org,f@e.org' ) ),
+			'destination: more than five addresses is refused'
+		);
+		$this->ok( array() === gasf_crm_vendor_parse_destinations( '   ' ), 'destination: blank clears it' );
+
+		update_option( 'gasf_crm_vendor', array( 'notify_to' => 'selftest-dest@example.org' ), false );
+		$to = gasf_crm_vendor_notify_to();
+		$this->ok( in_array( 'selftest-dest@example.org', $to, true ), 'destination: the event address receives new applications' );
+		$staff = gasf_crm_area_grantees( 'contracts' ) ? gasf_crm_area_notify_addresses( 'contracts' ) : array();
+		$this->ok( ! array_diff( $staff, $to ), 'destination: and everybody with Contracts access is still told' );
+
+		ob_start();
+		gasf_crm_vendor_render_settings();
+		$html = (string) ob_get_clean();
+		$this->ok(
+			false !== strpos( $html, 'name="notify_to"' ) && false !== strpos( $html, 'selftest-dest@example.org' ),
+			'destination: the pane offers the field and says who will be emailed'
+		);
+	}
+
+	/**
 	 * Every vendor is asked where they are standing.
 	 *
 	 * The space question used to live inside the craft branch, so picking "food
