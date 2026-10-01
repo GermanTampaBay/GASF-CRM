@@ -1994,13 +1994,11 @@ function gasf_crm_vendor_render_settings() {
 				<input type="text" name="fee_inside" value="<?php echo esc_attr( $cfg['fee_inside'] ); ?>" placeholder="100"></label>
 		</div>
 
-		<?php $gv_to = gasf_crm_vendor_notify_to(); ?>
 		<p><label>Send new applications to
 			<input type="email" multiple name="notify_to" value="<?php echo esc_attr( $cfg['notify_to'] ); ?>" placeholder="vendors@example.org" autocomplete="off"></label>
 			<span class="muted">Whoever is looking after this event's vendors. One address, or several separated by
 				commas &mdash; change it when the next event has a different organizer. Everyone with Contracts access
-				is told as well. Right now a new application is emailed to
-				<strong><?php echo esc_html( $gv_to ? wp_sprintf( '%l', $gv_to ) : 'nobody' ); ?></strong>.</span></p>
+				is told as well.</span></p>
 
 		<p><label>Agreement version <span class="muted">(optional)</span>
 			<input type="text" name="terms_version" value="<?php echo esc_attr( $cfg['terms_version'] ); ?>" placeholder="leave blank to work it out automatically"></label>

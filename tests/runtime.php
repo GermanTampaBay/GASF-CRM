@@ -2878,7 +2878,7 @@ final class GASF_CRM_Selftest {
 		$html = (string) ob_get_clean();
 		$this->ok(
 			false !== strpos( $html, 'name="notify_to"' ) && false !== strpos( $html, 'selftest-dest@example.org' ),
-			'destination: the pane offers the field and says who will be emailed'
+			'destination: the pane offers the field, holding the saved address'
 		);
 	}
 
