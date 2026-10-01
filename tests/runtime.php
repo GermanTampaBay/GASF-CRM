@@ -3090,6 +3090,46 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * The photo door remembers a returning guest - on their device, and only
+	 * the things that stay true from one batch to the next.
+	 *
+	 * Pinned on the page's source, because the memory lives entirely in the
+	 * browser and there is no server state to look at - which is the first
+	 * thing worth pinning. This host has a page cache, so a name filled in by
+	 * the SERVER could be cached and handed to the next guest; the box must
+	 * leave PHP empty and be filled in on the device.
+	 */
+	public function test_door_remembers_on_the_device() {
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+
+		$this->ok(
+			false !== strpos( $src, "MEM_RECENT = 'gasf_door_recent'" ) && false !== strpos( $src, 'RECENT_MS = 72 * 3600 * 1000' ),
+			'door: the last visit\'s occasion, date, and description are kept on the device for 72 hours'
+		);
+		$this->ok(
+			false !== strpos( $src, "MEM_ME = 'gasf_door_me'" ),
+			'door: the guest\'s own name is kept on the device until they clear it'
+		);
+
+		preg_match( '~var REMEMBER = \[([^\]]*)\]~', $src, $m );
+		$this->ok(
+			isset( $m[1] ) && false === strpos( $m[1], 'pname' ) && false === strpos( $m[1], 'people' ),
+			'door: who is in the photos is never carried into the next batch'
+		);
+
+		preg_match( '~<input[^>]*id="pfrom"[^>]*>~', $src, $f );
+		$this->ok(
+			isset( $f[0] ) && false === strpos( $f[0], 'value=' ),
+			'door: the name box leaves the server empty, so a cached page cannot carry one guest\'s name to the next'
+		);
+
+		$this->ok(
+			false !== strpos( $src, "'Clear these'" ),
+			'door: anything filled in comes with a way to clear it, for a shared phone or tablet'
+		);
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

@@ -1012,6 +1012,10 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
 	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
 	.gasf-door-entry .pwrap{margin:0 0 6px}
+	/* "Clear these" reads as part of its sentence, not as a second big button
+	   competing with Send. */
+	.gasf-door-entry .gasf-door-linkbtn{background:none;border:0;padding:0;color:inherit;
+		font:inherit;text-decoration:underline;cursor:pointer}
 	.gasf-door-entry .gasf-door-done{border:1px solid #0f6e56;border-left:5px solid #0f6e56;
 		border-radius:3px;padding:14px 16px;margin:0 0 18px;font-size:1.05em}
 	.gasf-door-entry .gasf-door-evlist{display:flex;flex-direction:column;gap:6px;margin:8px 0;max-width:420px}
@@ -1155,6 +1159,103 @@ function gasf_crm_door_script( $party ) {
 	}
 	if (dateIn) { dateIn.onchange = function(){ evPaint(); }; }
 
+	/* -------- remembered on this device, and only on this device --------
+	   Somebody sending the club photos of an evening usually sends them in more
+	   than one go, and typing their name and the occasion again each time is the
+	   sort of chore that makes the second batch not happen.
+
+	   So the browser keeps them: the guest's own name until they clear it, and
+	   the occasion, date, place, and description for 72 hours after a send.
+	   Stored in the browser and written into the boxes by this script, never by
+	   the server. This host has a page cache, and a page that arrived with one
+	   guest's name already in it could be handed, cached, to the next guest.
+
+	   "Who is in them?" is deliberately NOT kept. The next batch is usually of
+	   different people, and a name carried over from the last one would quietly
+	   tag a stranger with it.
+
+	   Saved only after a send succeeds - what is remembered is what the club
+	   actually received, not whatever was half-typed before somebody gave up.
+	   Year-round door only: the party door asks only who is in the photos and
+	   where on the grounds, and neither is worth carrying over. */
+	var MEM_ME = 'gasf_door_me', MEM_RECENT = 'gasf_door_recent';
+	var RECENT_MS = 72 * 3600 * 1000;
+	var REMEMBER = ['ptaken', 'pevent', 'pcaption'];
+	var lastSent = null;
+
+	// Every touch is wrapped: Safari's private mode throws on storage, and a
+	// door that broke over a convenience would be the wrong trade.
+	function memGet(k){ try { return JSON.parse(window.localStorage.getItem(k) || 'null'); } catch (e) { return null; } }
+	function memSet(k, v){ try { window.localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+	function memDrop(k){ try { window.localStorage.removeItem(k); } catch (e) {} }
+
+	function remember(sent){
+		// What they sent is what is kept. A name they deliberately blanked is
+		// forgotten, not resurrected from last time.
+		if (sent.from) { memSet(MEM_ME, { from: sent.from }); } else { memDrop(MEM_ME); }
+		var rec = { at: Date.now(), event_id: sent.event_id, place: sent.place, place_other: sent.place_other };
+		REMEMBER.forEach(function(id){ rec[id] = sent[id]; });
+		memSet(MEM_RECENT, rec);
+	}
+
+	function forget(){
+		memDrop(MEM_ME); memDrop(MEM_RECENT);
+		['pfrom', 'peventid', 'pplaceother'].concat(REMEMBER).forEach(function(id){
+			var e = document.getElementById(id); if (e) { e.value = ''; }
+		});
+		if (placeSel) { placeSel.selectedIndex = 0; }
+		var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
+		var n = document.getElementById('pmemnote'); if (n) { n.parentNode.removeChild(n); }
+	}
+
+	function restore(){
+		if (PARTY) { return; }
+		var me = memGet(MEM_ME), rec = memGet(MEM_RECENT), filled = false;
+		if (rec && !(rec.at && Date.now() - rec.at < RECENT_MS)) { memDrop(MEM_RECENT); rec = null; }
+
+		// Never over anything already there - a browser's own autofill, say.
+		function put(id, v){
+			var e = document.getElementById(id);
+			if (e && v && !e.value) { e.value = v; filled = true; }
+		}
+		if (me) { put('pfrom', me.from); }
+		if (rec) {
+			REMEMBER.forEach(function(id){ put(id, rec[id]); });
+			// The calendar link only while that event is still on this page's
+			// calendar under the same name. Otherwise the typed name stands on
+			// its own, as it always could.
+			if (rec.event_id && EV.some(function(e){ return String(e.id) === String(rec.event_id) && e.title === rec.pevent; })) {
+				put('peventid', rec.event_id);
+			}
+			if (placeSel && rec.place && Array.prototype.some.call(placeSel.options, function(o){ return o.value === rec.place; })) {
+				placeSel.value = rec.place;
+				filled = true;
+				if (rec.place === '__other') {
+					var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = false; }
+					put('pplaceother', rec.place_other);
+				}
+			}
+		}
+
+		// Say so, with a way out. Otherwise a family tablet hands the next
+		// person somebody else's name with no hint where it came from.
+		var form = document.getElementById('pform');
+		if (filled && form) {
+			var note = document.createElement('p');
+			note.id = 'pmemnote';
+			note.className = 'gasf-door-fine';
+			note.appendChild(document.createTextNode('Filled in from your last visit on this device. '));
+			var b = document.createElement('button');
+			b.type = 'button';
+			b.className = 'gasf-door-linkbtn';
+			b.textContent = 'Clear these';
+			b.onclick = forget;
+			note.appendChild(b);
+			form.insertBefore(note, form.firstChild);
+		}
+	}
+	restore();
+
 	/*
 	 * Clear the form and put the answer at the top.
 	 *
@@ -1172,6 +1273,9 @@ function gasf_crm_door_script( $party ) {
 	 */
 	function finish(ok, bad, held, why){
 		var banner = document.getElementById('pdone');
+
+		// Before the boxes are emptied below, and from what was SENT.
+		if (ok && lastSent) { remember(lastSent); }
 
 		if (ok) {
 			picked = picked.filter(function(p){ return p.state !== 'done'; });
@@ -1229,6 +1333,13 @@ function gasf_crm_door_script( $party ) {
 			place: placeAnswer(), event: val('pevent'), event_id: val('peventid'),
 			taken: val('ptaken'), caption: val('pcaption'), from: val('pfrom')
 		};
+		// The same answers, keyed for remembering. The place is kept as the
+		// choice made, not the resolved answer, so it can be put back exactly.
+		lastSent = PARTY ? null : {
+			from: val('pfrom').trim(), event_id: val('peventid'),
+			place: val('pplace'), place_other: val('pplaceother')
+		};
+		if (lastSent) { REMEMBER.forEach(function(id){ lastSent[id] = val(id); }); }
 
 		var queue = picked.filter(function(p){ return p.state === 'new'; });
 		var ok = 0, bad = 0, held = false, why = '';
