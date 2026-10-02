@@ -389,9 +389,10 @@ function gasf_crm_backup_needed( $id ) {
  * backup on every run for something no retry can fix.
  */
 function gasf_crm_backup_original_path( $id, $file ) {
-	if ( ! get_post_meta( $id, '_gasf_photo_edit', true ) || ! function_exists( 'gasf_crm_photo_edit_sidecar' ) ) { return ''; }
-	$op = gasf_crm_photo_edit_sidecar( $file );
-	return is_file( $op ) ? $op : '';
+	if ( ! get_post_meta( $id, '_gasf_photo_edit', true ) || ! function_exists( 'gasf_crm_photo_edit_original' ) ) { return ''; }
+	// Wherever it is: the private store, or - until this moves it - beside the
+	// file where an older version left it.
+	return gasf_crm_photo_edit_original( $id );
 }
 
 /**

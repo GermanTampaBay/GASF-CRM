@@ -9,7 +9,9 @@
  * The one rule everything here serves: THE ARCHIVE NEVER LOSES THE ORIGINAL.
  *
  * The first edit copies the current file to a sidecar before touching
- * anything, and every subsequent edit re-applies from that sidecar — so
+ * anything — in the private store, never beside the photo; see
+ * gasf_crm_photo_edit_original_path() — and every subsequent edit re-applies
+ * from that sidecar — so
  * cropping a photo three times converges on the third crop of the ORIGINAL,
  * not a crop of a crop of a crop, and the JPEG never pays generational loss.
  * "Restore original" copies the sidecar back and the photo is bit-for-bit
@@ -24,8 +26,20 @@
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
 /**
- * Where the untouched file sleeps. Beside the attached file, so it lives and
- * dies with the attachment's own directory and needs no bookkeeping table.
+ * Where the untouched file USED to sleep: beside the attached file.
+ *
+ * Kept only so an original put there by an older version can be found and
+ * moved - see gasf_crm_photo_edit_original(). Nothing is written here any more.
+ *
+ * "Beside the attached file" meant three things nobody intended. For a
+ * published photo it meant public uploads, at a name anybody could derive from
+ * the photo's own: crop a child out of a picture and the uncropped frame was
+ * one "-gasf-original" away. It meant the file was in no attachment's
+ * metadata, so withdrawing or deleting the photo left it behind, still served.
+ * And it meant the original was found by the photo's CURRENT path - so once
+ * the photo moved, on publish or withdrawal, it was lost: "restore" said the
+ * photo had never been edited, and the next edit took the edited picture for
+ * the original.
  *
  * Note this is the attached (display) rendition — for a big photo WordPress
  * has already made that the "-scaled" file, and the full camera-resolution
@@ -35,6 +49,75 @@ function gasf_crm_photo_edit_sidecar( $path ) {
 	$dot = strrpos( $path, '.' );
 	return false === $dot ? $path . '-gasf-original' : substr( $path, 0, $dot ) . '-gasf-original' . substr( $path, $dot );
 }
+
+/**
+ * Where the untouched file sleeps now: the private store, named for the photo.
+ *
+ * Outside the web root, so it has no URL whatever the photo's own posture; and
+ * keyed by attachment id rather than by path, so it is the same file before and
+ * after a publish, a withdrawal or a rename, and cannot be mistaken for another
+ * photo's. In a folder of its own, because the private root is otherwise flat
+ * and every file in it is some attachment's.
+ */
+function gasf_crm_photo_edit_original_path( $id, $path = '' ) {
+	$path = '' !== (string) $path ? (string) $path : (string) get_attached_file( $id );
+	$ext  = strtolower( (string) pathinfo( $path, PATHINFO_EXTENSION ) );
+	return gasf_crm_photo_private_root() . '/originals/' . (int) $id . ( '' !== $ext ? '.' . $ext : '' );
+}
+
+/** Make sure that folder exists, inside a private root that has passed its own checks. */
+function gasf_crm_photo_edit_original_ready() {
+	$review = gasf_crm_photo_review_dir();
+	if ( is_wp_error( $review ) ) { return false; }
+	$dir = $review . '/originals';
+	return is_dir( $dir ) || wp_mkdir_p( $dir );
+}
+
+/**
+ * This photo's untouched original, or '' if it has none.
+ *
+ * An original left beside the file by an older version is moved into the
+ * private store the first time anything asks - but only for a photo that is
+ * recorded as edited. A "-gasf-original" file beside a photo that never was is
+ * not that photo's: it is what a deleted photo of the same name left behind,
+ * and adopting it would let "restore" swap in a stranger's picture.
+ */
+function gasf_crm_photo_edit_original( $id ) {
+	$path = (string) get_attached_file( $id );
+	if ( '' === $path ) { return ''; }
+
+	$now = gasf_crm_photo_edit_original_path( $id, $path );
+	if ( is_file( $now ) ) { return $now; }
+
+	if ( ! get_post_meta( $id, '_gasf_photo_edit', true ) ) { return ''; }
+	$old = gasf_crm_photo_edit_sidecar( $path );
+	if ( ! is_file( $old ) ) { return ''; }
+
+	// Usable from where it is if it cannot be moved: an original in the wrong
+	// place is still the original, and losing track of it is the worse outcome.
+	if ( ! gasf_crm_photo_edit_original_ready() ) { return $old; }
+	$moved = gasf_crm_photo_move_file( $old, $now );
+	if ( is_wp_error( $moved ) ) {
+		gasf_crm_log( 'CRM photos: media #' . (int) $id . ' - could not move its untouched original into the private store: ' . $moved->get_error_message() );
+		return $old;
+	}
+	@chmod( $now, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	gasf_crm_log( 'CRM photos: media #' . (int) $id . ' - untouched original moved out of ' . basename( dirname( $old ) ) . ' into the private store' );
+	return $now;
+}
+
+// The original goes when its photo does - both of the places it can be.
+// Before core's own deletion, while the attached path can still be read.
+add_action( 'delete_attachment', function ( $id ) {
+	$path = (string) get_attached_file( $id );
+	if ( '' === $path ) { return; }
+	$now = gasf_crm_photo_edit_original_path( $id, $path );
+	if ( is_file( $now ) ) { @unlink( $now ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( get_post_meta( $id, '_gasf_photo_edit', true ) ) {
+		$old = gasf_crm_photo_edit_sidecar( $path );
+		if ( is_file( $old ) ) { @unlink( $old ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+}, 5 );
 
 /**
  * Clamp and shape the incoming parameters.
@@ -88,16 +171,27 @@ function gasf_crm_photo_edit_render( $id, array $p ) {
 		return new WP_Error( 'gasf_crm_file', 'The image file for this photo is missing.', array( 'status' => 500 ) );
 	}
 
-	$side = gasf_crm_photo_edit_sidecar( $path );
+	$side = gasf_crm_photo_edit_original( $id );
 
 	// First edit: put the original to bed BEFORE anything can go wrong.
 	// copy(), not rename — if the copy fails we still have the photo.
-	if ( ! is_file( $side ) ) {
-		if ( ! @copy( $path, $side ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors -- refusal is handled.
+	if ( '' === $side ) {
+		$side = gasf_crm_photo_edit_original_path( $id, $path );
+		if ( ! gasf_crm_photo_edit_original_ready() || ! @copy( $path, $side ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors -- refusal is handled.
 			return new WP_Error( 'gasf_crm_file', 'Could not set the original aside safely, so nothing was changed.', array( 'status' => 500 ) );
 		}
-		@chmod( $side, defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		@chmod( $side, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
+
+	// What is on show now, kept until the new version is known to be good. The
+	// way back used to be "copy the original over it" - but the original is
+	// not necessarily fit to be public (see the scrub below), and a failed
+	// edit should leave the photo as it WAS, not as it first arrived.
+	$undo = $side . '.undo';
+	if ( ! @copy( $path, $undo ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors -- refusal is handled.
+		return new WP_Error( 'gasf_crm_file', 'Could not keep a copy of the current photo, so nothing was changed.', array( 'status' => 500 ) );
+	}
+	@chmod( $undo, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 
 	if ( ! class_exists( 'Imagick' ) ) {
 		// GD could do this, but this host has Imagick and a second
@@ -135,6 +229,8 @@ function gasf_crm_photo_edit_render( $id, array $p ) {
 		$im->clear();
 		$im->destroy();
 	} catch ( Exception $e ) {
+		@copy( $undo, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- a half-written file is not left on show.
+		@unlink( $undo );      // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		return new WP_Error( 'gasf_crm_editor', 'Editing failed: ' . $e->getMessage(), array( 'status' => 500 ) );
 	}
 
@@ -142,9 +238,32 @@ function gasf_crm_photo_edit_render( $id, array $p ) {
 	// be read serves as a blank image, and looks like success from every angle.
 	@chmod( $path, defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	if ( ! is_readable( $path ) ) {
-		@copy( $side, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- best-effort undo.
-		return new WP_Error( 'gasf_crm_file', 'The edited file could not be written readably, so the original was put back.', array( 'status' => 500 ) );
+		@copy( $undo, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- best-effort undo.
+		@unlink( $undo );      // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return new WP_Error( 'gasf_crm_file', 'The edited file could not be written readably, so the photo was put back as it was.', array( 'status' => 500 ) );
 	}
+
+	/*
+	 * A public photo's new pixels came from its original, and so did whatever
+	 * the original was carrying.
+	 *
+	 * Imagick keeps a file's profiles when it writes, and the original is set
+	 * aside as it stood at the first edit. For a photo edited while it was
+	 * still private - kiosk-only consent, say - that is BEFORE publishing
+	 * stripped it. Now that the original is always found, a later edit of the
+	 * published photo would render from it and put the GPS back on the web.
+	 * So the result is scrubbed whenever it is public, and refused if it will
+	 * not come clean: the same answer publishing gives.
+	 */
+	if ( ! gasf_crm_photo_is_private( $id ) ) {
+		$clean = gasf_crm_photo_scrub( $path );
+		if ( is_wp_error( $clean ) ) {
+			@copy( $undo, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			@unlink( $undo );      // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return new WP_Error( 'gasf_crm_file', 'The edited photo could not be made safe to publish, so it was put back as it was: ' . $clean->get_error_message(), array( 'status' => 500 ) );
+		}
+	}
+	@unlink( $undo ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 
 	gasf_crm_photo_edit_resizes( $id, $path );
 	return true;
@@ -253,7 +372,7 @@ add_action( 'rest_api_init', function () {
 			 */
 			$path = get_attached_file( $id );
 			if ( $p['identity'] ) {
-				if ( is_file( gasf_crm_photo_edit_sidecar( $path ) ) ) {
+				if ( '' !== gasf_crm_photo_edit_original( $id ) ) {
 					$res = gasf_crm_photo_edit_do_restore( $id );
 					if ( is_wp_error( $res ) ) {
 						gasf_crm_op_finish( $op, false );
@@ -324,12 +443,32 @@ add_action( 'rest_api_init', function () {
 /** Put the sidecar back as the photo and forget the edit ever happened. */
 function gasf_crm_photo_edit_do_restore( $id ) {
 	$path = get_attached_file( $id );
-	$side = gasf_crm_photo_edit_sidecar( $path );
-	if ( ! is_file( $side ) ) {
+	$side = gasf_crm_photo_edit_original( $id );
+	if ( '' === $side ) {
 		return new WP_Error( 'gasf_crm_norestore', 'This photo has never been edited, so there is nothing to restore.', array( 'status' => 400 ) );
 	}
 
-	if ( ! @copy( $side, $path ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	// For a public photo the original is made safe FIRST, on a copy, and only a
+	// clean copy is put on show. It may never have been through the scrub that
+	// publishing does (see gasf_crm_photo_edit_render), and "put it back, then
+	// strip it" would have it public and unstripped in between - or for good,
+	// if the strip then failed.
+	$from = $side;
+	if ( ! gasf_crm_photo_is_private( $id ) ) {
+		$from = $side . '.restore';
+		if ( ! @copy( $side, $from ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return new WP_Error( 'gasf_crm_file', 'Could not put the original back. The edited version is untouched.', array( 'status' => 500 ) );
+		}
+		$clean = gasf_crm_photo_scrub( $from );
+		if ( is_wp_error( $clean ) ) {
+			@unlink( $from ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return new WP_Error( 'gasf_crm_file', 'The original could not be made safe to publish, so the edited version is untouched: ' . $clean->get_error_message(), array( 'status' => 500 ) );
+		}
+	}
+
+	$ok = @copy( $from, $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( $from !== $side ) { @unlink( $from ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( ! $ok ) {
 		return new WP_Error( 'gasf_crm_file', 'Could not put the original back. The edited version is untouched.', array( 'status' => 500 ) );
 	}
 	@chmod( $path, defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors

@@ -59,6 +59,11 @@ cd /home4/germanta/gasf-crm && git pull --ff-only origin main
 
 # 5. prove it still works — NOT OPTIONAL, every single deploy
 cd /home4/germanta/public_html && wp eval-file /home4/germanta/gasf-crm/tests/runtime.php
+
+#    ...or in slices, which is the only way it finishes through the SSH
+#    connector: that gives up on a command after about a minute, and the host
+#    then kills the run where it stands. Run EVERY slice and add up the counts.
+for s in 1 2 3; do GASF_RT_SLICE=$s/9 wp eval-file /home4/germanta/gasf-crm/tests/runtime.php; done
 ```
 
 Step 2 exists because a PHP parse error in this plugin white-screens the club's
@@ -68,6 +73,11 @@ ref costs ten seconds and has caught real breakage.
 **Step 5 is not optional, and is not a formality.** Run it after every deploy,
 including the ones that are "obviously safe", and read the number. Two hours of
 this project's history are the argument.
+
+**Never let a run be killed part-way.** A run that dies never reaches its
+cleanup: its fixtures stay in the library and the options it changed stay
+changed. That is what `GASF_RT_SLICE` is for - four runs died that way on the
+v2.67.0 deploy and left five fixture photos and a list of selftest names behind.
 
 **It is also not free.** The suite runs against live WordPress because there is
 no second environment, so it competes with whoever is using the site — and one
@@ -248,10 +258,16 @@ architecture keeps that answer cheap to reverse. Board call.
    matcher wrote" action, and machine-written names are not marked as such.
    Auto-accept is ON by default at 95 — the club's accepted trade, recorded
    deliberately rather than left implicit.
-5. **An edited photo's `-gasf-original` sidecar outlives its photo.** It is in
-   no attachment metadata, so neither delete nor unpublish removes it: the
-   full-quality pre-edit copy stays in public uploads after a photo is deleted
-   or withdrawn.
+5. **Old `-gasf-original` files are still in public uploads.** Fixed going
+   forward in v2.70.0: an edited photo's untouched original now lives in the
+   private store (`gasf-photo-review/originals/<id>.<ext>`), keyed by photo id,
+   and is deleted with its photo. An original an older version left beside a
+   photo that is STILL recorded as edited is moved there the first time it is
+   touched (an edit, a restore, or the next backup pass). What that cannot
+   reach is the leftovers: originals beside photos since withdrawn, renamed or
+   deleted. They are still served at their old URLs and need a one-off sweep
+   of uploads for `*-gasf-original.*` - which deletes files, so it needs a
+   go-ahead.
 6. **The `_gasf_photo_confirmed` shape is split** — an array `{from,by,at}` from
    `confirm()`, a bare timestamp string from the quick lanes. Existence checks
    work; anything reading `['by']` silently gets nothing for quick-lane photos.
@@ -353,7 +369,7 @@ shape generally — a negative signal wired into a positive test can invert it.
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.69.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.70.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 

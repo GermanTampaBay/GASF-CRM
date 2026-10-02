@@ -3967,7 +3967,8 @@ final class GASF_CRM_Selftest {
 	public function test_backup_asks_for_a_missing_original() {
 		$id   = $this->library_photo( 'st-backup-orig' );
 		$file = get_attached_file( $id );
-		$side = gasf_crm_photo_edit_sidecar( $file );
+		$side = gasf_crm_photo_edit_original_path( $id, $file );
+		if ( ! $this->ok( gasf_crm_photo_edit_original_ready(), 'backup: the private store for originals is there' ) ) { return; }
 
 		update_post_meta( $id, '_gasf_photo_rev', 3 );
 		$state = array(
@@ -4019,6 +4020,92 @@ final class GASF_CRM_Selftest {
 		$this->ok( in_array( $old, $ids, true ), 'review tab: an unreviewed photo is listed though a newer one filled the cap' );
 		$this->ok( ! in_array( $new, $ids, true ), 'review tab: and a finished photo is not offered for review' );
 		$this->ok( (int) $r['counts']['review'] >= 1, 'review tab: and the count of work to do includes it' );
+	}
+
+	/**
+	 * An edited photo's untouched original is private, is the photo's own, comes
+	 * back clean, and goes when the photo goes.
+	 *
+	 * It used to sit beside the published file as name-gasf-original.jpg: public,
+	 * guessable, in nobody's metadata, and found by the photo's current path. So
+	 * a crop that removed somebody could be undone by anyone with the URL, a
+	 * deleted photo left its original being served, and a photo that had moved
+	 * could no longer find its own.
+	 */
+	public function test_edited_original_is_private() {
+		if ( ! class_exists( 'Imagick' ) ) { $this->ok( true, 'edit original: skipped, no Imagick on this server' ); return; }
+
+		$uploads = trailingslashit( wp_normalize_path( wp_upload_dir()['basedir'] ) );
+		$private = trailingslashit( wp_normalize_path( gasf_crm_photo_private_root() ) );
+		$edit    = gasf_crm_photo_edit_params( array( 'brightness' => 12 ) );
+
+		// An edit of a published photo.
+		$id   = $this->library_photo( 'st-edit-orig' );
+		$file = get_attached_file( $id );
+		$was  = md5_file( $file );
+		$r    = gasf_crm_photo_edit_render( $id, $edit );
+		if ( ! $this->ok( true === $r, 'edit original: a published photo can be edited' ) ) { return; }
+		update_post_meta( $id, '_gasf_photo_edit', array( 'b' => 12 ) );
+
+		$orig = wp_normalize_path( gasf_crm_photo_edit_original( $id ) );
+		$this->ok( '' !== $orig && 0 === strpos( $orig, $private ) && 0 !== strpos( $orig, $uploads ),
+			'edit original: the untouched copy is kept in the private store, not in uploads' );
+		$this->ok( ! is_file( gasf_crm_photo_edit_sidecar( $file ) ) && ! glob( dirname( $file ) . '/' . pathinfo( $file, PATHINFO_FILENAME ) . '-gasf-original*' ),
+			'edit original: and nothing is left beside the published file for a URL to reach' );
+		$this->ok( 0600 === ( fileperms( $orig ) & 0777 ) && md5_file( $orig ) === $was && md5_file( $file ) !== $was,
+			'edit original: it is the photo as it was, readable only by the site, and the photo on show has changed' );
+
+		// It is the photo's own whatever the photo is called: keyed by id.
+		$this->ok( $orig === wp_normalize_path( gasf_crm_photo_edit_original_path( $id, dirname( $file ) . '/renamed-on-publish.jpg' ) ),
+			'edit original: it is found by the photo, not by the photo\'s current name' );
+
+		$res = gasf_crm_photo_edit_do_restore( $id );
+		$this->ok( is_array( $res ) && md5_file( $file ) === $was && ! is_file( $orig ) && ! get_post_meta( $id, '_gasf_photo_edit', true ),
+			'edit original: restore puts the photo back exactly and clears the edit' );
+
+		// One left beside the file by an older version is moved in on first touch.
+		$old    = $this->library_photo( 'st-edit-legacy' );
+		$ofile  = get_attached_file( $old );
+		$legacy = gasf_crm_photo_edit_sidecar( $ofile );
+		file_put_contents( $legacy, $this->jpeg_bytes() );
+		$lmd5 = md5_file( $legacy );
+		update_post_meta( $old, '_gasf_photo_edit', array( 'b' => 1 ) );
+		$moved = wp_normalize_path( gasf_crm_photo_edit_original( $old ) );
+		$this->ok( 0 === strpos( $moved, $private ) && ! is_file( $legacy ) && md5_file( $moved ) === $lmd5,
+			'edit original: an original left in uploads by an older version is moved into the private store' );
+
+		// A stray one beside a photo that was never edited is not that photo's.
+		$new    = $this->library_photo( 'st-edit-stray' );
+		$nfile  = get_attached_file( $new );
+		$stray  = gasf_crm_photo_edit_sidecar( $nfile );
+		file_put_contents( $stray, $this->jpeg_bytes() );
+		try {
+			$this->ok( '' === gasf_crm_photo_edit_original( $new ) && is_file( $stray ),
+				'edit original: a leftover beside a never-edited photo is not adopted as its original' );
+			$r = gasf_crm_photo_edit_render( $new, $edit );
+			$this->ok( true === $r && md5_file( gasf_crm_photo_edit_original( $new ) ) !== md5_file( $stray ),
+				'edit original: and its first edit keeps its own picture, not the leftover' );
+		} finally {
+			if ( is_file( $stray ) ) { unlink( $stray ); }
+		}
+
+		// An original that never went through publishing's scrub comes back clean.
+		$gps = $this->library_photo( 'st-edit-gps' );
+		gasf_crm_photo_edit_original_ready();
+		file_put_contents( gasf_crm_photo_edit_original_path( $gps ), $this->jpeg_with_gps() );
+		update_post_meta( $gps, '_gasf_photo_edit', array( 'b' => 1 ) );
+		$this->ok( gasf_crm_photo_has_metadata( gasf_crm_photo_edit_original_path( $gps ) ), 'edit original: the fixture original really carries GPS' );
+		$r = gasf_crm_photo_edit_render( $gps, $edit );
+		$this->ok( true === $r && ! gasf_crm_photo_has_metadata( get_attached_file( $gps ) ),
+			'edit original: editing a published photo from an unstripped original publishes no metadata' );
+		$res = gasf_crm_photo_edit_do_restore( $gps );
+		$this->ok( is_array( $res ) && ! gasf_crm_photo_has_metadata( get_attached_file( $gps ) ),
+			'edit original: and restoring it puts back a stripped copy, not the GPS' );
+
+		// Deleting the photo deletes its original.
+		$gone = gasf_crm_photo_edit_original_path( $old );
+		wp_delete_attachment( $old, true );
+		$this->ok( ! is_file( $gone ), 'edit original: deleting a photo deletes its untouched original with it' );
 	}
 
 	/* ------------------------------------------------------------------ run */
