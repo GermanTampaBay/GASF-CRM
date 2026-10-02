@@ -295,6 +295,59 @@ function gasf_crm_backup_year( $id ) {
 }
 
 /** Does this photo need backing up, and why? '' means it is current. */
+/**
+ * The archive filename for one photo: its descriptive name plus its number.
+ *
+ * The archive is a folder, and a folder holds one file per name. The descriptive
+ * name - gasf_photo_filename(), the date, the event, and the place - is shared
+ * by every photo from the same occasion, and uploads REPLACE whatever is already
+ * at a path. Since v2.21.0 took people's names out of filenames (2026-08-10),
+ * each photo from an event therefore overwrote the last: 4,868 of 5,212 photos
+ * shared a name with another, 336 names in all, leaving about 680 photos actually
+ * in the archive while every photo's record said "backed up". Deleting one of a
+ * group then removed the shared file and with it the group's last copy.
+ *
+ * The photo's number makes the name its own. It also ends the empty name: a photo
+ * with no date, event, or place has no descriptive name at all, and the archive
+ * spent thirteen hours on 2026-10-01 uploading 68 such photos to the year folder
+ * itself - "PUT .../2026/:/content", an HTTP 400 every ten minutes. Those are
+ * "photo-<number>" now.
+ *
+ * Archive only. Downloads keep the plain descriptive name, which is what a
+ * person saving one file wants and needs no uniqueness.
+ */
+function gasf_crm_backup_name( $id, $file ) {
+	$id   = (int) $id;
+	$ext  = strtolower( (string) pathinfo( (string) $file, PATHINFO_EXTENSION ) );
+	$desc = function_exists( 'gasf_photo_filename' ) ? (string) gasf_photo_filename( $id ) : '';
+	$stem = '' !== $desc ? (string) preg_replace( '~\.[a-z0-9]+$~i', '', $desc ) : '';
+	if ( '' === $stem ) { $stem = 'photo'; }
+	return $stem . '-' . $id . ( '' !== $ext ? '.' . $ext : '' );
+}
+
+/**
+ * Which OTHER photo, if any, already has this archive path on record.
+ *
+ * Asked before every upload, because an upload replaces whatever is at the
+ * path: if two photos ever come to share a name again, the second must be
+ * refused out loud rather than written silently over the first, which is how
+ * the archive lost most of itself. Case-insensitive, as SharePoint is.
+ *
+ * @param array|null $index The backup index; read from the option when null.
+ * @return int The other photo's id, or 0.
+ */
+function gasf_crm_backup_path_owner( $folder, $name, $id, $index = null ) {
+	if ( ! is_array( $index ) ) { $index = (array) get_option( 'gasf_crm_backup_index', array() ); }
+	$want = strtolower( $folder . '/' . $name );
+	foreach ( $index as $pid => $e ) {
+		if ( (int) $pid === (int) $id ) { continue; }
+		if ( strtolower( (string) ( $e['folder'] ?? '' ) . '/' . (string) ( $e['name'] ?? '' ) ) === $want ) {
+			return (int) $pid;
+		}
+	}
+	return 0;
+}
+
 function gasf_crm_backup_needed( $id ) {
 	$state = (array) get_post_meta( $id, '_gasf_photo_backup', true );
 	if ( empty( $state['at'] ) ) { return 'never backed up'; }
@@ -303,8 +356,19 @@ function gasf_crm_backup_needed( $id ) {
 	if ( (int) ( $state['rev'] ?? -1 ) !== $rev ) { return 'tags or pixels changed (revision)'; }
 
 	$file = get_attached_file( $id );
-	if ( $file && is_file( $file ) && md5_file( $file ) !== (string) ( $state['md5'] ?? '' ) ) {
-		return 'file content changed';
+	if ( $file && is_file( $file ) ) {
+		// The name it SHOULD have now, not only the one it was given. It moves
+		// when the photo's event or place is renamed - which does not bump the
+		// photo's own revision - and when the naming itself changes, which is
+		// how every photo stuck under a shared name gets moved to its own.
+		// Only when the file is there: with nothing to upload, a name change
+		// would just fail every run.
+		if ( gasf_crm_backup_name( $id, $file ) !== (string) ( $state['name'] ?? '' ) ) {
+			return 'archive name changed';
+		}
+		if ( md5_file( $file ) !== (string) ( $state['md5'] ?? '' ) ) {
+			return 'file content changed';
+		}
 	}
 	return '';
 }
@@ -321,9 +385,17 @@ function gasf_crm_backup_one( $id ) {
 		return new WP_Error( 'gasf_crm_backup_nofile', 'No file on disk for #' . $id );
 	}
 
-	$name   = function_exists( 'gasf_photo_filename' ) ? gasf_photo_filename( $id ) : basename( $file );
+	$name   = gasf_crm_backup_name( $id, $file );
 	$folder = gasf_crm_backup_folder( gasf_crm_backup_year( $id ) );
 	if ( is_wp_error( $folder ) ) { return $folder; }
+
+	$owner = gasf_crm_backup_path_owner( $folder, $name, $id );
+	if ( $owner ) {
+		return new WP_Error( 'gasf_crm_backup_clash', sprintf(
+			'Archive name %s is already #%d\'s; refusing to upload #%d over it',
+			$name, $owner, $id
+		) );
+	}
 
 	$state = (array) get_post_meta( $id, '_gasf_photo_backup', true );
 

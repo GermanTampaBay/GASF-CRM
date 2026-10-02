@@ -3143,6 +3143,82 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * Every photo gets its own archive file.
+	 *
+	 * The archive overwrote itself for two months: photos from the same day,
+	 * event, and place shared one descriptive name, uploads replace whatever is
+	 * at a path, and most of the archive ended up as one surviving photo per
+	 * occasion while every record said "backed up". Pinned here with two photos
+	 * from the same day - first showing they DO share the descriptive name, so
+	 * the test cannot pass without the collision being real.
+	 *
+	 * The index check uses its own array, not the live option: the backup writes
+	 * that option every ten minutes, and restoring a snapshot of it at teardown
+	 * would undo whatever a run wrote in between - the fifth trap again.
+	 */
+	public function test_backup_names_are_unique() {
+		$a = $this->library_photo( 'st-bk-a' );
+		$b = $this->library_photo( 'st-bk-b' );
+		update_post_meta( $a, '_gasf_photo_taken', '2024-09-14' );
+		update_post_meta( $b, '_gasf_photo_taken', '2024-09-14' );
+		$fa = (string) get_attached_file( $a );
+		$fb = (string) get_attached_file( $b );
+
+		$this->ok(
+			'' !== gasf_photo_filename( $a ) && gasf_photo_filename( $a ) === gasf_photo_filename( $b ),
+			'backup: two photos from the same day share a descriptive name - the overwrite that emptied the archive'
+		);
+		$na = gasf_crm_backup_name( $a, $fa );
+		$nb = gasf_crm_backup_name( $b, $fb );
+		$this->ok( $na !== $nb, 'backup: but their archive names differ' );
+		$this->ok(
+			false !== strpos( $na, '-' . $a . '.' ) && false !== strpos( $nb, '-' . $b . '.' ),
+			'backup: because each carries its own photo number'
+		);
+		$this->ok( $na === gasf_crm_backup_name( $a, $fa ), 'backup: and a photo keeps the same name from one run to the next' );
+
+		$c = $this->library_photo( 'st-bk-untagged' );
+		$this->ok( '' === gasf_photo_filename( $c ), 'backup: a photo with no date, event, or place has no descriptive name' );
+		$this->ok(
+			'photo-' . $c . '.jpg' === gasf_crm_backup_name( $c, (string) get_attached_file( $c ) ),
+			'backup: but still gets an archive name, never the empty one that sent 68 photos to the folder itself'
+		);
+
+		$index = array( $a => array( 'name' => $na, 'folder' => 'Selftest/2024', 'items' => array() ) );
+		$this->ok(
+			$a === gasf_crm_backup_path_owner( 'Selftest/2024', strtoupper( $na ), $b, $index ),
+			'backup: an upload onto a path another photo owns is caught first, whatever the case'
+		);
+		$this->ok(
+			0 === gasf_crm_backup_path_owner( 'Selftest/2024', $na, $a, $index ),
+			'backup: a photo is never blocked by its own record'
+		);
+
+		$state = array(
+			'at'     => gmdate( 'c' ),
+			'rev'    => (int) get_post_meta( $a, '_gasf_photo_rev', true ),
+			'md5'    => md5_file( $fa ),
+			'name'   => gasf_photo_filename( $a ),
+			'folder' => 'Selftest/2024',
+			'items'  => array(),
+		);
+		update_post_meta( $a, '_gasf_photo_backup', $state );
+		$this->ok(
+			'archive name changed' === gasf_crm_backup_needed( $a ),
+			'backup: a photo still under an old shared name is queued to move to its own, with no edit needed'
+		);
+		$state['name'] = $na;
+		update_post_meta( $a, '_gasf_photo_backup', $state );
+		$this->ok( '' === gasf_crm_backup_needed( $a ), 'backup: and once moved, it is left alone' );
+
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-backup.php' );
+		$this->ok(
+			1 === preg_match_all( '~gasf_photo_filename\(\s*\$~', $src ),
+			'backup: the archive names a photo in exactly one place'
+		);
+	}
+
+	/**
 	 * A private photo keeps its marker through thumbnail generation.
 	 *
 	 * Six photos lost it in production: the upload defers WordPress's scaling
