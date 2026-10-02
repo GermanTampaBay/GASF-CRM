@@ -3143,46 +3143,50 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
-	 * A private photo's path stays in marker form, whoever writes it.
+	 * A private photo keeps its marker through thumbnail generation.
 	 *
-	 * Replays exactly what the club's image compressor did: read the path back
-	 * through get_attached_file(), which yields the real absolute path, and
-	 * write it straight back with update_attached_file(). Six photos lost their
-	 * marker that way, broke in the gallery, and one approval silently published
-	 * nothing. Both copies of the path are checked, because the compressor
-	 * rewrote both.
+	 * Six photos lost it in production: the upload defers WordPress's scaling
+	 * and thumbnails to a background job, WordPress re-saves the path when it
+	 * scales a large photo, and that job ran outside the review upload_dir - so
+	 * the path was saved in full and the photo stopped counting as private.
+	 *
+	 * Reproduced on a fixture by lowering WordPress's big-image threshold below
+	 * the fixture's width, which makes WordPress write the "-scaled" copy and
+	 * re-save the path exactly as it did for a phone photo. The first assertion
+	 * checks that re-save really happened; without it the rest would pass
+	 * without having tested anything.
 	 */
-	public function test_private_path_stays_canonical() {
-		$id = $this->held_photo( 'st-canon' );
-		if ( is_wp_error( $id ) ) { $this->ok( false, 'path: a held photo fixture could be made' ); return; }
-		$abs = (string) get_attached_file( $id );
+	public function test_private_photo_keeps_its_marker_through_thumbnails() {
+		$id = $this->held_photo( 'st-marker' );
+		if ( is_wp_error( $id ) ) { $this->ok( false, 'marker: a held photo fixture could be made' ); return; }
+
+		$small = function () { return 50; };
+		add_filter( 'big_image_size_threshold', $small, 999 );
+		try {
+			gasf_crm_photo_upload_build_derivatives( $id );
+		} finally {
+			remove_filter( 'big_image_size_threshold', $small, 999 );
+		}
+
+		$rel = (string) get_post_meta( $id, '_wp_attached_file', true );
+		$md  = (array) wp_get_attachment_metadata( $id );
+		$this->ok( false !== strpos( $rel, '-scaled.' ), 'marker: WordPress really did scale it and re-save the path (' . $rel . ')' );
+		$this->ok( 0 === strpos( $rel, GASF_CRM_PHOTO_REVIEW_DIR . '/' ), 'marker: the re-saved path kept the private marker' );
+		$this->ok( gasf_crm_photo_is_private( $id ), 'marker: so the photo still counts as private' );
+		$this->ok( is_file( (string) get_attached_file( $id ) ), 'marker: and its path still finds the file' );
 		$this->ok(
-			0 === strpos( $abs, gasf_crm_photo_private_root() ),
-			'path: get_attached_file gives the real path inside the private store'
+			0 === strpos( (string) ( $md['file'] ?? '' ), GASF_CRM_PHOTO_REVIEW_DIR . '/' ),
+			'marker: the metadata copy of the path kept it too'
 		);
 
-		update_attached_file( $id, $abs );
-		$this->ok(
-			GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $abs ) === (string) get_post_meta( $id, '_wp_attached_file', true ),
-			'path: writing that absolute path back stores the marker form'
-		);
-		$this->ok( gasf_crm_photo_is_private( $id ), 'path: so the photo still counts as private' );
-		$this->ok( $abs === (string) get_attached_file( $id ), 'path: and still resolves to the same file' );
-
-		$md         = (array) wp_get_attachment_metadata( $id );
-		$md['file'] = $abs;
-		wp_update_attachment_metadata( $id, $md );
-		$after = (array) wp_get_attachment_metadata( $id );
-		$this->ok(
-			GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $abs ) === (string) ( $after['file'] ?? '' ),
-			'path: the metadata copy of the path is kept in marker form too'
-		);
-
-		$this->ok(
-			'2026/10/x.jpg' === gasf_crm_photo_canonical_path( '2026/10/x.jpg' )
-				&& '/elsewhere/x.jpg' === gasf_crm_photo_canonical_path( '/elsewhere/x.jpg' ),
-			'path: a path outside the private store is left alone'
-		);
+		// Every call into WordPress's thumbnail generation goes through the one
+		// helper that applies the review upload_dir. A call written straight to
+		// WordPress elsewhere is how this broke, so its count is pinned at one.
+		$calls = 0;
+		foreach ( (array) glob( GASF_CRM_DIR . '/*.php' ) as $f ) {
+			$calls += preg_match_all( '~wp_generate_attachment_metadata\(\s*\$~', (string) file_get_contents( $f ) );
+		}
+		$this->ok( 1 === $calls, 'marker: WordPress thumbnail generation is called from exactly one place, the helper (' . $calls . ')' );
 	}
 
 	/**

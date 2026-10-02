@@ -82,8 +82,11 @@ function gasf_crm_photo_upload_build_derivatives( $attachment_id ) {
 	$have = (array) wp_get_attachment_metadata( $id );
 	if ( ! empty( $have['sizes'] ) ) { return; }
 
-	require_once ABSPATH . 'wp-admin/includes/image.php';
-	$meta = wp_generate_attachment_metadata( $id, $path );
+	// Through the helper, never WordPress directly: the upload deferred
+	// scaling to here, so this is where WordPress re-saves the path of a large
+	// or sideways photo - and for a private one it must happen inside the
+	// review upload_dir, or the photo loses its marker.
+	$meta = gasf_crm_photo_generate_metadata( $id, $path );
 	if ( ! is_array( $meta ) || empty( $meta ) ) {
 		gasf_crm_log( sprintf( 'CRM upload: media #%d derivative generation returned no metadata', $id ) );
 		return;
@@ -342,17 +345,9 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * Which is exactly what it did the first time this was written. The upload
 	 * reported success three times over and produced three broken photos.
 	 */
-	$to_review = function ( $dirs ) use ( $review ) {
-		$dirs['basedir'] = dirname( $review );
-		$dirs['path']    = $review;
-		$dirs['subdir']  = '/' . GASF_CRM_PHOTO_REVIEW_DIR;
-		// No public URL exists for any of this. Pointed at the site root rather
-		// than a plausible-looking uploads path, so anything reaching for it
-		// fails obviously instead of 404ing like a broken image.
-		$dirs['baseurl'] = home_url();
-		$dirs['url']     = home_url();
-		return $dirs;
-	};
+	// The one definition, shared with every other place WordPress works on a
+	// private photo - see gasf_crm_photo_review_upload_dir().
+	$to_review = 'gasf_crm_photo_review_upload_dir';
 	$hide = function ( $data ) {
 		$data['post_status'] = 'private';
 		return $data;

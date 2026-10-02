@@ -801,43 +801,63 @@ add_filter( 'get_attached_file', function ( $file, $id ) {
 	return $rel ? gasf_crm_photo_private_root() . '/' . basename( $rel ) : $file;
 }, 10, 2 );
 
-/*
- * Keep a private photo's stored path in the one form this plugin can read.
+/**
+ * How WordPress must see the private store while it works on a private photo.
  *
- * Everything here recognises a private photo by the marker at the front of
- * _wp_attached_file - "gasf-photo-review/name.jpg" - and this plugin only ever
- * writes that form, because during its own writes the upload_dir filter makes
- * WordPress shorten the path to it. Nothing guarantees anybody ELSE writes
- * inside that window.
+ * WordPress shortens an attachment's stored path only when the file sits under
+ * the uploads basedir, and its image code RE-SAVES that path whenever it scales
+ * a large photo or turns one upright - the "-scaled" and "-rotated" copies, via
+ * update_attached_file(). With basedir pointed at the private store's parent,
+ * the path it saves comes out as "gasf-photo-review/name.jpg", the marker every
+ * private-photo check in this plugin reads.
  *
- * The club's image compressor (GASF-Utilities, modules/38-image-compress.php)
- * reads the path through get_attached_file() - which the filter above turns
- * into the real absolute path - converts the photo to WebP, and saves the new
- * path with update_attached_file(). WordPress can only shorten paths inside
- * the public uploads folder, so it stored "/home4/germanta/gasf-photo-review/
- * x.webp" in full. With no marker the photo stopped counting as private: the
- * gallery built a public URL out of the server's directory path, the thumbnail
- * broke, and approving a held photo silently published nothing - publish asks
- * "is this private?", got no, and returned "already published".
+ * Without it the path is saved in full - "/home4/germanta/gasf-photo-review/
+ * name-scaled.jpg" - and the photo quietly stops counting as private. The
+ * gallery builds a public URL out of the server's directory path, so the tile
+ * breaks and the page carries the server's folder layout; the image compressor
+ * (GASF-Utilities), which skips private photos by asking this plugin, takes it
+ * for public media and converts it; and approving it publishes nothing, because
+ * publish asks "is this private?", hears no, and returns "already published".
  *
- * So both copies of the path are put back into marker form at the one place
- * every write passes through - sanitize_meta - whoever made it. Paths outside
- * the private store are left exactly as they were.
+ * That is how six photos broke. The upload and the email intake always ran
+ * inside this - each with its own identical copy - but the upload defers
+ * scaling and thumbnails to a background job to stay fast, and that job, like
+ * the photo editor, called WordPress with no copy at all. One definition now,
+ * and gasf_crm_photo_generate_metadata() applies it, so the next caller cannot
+ * simply forget.
  */
-function gasf_crm_photo_canonical_path( $path ) {
-	if ( ! is_string( $path ) || '' === $path ) { return $path; }
-	$root = wp_normalize_path( trailingslashit( gasf_crm_photo_private_root() ) );
-	return 0 === strpos( wp_normalize_path( $path ), $root )
-		? GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $path )
-		: $path;
+function gasf_crm_photo_review_upload_dir( $dirs ) {
+	$review = gasf_crm_photo_private_root();
+	$dirs['basedir'] = dirname( $review );
+	$dirs['path']    = $review;
+	$dirs['subdir']  = '/' . GASF_CRM_PHOTO_REVIEW_DIR;
+	// No public URL exists for any of this. Pointed at the site root rather than
+	// a plausible-looking uploads path, so anything reaching for it fails
+	// obviously instead of 404ing like a broken image.
+	$dirs['baseurl'] = home_url();
+	$dirs['url']     = home_url();
+	return $dirs;
 }
-add_filter( 'sanitize_post_meta__wp_attached_file', 'gasf_crm_photo_canonical_path' );
-add_filter( 'sanitize_post_meta__wp_attachment_metadata', function ( $meta ) {
-	if ( is_array( $meta ) && isset( $meta['file'] ) ) {
-		$meta['file'] = gasf_crm_photo_canonical_path( $meta['file'] );
+
+/**
+ * wp_generate_attachment_metadata(), for any photo - private ones included.
+ *
+ * The ONLY place this plugin calls WordPress's thumbnail generation directly;
+ * runtime.php checks that it stays that way. For a private photo it runs inside
+ * gasf_crm_photo_review_upload_dir(), so a scale or a rotation re-saves the path
+ * in marker form - and so does the metadata's own copy, which WordPress derives
+ * the same way.
+ */
+function gasf_crm_photo_generate_metadata( $attachment_id, $path ) {
+	require_once ABSPATH . 'wp-admin/includes/image.php';
+	$private = gasf_crm_photo_is_private( $attachment_id );
+	if ( $private ) { add_filter( 'upload_dir', 'gasf_crm_photo_review_upload_dir', 99 ); }
+	try {
+		return wp_generate_attachment_metadata( $attachment_id, $path );
+	} finally {
+		if ( $private ) { remove_filter( 'upload_dir', 'gasf_crm_photo_review_upload_dir', 99 ); }
 	}
-	return $meta;
-} );
+}
 
 add_filter( 'wp_get_attachment_url', function ( $url, $id ) {
 	// A private file has no public URL. Returning the uploads path anyway would
@@ -1720,17 +1740,9 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 	// stripping basedir from the absolute path, and a file outside the real
 	// basedir would otherwise be recorded as an absolute path that no marker
 	// check recognises.
-	$to_review = function ( $dirs ) use ( $review ) {
-		$dirs['basedir'] = dirname( $review );
-		$dirs['path']    = $review;
-		$dirs['subdir']  = '/' . GASF_CRM_PHOTO_REVIEW_DIR;
-		// No public URL exists for any of this. Pointed at the site root rather
-		// than left as a plausible-looking uploads path, so anything that does
-		// reach for it fails obviously instead of 404ing like a broken image.
-		$dirs['baseurl'] = home_url();
-		$dirs['url']     = home_url();
-		return $dirs;
-	};
+	// The one definition, shared with every other place WordPress works on a
+	// private photo - see gasf_crm_photo_review_upload_dir().
+	$to_review = 'gasf_crm_photo_review_upload_dir';
 
 	// Stamped the instant the row exists, before any size is generated.
 	//
