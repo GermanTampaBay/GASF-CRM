@@ -708,11 +708,16 @@ function gasf_crm_render_inbox() {
 			<span class="muted">for sites that refuse WebP, like Eventbrite</span></label>
 		<button class="btn sec" id="lnone" type="button">Clear selection</button>
 		<button class="btn sec" id="lbulk" type="button">Tag selected&hellip;</button>
+		<button class="btn warn" id="ldel" type="button">Delete selected&hellip;</button>
 		<span class="muted" id="lzipmsg"></span>
 	</div>
 
 	<div class="card">
 		<div class="pad libcount"><span id="lcount" class="muted">Loading…</span>
+			<?php /* Where a bulk delete reports. Not in the selection bar, which
+			         hides the moment its photos are gone and would take the
+			         result with it. */ ?>
+			<span id="lnote" class="muted" role="status"></span>
 			<button class="btn sec" id="lall" type="button" hidden>Select all</button>
 		</div>
 		<div class="lgrid" id="lgrid"></div>

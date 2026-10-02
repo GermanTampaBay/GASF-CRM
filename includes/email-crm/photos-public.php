@@ -1260,9 +1260,15 @@ function gasf_crm_door_script( $party ) {
 	 * Clear the form and put the answer at the top.
 	 *
 	 * A filled-in form with a note at the bottom makes the submitter undo our
-	 * work before they can send anything else: unpick eight thumbnails, empty
-	 * four boxes, scroll back up. Sent photos are dropped and the boxes cleared
-	 * so the next batch starts from nothing.
+	 * work before they can send anything else: unpick eight thumbnails, scroll
+	 * back up. Sent photos are dropped, and "Who is in them?" is emptied - the
+	 * next batch is usually different people, which is also why those names are
+	 * never remembered between visits.
+	 *
+	 * Everything else is KEPT for the next batch: the occasion, the date, the
+	 * place, the description, and the sender's own name. A second batch is
+	 * almost always from the same evening, by the same person, and the club
+	 * asked for it after watching people retype all of it to send three more.
 	 *
 	 * Two deliberate exceptions. Photos that FAILED stay in the grid, because
 	 * clearing them would throw away the only copy this page holds and send
@@ -1280,13 +1286,6 @@ function gasf_crm_door_script( $party ) {
 		if (ok) {
 			picked = picked.filter(function(p){ return p.state !== 'done'; });
 			if (!picked.length) {
-				['pevent', 'ptaken', 'pcaption', 'peventid', 'pplaceother'].forEach(function(id){
-					var e = document.getElementById(id); if (e) { e.value = ''; }
-				});
-				// Back to the first option — the club — not to a blank: the
-				// select no longer has an empty choice to fall into.
-				var pl = document.getElementById('pplace'); if (pl) { pl.selectedIndex = 0; }
-				var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
 				var names = document.getElementById('pnames');
 				if (names) {
 					var keep = names.querySelector('.pwrap');

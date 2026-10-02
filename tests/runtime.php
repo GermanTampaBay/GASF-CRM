@@ -3128,6 +3128,51 @@ final class GASF_CRM_Selftest {
 			false !== strpos( $src, "'Clear these'" ),
 			'door: anything filled in comes with a way to clear it, for a shared phone or tablet'
 		);
+
+		// Between batches in one visit the same answers stay put; only the people
+		// are emptied, for the same reason they are never remembered.
+		$fs  = strpos( $src, 'function finish(' );
+		$fe  = false === $fs ? false : strpos( $src, 'paint();', $fs );
+		$fin = ( false === $fs || false === $fe ) ? '' : substr( $src, $fs, $fe - $fs );
+		$this->ok(
+			'' !== $fin && false === strpos( $fin, "'pcaption'" ) && false === strpos( $fin, "'pevent'" )
+				&& false === strpos( $fin, 'selectedIndex = 0' ),
+			'door: the occasion, date, place, and description stay for the next batch in the same visit'
+		);
+		$this->ok( false !== strpos( $fin, 'pnames' ), 'door: but who is in them is emptied after each batch' );
+	}
+
+	/**
+	 * Bulk delete goes through the single delete, and refuses - not trims - a
+	 * batch above the cap.
+	 *
+	 * Trimming is what bulk tag does, and for a tag it is harmless. For a delete
+	 * it would mean "Select all" on three thousand photos silently lost the first
+	 * hundred, so the oversized case is checked to delete NOTHING, including a
+	 * real photo sitting inside it.
+	 */
+	public function test_photo_bulk_delete() {
+		$a    = $this->library_photo( 'st-bulkdel-a' );
+		$b    = $this->library_photo( 'st-bulkdel-b' );
+		$keep = $this->library_photo( 'st-bulkdel-keep' );
+
+		$many = array_merge( array( $keep ), range( 900000001, 900000000 + GASF_CRM_PHOTO_BULK_DELETE_MAX ) );
+		$r    = $this->rest_post( '/gasf/v1/crm/photos/bulk-delete', array( 'ids' => $many ) );
+		$this->ok( is_wp_error( $r ), 'bulk delete: more than the cap is refused' );
+		$this->ok( null !== get_post( $keep ), 'bulk delete: and nothing in an oversized batch is deleted' );
+
+		$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-delete', array( 'ids' => array( $a, $b, 900000001 ) ) );
+		$this->ok( is_array( $r ) && 2 === (int) ( $r['deleted'] ?? -1 ), 'bulk delete: both photos are reported deleted' );
+		$this->ok( null === get_post( $a ) && null === get_post( $b ), 'bulk delete: and are actually gone from the database' );
+		$this->ok(
+			is_array( $r ) && 1 === count( (array) ( $r['skipped'] ?? array() ) ) && 900000001 === (int) ( $r['skipped'][0]['id'] ?? 0 ),
+			'bulk delete: something that is not a photo is skipped and named, not silently counted'
+		);
+		$this->ok(
+			is_array( $r ) && array( $a, $b ) === array_map( 'intval', (array) ( $r['deleted_ids'] ?? array() ) ),
+			'bulk delete: the gallery is told exactly which went, so it drops only those'
+		);
+		$this->ok( null !== get_post( $keep ), 'bulk delete: a photo outside the batch is untouched' );
 	}
 
 	/* ------------------------------------------------------------------ run */

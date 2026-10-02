@@ -623,6 +623,17 @@ function gasf_crm_photo_library_delete( $attachment_id, $revision = null ) {
 	return array( 'ok' => true, 'id' => $id, 'title' => $name );
 }
 
+/**
+ * The most photos one bulk delete may take.
+ *
+ * Refused above this, never trimmed to it - see the bulk-delete route. One
+ * hundred matches bulk tag, and is about as many as somebody can actually
+ * have looked at before deciding they are all rubbish.
+ */
+if ( ! defined( 'GASF_CRM_PHOTO_BULK_DELETE_MAX' ) ) {
+	define( 'GASF_CRM_PHOTO_BULK_DELETE_MAX', 100 );
+}
+
 /* =====================================================================
  * Bulk download
  * ================================================================== */
@@ -1908,6 +1919,82 @@ add_action( 'rest_api_init', function () {
 			}
 			gasf_crm_op_finish( $op, true, 4 * HOUR_IN_SECONDS );
 			return $res;
+		},
+	) );
+
+	/**
+	 * Delete several photos at once, for good.
+	 *
+	 * Each goes through gasf_crm_photo_library_delete() - the single delete -
+	 * so every guard on one photo guards each in the batch: library membership,
+	 * the photos permission, and the compare-and-swap against somebody writing
+	 * the same photo at the same instant. Nothing about WHETHER a photo may be
+	 * deleted is decided here; only how many at a time.
+	 *
+	 * Refused above the cap rather than trimmed to it. Bulk tag trims, which for
+	 * a tag is harmless. For a delete it would mean somebody who pressed "Select
+	 * all" on three thousand photos silently lost the first hundred. The gallery
+	 * says so before it asks; this is the backstop.
+	 *
+	 * No revision from the browser. "Select all" picks photos the page has never
+	 * drawn, so it does not hold their revisions - bulk tag works the same way.
+	 * The compare-and-swap inside the single delete still stops a delete landing
+	 * on top of a write in progress.
+	 *
+	 * Permanent: this plugin has no trash. The backup mirrors deletions on its
+	 * next pass, and the SharePoint copy goes to that site's own recycle bin,
+	 * which is the only way back.
+	 */
+	register_rest_route( 'gasf/v1', '/crm/photos/bulk-delete', array(
+		'methods'             => 'POST',
+		'permission_callback' => $lib_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$in  = (array) $req->get_json_params();
+			$ids = array_values( array_unique( array_filter( array_map( 'intval', (array) ( $in['ids'] ?? array() ) ) ) ) );
+			if ( ! $ids ) {
+				return new WP_Error( 'gasf_crm_none', 'No photos selected.', array( 'status' => 400 ) );
+			}
+			if ( count( $ids ) > GASF_CRM_PHOTO_BULK_DELETE_MAX ) {
+				return new WP_Error( 'gasf_crm_too_many', sprintf(
+					'That is %1$d photos. Delete at most %2$d at a time. Nothing was deleted.',
+					count( $ids ), GASF_CRM_PHOTO_BULK_DELETE_MAX
+				), array( 'status' => 400 ) );
+			}
+
+			$op = gasf_crm_op_start( 'photo-bulk-delete:' . md5( wp_json_encode( $ids ) ), $req, 20 * MINUTE_IN_SECONDS );
+			if ( is_wp_error( $op ) ) { return $op; }
+			if ( ! empty( $op['duplicate'] ) ) {
+				// A retried request reports what the first one did, rather than
+				// "0 deleted" - which would read as though nothing had happened.
+				$cached = get_transient( $op['key'] . ':result' );
+				if ( is_array( $cached ) ) { return $cached; }
+				return array( 'ok' => true, 'duplicate' => true, 'deleted' => 0, 'deleted_ids' => array(), 'skipped' => array() );
+			}
+
+			// A hundred photos is a hundred files plus their sizes off the disk.
+			if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+			$done    = array();
+			$skipped = array();
+			foreach ( $ids as $id ) {
+				$r = gasf_crm_photo_library_delete( $id, null );
+				if ( is_wp_error( $r ) ) {
+					$skipped[] = array( 'id' => $id, 'why' => $r->get_error_message() );
+					continue;
+				}
+				$done[] = $id;
+			}
+
+			// The ids, not just the count: "who deleted the Maifest photos" is the
+			// question this line exists to answer.
+			gasf_crm_log( sprintf( 'CRM library: bulk delete by %s — %d photo(s) deleted%s, %d skipped',
+				gasf_crm_display_name( get_current_user_id() ), count( $done ),
+				$done ? ' (#' . implode( ', #', $done ) . ')' : '', count( $skipped ) ) );
+
+			$out = array( 'ok' => true, 'deleted' => count( $done ), 'deleted_ids' => $done, 'skipped' => $skipped );
+			if ( ! empty( $op['key'] ) ) { set_transient( $op['key'] . ':result', $out, HOUR_IN_SECONDS ); }
+			gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
+			return $out;
 		},
 	) );
 

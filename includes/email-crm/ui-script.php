@@ -3146,6 +3146,8 @@ function gasf_crm_render_inbox_script() {
 		var n = lselCount();
 		document.getElementById('libbar').hidden = (n === 0);
 		document.getElementById('lnsel').textContent = n;
+		// A new selection starts a new task; the last delete's result is done with.
+		if (n) { var ln = document.getElementById('lnote'); if (ln) { ln.textContent = ''; } }
 	}
 
 	// Options are rebuilt from the UNFILTERED set every load, so choosing a place
@@ -3400,6 +3402,59 @@ function gasf_crm_render_inbox_script() {
 				loadLib();          // and the tiles are stale
 			}).catch(function(e){
 				document.getElementById('btgo').disabled = false;
+				msg.textContent = e.message;
+			});
+		};
+	}());
+
+	/* ===================== bulk delete =====================
+	   Through the single delete on the server, one photo at a time, so every
+	   guard on one photo guards each. Refused above 100 rather than trimmed (see
+	   the route). Permanent - there is no trash - and the backup follows on its
+	   next pass, which the confirmation says in plain words. */
+	(function(){
+		var btn = document.getElementById('ldel');
+		if (!btn) { return; }
+		var MAX = 100;
+
+		btn.onclick = function(){
+			var ids = Object.keys(lsel).map(Number);
+			var msg = document.getElementById('lzipmsg');
+			if (!ids.length) { msg.textContent = 'Tick some photos first.'; return; }
+			if (ids.length > MAX) {
+				msg.textContent = ids.length + ' photos are selected. Delete at most ' + MAX + ' at a time.';
+				return;
+			}
+			var n = ids.length, word = n === 1 ? 'photo' : 'photos';
+			if (!confirm('Delete ' + n + ' ' + word + ' for good?\n\n' +
+				'They are removed from the library now, and from the Photo Archive backup on its next pass. ' +
+				'This cannot be undone.')) { return; }
+
+			btn.disabled = true;
+			msg.textContent = 'Deleting ' + n + ' ' + word + '…';
+			api('/photos/bulk-delete', { method: 'POST', body: JSON.stringify({
+				ids: ids,
+				op_id: nextOpId('photo-bulk-delete-' + ids.join('-'))
+			}) }).then(function(r){
+				btn.disabled = false;
+				// Only what the server says went. Anything it refused stays ticked,
+				// so the volunteer is left looking at exactly what is left.
+				(r.deleted_ids || []).forEach(function(id){
+					delete lsel[id];
+					if (lgrid && lgrid._photos) { delete lgrid._photos[id]; }
+				});
+				lsyncBar();
+				var text = r.deleted + ' ' + (r.deleted === 1 ? 'photo' : 'photos') + ' deleted' +
+					(r.skipped && r.skipped.length
+						? '; ' + r.skipped.length + ' could not be — ' + r.skipped[0].why
+						: '') + '.';
+				// The bar is gone if everything went, so the result goes where it
+				// will still be seen.
+				if (lselCount()) { msg.textContent = text; }
+				else { document.getElementById('lnote').textContent = ' · ' + text; }
+				loadLib();
+			}).catch(function(e){
+				btn.disabled = false;
 				msg.textContent = e.message;
 			});
 		};
