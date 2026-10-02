@@ -534,8 +534,14 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 
 	// Emptying a field is a real answer — "this is not at a place we know" has
 	// to be expressible, or a wrong tag can never be removed, only replaced.
+	//
+	// Groups and the flyer flag are the exception, because not every caller
+	// knows about them: for those two, a key that is ABSENT means "not my
+	// field, leave it", and only a key that is present and empty clears. The
+	// next field somebody adds should follow these two, not the others.
 	gasf_crm_photo_apply_metadata( $id, $in, array(
 		'clear_people_when_empty'  => true,
+		'clear_groups_when_empty'  => array_key_exists( 'groups', $in ),
 		'place_require_existing'   => false,
 		'clear_place_when_empty'   => true,
 		'set_event_term'           => true,
@@ -546,7 +552,7 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 		'clear_caption_when_empty' => true,
 		'caption_limit'            => GASF_CRM_LIB_NOTE_MAX,
 		'caption_textarea'         => true,
-		'write_flyer'              => true,
+		'write_flyer'              => array_key_exists( 'flyer', $in ),
 		'apply_names'              => true,
 	) );
 	if ( ! empty( $in['face_map'] ) && function_exists( 'gasf_crm_face_labels_record' ) ) {
@@ -1090,6 +1096,13 @@ add_action( 'rest_api_init', function () {
 					'event_id' => '' !== $event ? $eid : (int) ( $saved['event_id'] ?? 0 ),
 					'taken'    => '' !== $taken ? $taken : (string) ( $saved['taken'] ?? '' ),
 					'caption'  => (string) ( $saved['caption'] ?? '' ),
+					// A save REPLACES the photo's tags, so everything this
+					// form does not offer has to be handed back as it stands.
+					// Groups and the flyer flag arrived after bulk tag did and
+					// were never added here: adding one name to thirty photos
+					// stripped every group off them and un-flyered the flyers.
+					'groups'   => array_map( 'strval', (array) ( $saved['groups'] ?? array() ) ),
+					'flyer'    => ! empty( $saved['flyer'] ),
 					'revision' => $card['revision'],
 				) );
 				if ( is_wp_error( $r ) ) {

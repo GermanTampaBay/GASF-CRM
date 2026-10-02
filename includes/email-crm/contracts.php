@@ -2061,6 +2061,40 @@ function gasf_crm_vendor_payment_fields() {
 }
 
 /**
+ * Lay a submitted money record over what is already stored.
+ *
+ * paid_json holds two things that are saved by two different forms: the
+ * bookkeeping, and the Society's countersignature. This used to rebuild the
+ * whole column from the payment form alone, and the payment form carries no
+ * signature fields -- so recording a deposit on a countersigned agreement
+ * erased who signed for the club and when, while the status column went on
+ * saying "countersigned". The usual order of events, and nothing errored.
+ *
+ * So: start from what is stored, and overwrite ONLY the keys the money form
+ * owns. The signature keys are not in that set, which also means a crafted
+ * payment POST cannot write one.
+ */
+function gasf_crm_vendor_payment_merge( array $existing, array $raw ) {
+	$paid = $existing;
+
+	foreach ( gasf_crm_vendor_payment_fields() as $key => $label ) {
+		if ( ! isset( $raw[ $key ] ) || ! is_scalar( $raw[ $key ] ) ) { continue; }
+		$v = 'notes' === $key
+			? sanitize_textarea_field( (string) $raw[ $key ] )
+			: sanitize_text_field( (string) $raw[ $key ] );
+		$paid[ $key ] = function_exists( 'mb_substr' ) ? mb_substr( $v, 0, 500 ) : substr( $v, 0, 500 );
+	}
+
+	// Checkboxes are absent from a POST when unticked, so each is read as a
+	// present-or-not question rather than a value. Untick, save, and it clears.
+	foreach ( gasf_crm_vendor_record_checks() as $key => $label ) {
+		$paid[ $key ] = empty( $raw[ $key ] ) ? '' : '1';
+	}
+
+	return $paid;
+}
+
+/**
  * Record what has been paid against one agreement.
  *
  * Writes ONLY the bookkeeping columns. The signed contract -- its snapshot, the
@@ -2093,21 +2127,8 @@ function gasf_crm_vendor_handle_payment() {
 
 	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
 	$raw  = isset( $_POST['pay'] ) && is_array( $_POST['pay'] ) ? wp_unslash( $_POST['pay'] ) : array();
-	$paid = array();
-	foreach ( array_merge( gasf_crm_vendor_payment_fields(), gasf_crm_vendor_countersign_fields() ) as $key => $label ) {
-		if ( ! isset( $raw[ $key ] ) || ! is_scalar( $raw[ $key ] ) ) { continue; }
-		$v = 'notes' === $key
-			? sanitize_textarea_field( (string) $raw[ $key ] )
-			: sanitize_text_field( (string) $raw[ $key ] );
-		$paid[ $key ] = function_exists( 'mb_substr' ) ? mb_substr( $v, 0, 500 ) : substr( $v, 0, 500 );
-	}
-
-	// Checkboxes are absent from a POST when unticked, so each is read as a
-	// present-or-not question rather than a value. Untick, save, and it clears.
-	foreach ( gasf_crm_vendor_record_checks() as $key => $label ) {
-		// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
-		$paid[ $key ] = empty( $raw[ $key ] ) ? '' : '1';
-	}
+	$had  = json_decode( (string) $row['paid_json'], true );
+	$paid = gasf_crm_vendor_payment_merge( is_array( $had ) ? $had : array(), $raw );
 
 	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
 	$fee = isset( $_POST['fee_quoted'] ) ? sanitize_text_field( wp_unslash( $_POST['fee_quoted'] ) ) : '';

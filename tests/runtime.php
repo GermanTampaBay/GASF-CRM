@@ -3486,6 +3486,249 @@ final class GASF_CRM_Selftest {
 		$this->ok( null !== get_post( $keep ), 'bulk delete: a photo outside the batch is untouched' );
 	}
 
+	/**
+	 * Recording a deposit must not erase the countersignature.
+	 *
+	 * paid_json is written by two forms. The money form used to rebuild the
+	 * whole column from its own fields, so the first deposit recorded after an
+	 * officer signed deleted who signed and when -- while the status column went
+	 * on saying "countersigned". The two tests above each copy one form's write;
+	 * neither ran one after the other, which is the only order that breaks.
+	 */
+	public function test_vendor_payment_keeps_the_countersignature() {
+		$signed = array(
+			'gas_officer' => 'An Officer', 'sign_gas' => 'An Officer', 'sign_gas_date' => '1 October 2026',
+			'deposit_amount' => '50', 'addenda_rules' => '1',
+		);
+		$after = gasf_crm_vendor_payment_merge( $signed, array(
+			'deposit_amount' => '100', 'notes' => 'paid by cheque', 'addenda_vendor' => '1',
+		) );
+
+		$this->ok(
+			'An Officer' === ( $after['sign_gas'] ?? '' ) && 'An Officer' === ( $after['gas_officer'] ?? '' )
+			&& '1 October 2026' === ( $after['sign_gas_date'] ?? '' ),
+			'payment: saving the money record keeps the countersignature, the officer, and the date'
+		);
+		$this->ok( '100' === $after['deposit_amount'] && 'paid by cheque' === $after['notes'],
+			'payment: and the money itself is updated' );
+		$this->ok( '1' === $after['addenda_vendor'] && '' === $after['addenda_rules'],
+			'payment: a ticked box is set and an unticked one clears' );
+
+		$forged = gasf_crm_vendor_payment_merge( array(), array( 'deposit_amount' => '1', 'sign_gas' => 'Not An Officer' ) );
+		$this->ok( ! isset( $forged['sign_gas'] ), 'payment: the money form cannot write a signature' );
+		$kept = gasf_crm_vendor_payment_merge( $signed, array( 'sign_gas' => 'Somebody Else', 'sign_gas_date' => '' ) );
+		$this->ok( 'An Officer' === $kept['sign_gas'] && '1 October 2026' === $kept['sign_gas_date'],
+			'payment: nor replace or blank one that is there' );
+	}
+
+	/**
+	 * Bulk tagging adds what was asked and leaves the rest of the photo alone.
+	 *
+	 * A library save replaces a photo's tags, and bulk tag was written before
+	 * groups and the flyer flag existed: it never handed them back, so adding
+	 * one name stripped every group and un-flyered every flyer in the selection.
+	 */
+	public function test_bulk_tag_keeps_groups_and_flyer() {
+		$id     = $this->library_photo( 'st-bulktag' );
+		$group  = 'Selftest Bulk Group ' . wp_rand();
+		$person = 'Selftest Bulkperson ' . wp_rand();
+
+		try {
+			wp_set_object_terms( $id, array( $group ), 'gasf_photo_group', false );
+			update_post_meta( $id, '_gasf_photo_flyer', 1 );
+			update_post_meta( $id, '_gasf_face_scanned', 'selftest' );
+
+			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array( $id ), 'people' => array( $person ) ) );
+			$this->ok( is_array( $r ) && 1 === (int) ( $r['updated'] ?? 0 ), 'bulk tag: the photo is updated' );
+			$this->ok( in_array( $person, gasf_crm_photo_term_names( $id, 'gasf_photo_person' ), true ),
+				'bulk tag: the name asked for is on the photo' );
+			$this->ok( array( $group ) === array_values( gasf_crm_photo_term_names( $id, 'gasf_photo_group' ) ),
+				'bulk tag: adding a name leaves the photo\'s group on it' );
+			$this->ok( (bool) get_post_meta( $id, '_gasf_photo_flyer', true ), 'bulk tag: a flyer is still a flyer' );
+			$this->ok( 'selftest' === get_post_meta( $id, '_gasf_face_scanned', true ),
+				'bulk tag: and is not sent back to the face scanner' );
+
+			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array( $id ), 'taken' => '2019' ) );
+			$this->ok(
+				is_array( $r ) && 1 === (int) ( $r['updated'] ?? 0 )
+				&& array( $group ) === array_values( gasf_crm_photo_term_names( $id, 'gasf_photo_group' ) )
+				&& (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
+				'bulk tag: a date-only pass leaves them alone too'
+			);
+
+			// The primitive: a caller that does not mention a field does not own it.
+			$card = gasf_crm_photo_library_card( $id );
+			$res  = gasf_crm_photo_library_save( $id, array( 'people' => array( $person ), 'revision' => $card['revision'] ) );
+			$this->ok(
+				! is_wp_error( $res )
+				&& array( $group ) === array_values( gasf_crm_photo_term_names( $id, 'gasf_photo_group' ) )
+				&& (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
+				'library save: groups and the flyer flag left out of a save are left as they are'
+			);
+
+			// And the editor, which does mention them, can still clear them.
+			$card = gasf_crm_photo_library_card( $id );
+			$res  = gasf_crm_photo_library_save( $id, array(
+				'people' => array( $person ), 'groups' => array(), 'flyer' => false, 'revision' => $card['revision'],
+			) );
+			$this->ok(
+				! is_wp_error( $res )
+				&& array() === gasf_crm_photo_term_names( $id, 'gasf_photo_group' )
+				&& ! get_post_meta( $id, '_gasf_photo_flyer', true ),
+				'library save: an explicitly empty group list and an unticked flyer still clear'
+			);
+		} finally {
+			$g = get_term_by( 'name', $group, 'gasf_photo_group' );
+			if ( $g && ! is_wp_error( $g ) ) { wp_delete_term( (int) $g->term_id, 'gasf_photo_group' ); }
+			$p = get_term_by( 'name', $person, 'gasf_photo_person' );
+			if ( $p && ! is_wp_error( $p ) ) { wp_delete_term( (int) $p->term_id, 'gasf_photo_person' ); }
+		}
+	}
+
+	/**
+	 * A photo that failed to import is tried again, and a person can revive one
+	 * that ran out of tries.
+	 *
+	 * 'failed' used to be where an item went on its first error, and nothing
+	 * reads 'failed': one timeout and the photo was never fetched again, its
+	 * submission closed as "no images on this message", and Keep answered
+	 * "already being fetched" for ever. Pinned on the item primitives, with no
+	 * Graph and no real submission: the rows hang off an id nothing else uses.
+	 */
+	public function test_failed_photo_import_is_retried() {
+		global $wpdb;
+		$items = gasf_crm_table( 'photo_items' );
+		$sid   = 900000000 + wp_rand( 1, 9999999 );
+		$att   = 'st-att-' . wp_rand();
+
+		try {
+			$first = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
+			if ( ! $this->ok( is_array( $first ), 'import retry: a new attachment can be claimed' ) ) { return; }
+
+			$this->ok( 'pending_import' === gasf_crm_photo_item_fail( $first, 'selftest: Graph timed out' ),
+				'import retry: a first failure hands the photo back for another attempt' );
+			$owed = gasf_crm_photo_submission_owed( $sid );
+			$this->ok( 1 === $owed['open'] && 0 === $owed['failed'],
+				'import retry: and its submission still owes a photo, so it cannot close as "no images"' );
+
+			$again = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
+			$this->ok( is_array( $again ) && (int) $again['id'] === (int) $first['id'],
+				'import retry: the next pass claims the same item again' );
+			$this->ok( '' === gasf_crm_photo_item_fail( $first, 'selftest: a stale worker' ),
+				'import retry: a worker whose claim was taken over cannot fail the new one' );
+			$this->ok( 'importing' === $wpdb->get_var( $wpdb->prepare( "SELECT state FROM {$items} WHERE id = %d", (int) $first['id'] ) ),
+				'import retry: which is still importing' );
+
+			// Up to the ceiling. The claim counts attempts; the last one is terminal.
+			$claim = $again;
+			$state = '';
+			for ( $n = 2; $n <= GASF_CRM_PHOTO_MAX_ATTEMPTS; $n++ ) {
+				$state = gasf_crm_photo_item_fail( $claim, 'selftest: failure ' . $n );
+				if ( $n < GASF_CRM_PHOTO_MAX_ATTEMPTS ) {
+					$claim = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
+					if ( ! is_array( $claim ) ) { break; }
+				}
+			}
+			$this->ok( 'failed' === $state, 'import retry: after the last allowed attempt it is given up on' );
+			$this->ok( 0 === gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 ),
+				'import retry: and an unattended pass no longer claims it' );
+			$owed = gasf_crm_photo_submission_owed( $sid );
+			$this->ok( 0 === $owed['open'] && 1 === $owed['failed'] && false !== strpos( $owed['reason'], 'selftest' ),
+				'import retry: the submission reports it as given up on, with the reason' );
+
+			$this->ok( gasf_crm_photo_item_revive( $sid, $att ), 'import retry: a volunteer asking revives it' );
+			$fresh = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
+			$this->ok(
+				is_array( $fresh )
+				&& 1 === (int) $wpdb->get_var( $wpdb->prepare( "SELECT attempt_count FROM {$items} WHERE id = %d", (int) $first['id'] ) ),
+				'import retry: and it can be claimed again with a fresh set of attempts'
+			);
+			$this->ok( ! gasf_crm_photo_item_revive( $sid, $att ),
+				'import retry: reviving does nothing to a photo that is being fetched' );
+		} finally {
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$items} WHERE submission_id = %d", $sid ) );
+		}
+	}
+
+	/**
+	 * The compose lock coming and going leaves claimed cases alone.
+	 *
+	 * The lock is fifteen minutes; ownership is a day. Expiring any lock used
+	 * to clear the owner of every new, unlocked thread in the inbox; a release
+	 * that released nothing cleared it anyway; and opening a thread took the
+	 * case from whoever had claimed it.
+	 */
+	public function test_lock_cleanup_leaves_case_owners() {
+		global $wpdb;
+		$T = gasf_crm_table( 'threads' );
+		$C = gasf_crm_table( 'cases' );
+		$E = gasf_crm_table( 'case_events' );
+
+		$me    = get_current_user_id();
+		$other = $me + 900000000; // nobody: ownership is a number here, and no user is loaded
+		$ids   = array();
+		foreach ( array( 'claimed', 'opened', 'bystander' ) as $k ) {
+			$t = gasf_crm_upsert_thread( 'st-own-' . $k . '-' . wp_rand(), 'Selftest ownership', 'A Member',
+				'st-own-' . wp_rand() . '@example.com', current_time( 'mysql', true ), true, 'general' );
+			$ids[ $k ] = (int) $t['id'];
+		}
+		if ( ! $this->ok( min( $ids ) > 0, 'ownership: the fixture threads exist' ) ) { return; }
+
+		$owner = function ( $tid ) {
+			$c = gasf_crm_case_by_thread( $tid );
+			return $c ? (int) $c['owner_user_id'] : 0;
+		};
+		$age = function ( $tid ) use ( $wpdb, $T ) {
+			$wpdb->query( $wpdb->prepare( "UPDATE {$T} SET locked_at = %s WHERE id = %d", gmdate( 'Y-m-d H:i:s', time() - 7200 ), $tid ) );
+		};
+
+		try {
+			// Claimed with the button, then opened: the lock is mine, and so is the case.
+			gasf_crm_case_set_owner_by_thread( $ids['claimed'], $me, 'case-owner:claim', $me );
+			gasf_crm_claim_thread( $ids['claimed'], $me );
+			// Merely opened: the case came with the lock.
+			gasf_crm_claim_thread( $ids['opened'], $me );
+			$this->ok( $me === $owner( $ids['opened'] ), 'ownership: opening an unowned thread takes its case' );
+			// Somebody else's claim on a thread nobody has open.
+			gasf_crm_case_set_owner_by_thread( $ids['bystander'], $other, 'case-owner:claim', $other );
+
+			$age( $ids['claimed'] );
+			$age( $ids['opened'] );
+			gasf_crm_expire_locks();
+
+			$rows = $wpdb->get_results( "SELECT id, locked_by FROM {$T} WHERE id IN (" . implode( ',', array_map( 'intval', $ids ) ) . ')', OBJECT_K ); // phpcs:ignore WordPress.DB
+			$this->ok( null === $rows[ $ids['claimed'] ]->locked_by && null === $rows[ $ids['opened'] ]->locked_by,
+				'ownership: both stale locks are dropped' );
+			$this->ok( $me === $owner( $ids['claimed'] ), 'ownership: a claimed case survives its compose lock expiring' );
+			$this->ok( 0 === $owner( $ids['opened'] ), 'ownership: a case that only came with the lock goes with it' );
+			$this->ok( $other === $owner( $ids['bystander'] ),
+				'ownership: and expiring those locks does not touch a case on another thread' );
+
+			// Opening a thread does not take a claimed case from its owner.
+			$this->ok( gasf_crm_claim_thread( $ids['bystander'], $me ), 'ownership: anybody may still open a claimed thread' );
+			$this->ok( $other === $owner( $ids['bystander'] ), 'ownership: without taking the case from whoever claimed it' );
+
+			// A release that releases nothing changes nothing.
+			gasf_crm_release_thread( $ids['bystander'], $me );
+			gasf_crm_claim_thread( $ids['opened'], $other );
+			$this->ok( $other === $owner( $ids['opened'] ), 'ownership: a second volunteer opens the thread and has the case' );
+			$this->ok( false === gasf_crm_release_thread( $ids['opened'], $me ),
+				'ownership: a release from somebody who does not hold the lock releases nothing' );
+			$this->ok( $other === $owner( $ids['opened'] ), 'ownership: and leaves the holder\'s case with them' );
+			$this->ok( true === gasf_crm_release_thread( $ids['opened'], $other ) && 0 === $owner( $ids['opened'] ),
+				'ownership: the holder\'s own release gives the case back' );
+		} finally {
+			$in    = implode( ',', array_map( 'intval', $ids ) );
+			$cases = $wpdb->get_col( "SELECT id FROM {$C} WHERE thread_id IN ({$in})" ); // phpcs:ignore WordPress.DB
+			if ( $cases ) {
+				$cin = implode( ',', array_map( 'intval', $cases ) );
+				$wpdb->query( "DELETE FROM {$E} WHERE case_id IN ({$cin})" ); // phpcs:ignore WordPress.DB
+				$wpdb->query( "DELETE FROM {$C} WHERE id IN ({$cin})" );      // phpcs:ignore WordPress.DB
+			}
+			$wpdb->query( "DELETE FROM {$T} WHERE id IN ({$in})" ); // phpcs:ignore WordPress.DB
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

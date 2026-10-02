@@ -21,15 +21,48 @@ const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
 
-/* Files whose <script> blocks we parse. */
-const TARGETS = [
-	'includes/email-crm/ui.php',
+/*
+ * Files whose <script> and <style> blocks we check: every PHP file under
+ * includes/ that carries one, found by walking the tree.
+ *
+ * This was a hand-kept list until the inbox's script and styles were split out
+ * of ui.php into ui-script.php and ui-styles.php. Nobody added them, a PHP
+ * include is not something this checker follows, and the largest script on the
+ * site went unchecked for two months while the tick stayed green. A list that
+ * has to be remembered is a list that gets forgotten.
+ */
+function discover(dir) {
+	let out = [];
+	for (const ent of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
+		const rel = dir + '/' + ent.name;
+		if (ent.isDirectory()) { out = out.concat(discover(rel)); }
+		else if (/\.php$/.test(ent.name) && /<(script|style)[\s>]/i.test(fs.readFileSync(path.join(ROOT, rel), 'utf8'))) {
+			out.push(rel);
+		}
+	}
+	return out.sort();
+}
+
+const TARGETS = discover('includes');
+
+/*
+ * The files that have broken before, or would take a whole page down. If the
+ * walk ever stops finding one of these, the walk is what broke.
+ */
+const MUST_COVER = [
+	'includes/email-crm/ui-script.php',
+	'includes/email-crm/ui-styles.php',
+	'includes/email-crm/auth.php',
 	'includes/email-crm/photos-page.php',
 	'includes/email-crm/photos-public.php',
 	'includes/email-crm/admin.php',
 	'includes/email-crm/contracts.php',
-	'includes/photo-catalog.php',
 ];
+const uncovered = MUST_COVER.filter((rel) => !TARGETS.includes(rel));
+if (uncovered.length) {
+	console.error(`\n  ✗ not covered by the check: ${uncovered.join(', ')}\n`);
+	process.exit(1);
+}
 
 /*
  * PHP inside a script block is a value we cannot evaluate, so substitute a

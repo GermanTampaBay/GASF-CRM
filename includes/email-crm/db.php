@@ -1078,50 +1078,133 @@ function gasf_crm_claim_thread( $thread_id, $user_id, $lock_minutes = 15, $force
 		$holder = (int) $wpdb->get_var( $wpdb->prepare( "SELECT locked_by FROM {$t} WHERE id = %d", $thread_id ) );
 		$ok     = $holder === (int) $user_id;
 		if ( $ok ) {
-			gasf_crm_case_mark_owner_by_thread( (int) $thread_id, (int) $user_id, $force ? 'takeover' : 'claim' );
+			gasf_crm_case_owner_follow_lock( (int) $thread_id, (int) $user_id, $force ? 'takeover' : 'claim' );
 		}
 		return $ok;
 	}
-	gasf_crm_case_mark_owner_by_thread( (int) $thread_id, (int) $user_id, $force ? 'takeover' : 'claim' );
+	gasf_crm_case_owner_follow_lock( (int) $thread_id, (int) $user_id, $force ? 'takeover' : 'claim' );
 	gasf_crm_case_sync_from_thread( (int) $thread_id, $force ? 'thread_takeover' : 'thread_claim' );
 	return true;
 }
 
+/**
+ * Release a thread this user holds. Returns whether there was a lock to drop.
+ *
+ * Only a release that RELEASED something touches the case. A tab closing
+ * sends this for whatever thread it had open, long after somebody else may
+ * have taken the thread over; the WHERE misses, and it used to clear the new
+ * holder's case ownership on its way out regardless.
+ */
 function gasf_crm_release_thread( $thread_id, $user_id ) {
 	global $wpdb;
-	$wpdb->query( $wpdb->prepare(
+	$rows = (int) $wpdb->query( $wpdb->prepare(
 		'UPDATE ' . gasf_crm_table( 'threads' ) . "
 		    SET locked_by = NULL, locked_at = NULL,
 		        status = CASE WHEN status = 'claimed' THEN 'new' ELSE status END
 		  WHERE id = %d AND locked_by = %d",
 		$thread_id, $user_id
 	) );
-	gasf_crm_case_mark_owner_by_thread( (int) $thread_id, 0, 'release' );
+	if ( $rows < 1 ) { return false; }
+
+	gasf_crm_case_owner_follow_lock( (int) $thread_id, 0, 'release', (int) $user_id );
 	gasf_crm_case_sync_from_thread( (int) $thread_id, 'thread_release' );
+	return true;
 }
 
-/** Drop locks past their window so an abandoned tab doesn't hold a thread forever. */
+/**
+ * Drop locks past their window so an abandoned tab doesn't hold a thread forever.
+ *
+ * Touches the cases of the threads whose locks it dropped, and no others. It
+ * used to follow the update with "every thread that is new and unlocked" --
+ * which is most of the inbox -- and clear the case owner on all of them, so
+ * one abandoned tab anywhere un-assigned every claimed case in the queue,
+ * hourly. The ids are read first because an UPDATE cannot say which rows it
+ * changed.
+ */
 function gasf_crm_expire_locks( $lock_minutes = 15 ) {
 	global $wpdb;
+	$t      = gasf_crm_table( 'threads' );
 	$cutoff = gmdate( 'Y-m-d H:i:s', strtotime( current_time( 'mysql', true ) ) - ( $lock_minutes * 60 ) );
-	$changed = (int) $wpdb->query( $wpdb->prepare(
-		'UPDATE ' . gasf_crm_table( 'threads' ) . "
-		    SET locked_by = NULL, locked_at = NULL,
-		        status = CASE WHEN status = 'claimed' THEN 'new' ELSE status END
-		  WHERE locked_at IS NOT NULL AND locked_at < %s", $cutoff
-	) );
-	if ( $changed > 0 ) {
-		$rows = $wpdb->get_results( $wpdb->prepare(
-			'SELECT id FROM ' . gasf_crm_table( 'threads' ) . '
-			  WHERE status = %s AND locked_by IS NULL',
-			'new'
-		), ARRAY_A );
-		foreach ( (array) $rows as $r ) {
-			gasf_crm_case_mark_owner_by_thread( (int) $r['id'], 0, 'lock_expired' );
-			gasf_crm_case_sync_from_thread( (int) $r['id'], 'lock_expired' );
-		}
+
+	$stale = (array) $wpdb->get_results( $wpdb->prepare(
+		"SELECT id, locked_by FROM {$t} WHERE locked_at IS NOT NULL AND locked_at < %s", $cutoff
+	), ARRAY_A );
+	if ( ! $stale ) { return 0; }
+
+	$changed = 0;
+	foreach ( $stale as $r ) {
+		// Conditional on the stale stamp again: a holder who came back between
+		// the read and here has a fresh lock, and keeps it.
+		$hit = (int) $wpdb->query( $wpdb->prepare(
+			"UPDATE {$t}
+			    SET locked_by = NULL, locked_at = NULL,
+			        status = CASE WHEN status = 'claimed' THEN 'new' ELSE status END
+			  WHERE id = %d AND locked_at IS NOT NULL AND locked_at < %s",
+			(int) $r['id'], $cutoff
+		) );
+		if ( $hit < 1 ) { continue; }
+		$changed++;
+		gasf_crm_case_owner_follow_lock( (int) $r['id'], 0, 'lock_expired', (int) $r['locked_by'] );
+		gasf_crm_case_sync_from_thread( (int) $r['id'], 'lock_expired' );
 	}
 	return $changed;
+}
+
+/**
+ * Did the current owner get the case by opening the thread, rather than by
+ * pressing Claim?
+ *
+ * The owner column cannot say, and the two need opposite treatment: ownership
+ * that came with the compose lock should go when the lock goes, and ownership
+ * somebody asked for should not. The reason on the last owner change is the
+ * record of which it was -- 'claim' and 'takeover' are the lock's own words,
+ * the Claim button writes 'case-owner:...'. No record at all is a case from
+ * before this distinction, and is treated the way it always was.
+ */
+function gasf_crm_case_owner_from_lock( $case_id ) {
+	global $wpdb;
+	$json = $wpdb->get_var( $wpdb->prepare(
+		'SELECT payload_json FROM ' . gasf_crm_table( 'case_events' ) . "
+		  WHERE case_id = %d AND event_type = 'case.owner_changed'
+		  ORDER BY id DESC LIMIT 1",
+		(int) $case_id
+	) );
+	if ( null === $json ) { return true; }
+	$p = json_decode( (string) $json, true );
+	return in_array( (string) ( $p['reason'] ?? '' ), array( 'claim', 'takeover' ), true );
+}
+
+/**
+ * Let case ownership follow the compose lock -- where it is the lock's to move.
+ *
+ * The lock is fifteen minutes of "somebody is typing in here". Ownership is
+ * "this one is mine", lasts a day, and is advisory. They were wired together so
+ * tightly that the lock won every argument: opening a thread took the case off
+ * whoever had claimed it, and a lock expiring gave it back to nobody.
+ *
+ * One rule now. A lock event may set an owner where there is none, and may
+ * move or clear ownership that a lock made. Ownership somebody claimed with
+ * the button is never the lock's to touch.
+ *
+ * @param int $holder who now holds the lock, or 0 when it was dropped
+ * @param int $was    when dropped: whose lock it was. Only their ownership goes.
+ * @return bool whether ownership changed
+ */
+function gasf_crm_case_owner_follow_lock( $thread_id, $holder, $reason, $was = 0 ) {
+	$holder = (int) $holder;
+	$case   = gasf_crm_case_by_thread( (int) $thread_id );
+	$owner  = $case ? (int) $case['owner_user_id'] : 0;
+
+	if ( $owner > 0 ) {
+		if ( $owner === $holder ) { return false; }
+		if ( ! gasf_crm_case_owner_from_lock( (int) $case['id'] ) ) { return false; }
+		if ( 0 === $holder && (int) $was > 0 && $owner !== (int) $was ) { return false; }
+	} elseif ( 0 === $holder ) {
+		return false; // nobody owns it and nobody is taking it
+	}
+
+	gasf_crm_case_mark_owner_by_thread( (int) $thread_id, $holder, $reason );
+	return true;
 }
 
 function gasf_crm_case_state_from_thread_status( $thread_status ) {

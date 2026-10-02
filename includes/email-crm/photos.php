@@ -2058,6 +2058,17 @@ function gasf_crm_photo_keep( array $thread, $graph_message_id, $graph_attachmen
 		(string) ( $meta['contentType'] ?? '' ),
 		(int) ( $meta['size'] ?? 0 )
 	);
+	if ( ! $item && gasf_crm_photo_item_revive( $sub['id'], $graph_attachment_id ) ) {
+		// It had run out of unattended attempts. A person asking is a new reason
+		// to try, and the answer they used to get here -- "already being fetched",
+		// about a photo nothing would ever fetch again -- was simply untrue.
+		$item = gasf_crm_photo_item_claim(
+			$sub['id'], $graph_attachment_id,
+			(string) ( $meta['name'] ?? '' ),
+			(string) ( $meta['contentType'] ?? '' ),
+			(int) ( $meta['size'] ?? 0 )
+		);
+	}
 	if ( ! $item ) {
 		// Claimed by an intake run that is fetching it right now. Not an error to
 		// show anybody — the photo is on its way.
@@ -2068,11 +2079,7 @@ function gasf_crm_photo_keep( array $thread, $graph_message_id, $graph_attachmen
 
 	$id = gasf_crm_photo_approve( $thread, $graph_message_id, $graph_attachment_id, $item['id'] );
 	if ( is_wp_error( $id ) ) {
-		gasf_crm_photo_item_move( $item['id'], 'importing', 'failed', array(
-			'fail_reason' => substr( $id->get_error_message(), 0, 191 ),
-			'lease_owner' => null,
-			'lease_until' => null,
-		), $item['owner'] );
+		gasf_crm_photo_item_fail( $item, $id->get_error_message() );
 		return $id;
 	}
 
@@ -3095,6 +3102,98 @@ function gasf_crm_photo_item_move( $item_id, $from, $to, array $set = array(), $
 }
 
 /**
+ * Record that a claimed import did not work, and hand the photo back.
+ *
+ * Both callers used to move the item straight to 'failed', and nothing reads
+ * 'failed' again: the claim takes only pending_import and importing, the sweep
+ * resets only importing. So one throttle, one timeout, one bad minute at Graph
+ * and the photo was out of the catalogue for good -- the next pass skipped it,
+ * found nothing else on the message, and closed the submission as "no images on
+ * this message". A volunteer clicking Keep was told it was "already being
+ * fetched", every time, forever. The comment at the retry said the failed item
+ * was "left where it is"; it was, and that was the bug.
+ *
+ * A failure is retryable until the attempt ceiling, which is the same rule the
+ * sweep applies to a worker that died rather than reported. Only at the ceiling
+ * is it 'failed', and that is a state a person can now revive.
+ *
+ * Fenced on the lease like every other write a claim makes.
+ *
+ * @param array $item what gasf_crm_photo_item_claim() returned
+ * @return string the state it landed in: 'pending_import', 'failed', or '' if
+ *                the claim had already been taken over and nothing was written
+ */
+function gasf_crm_photo_item_fail( array $item, $reason ) {
+	global $wpdb;
+
+	$t = gasf_crm_table( 'photo_items' );
+	$n = (int) $wpdb->query( $wpdb->prepare(
+		"UPDATE {$t}
+		    SET state = IF( attempt_count < %d, 'pending_import', 'failed' ),
+		        fail_reason = %s, lease_owner = NULL, lease_until = NULL,
+		        updated_at = %s, revision = revision + 1
+		  WHERE id = %d AND state = 'importing' AND lease_owner = %s",
+		GASF_CRM_PHOTO_MAX_ATTEMPTS, substr( (string) $reason, 0, 191 ),
+		current_time( 'mysql', true ), (int) $item['id'], (string) $item['owner']
+	) );
+	if ( 1 !== $n ) { return ''; }
+
+	return (string) $wpdb->get_var( $wpdb->prepare( "SELECT state FROM {$t} WHERE id = %d", (int) $item['id'] ) );
+}
+
+/**
+ * Give a photo that ran out of attempts a fresh set, because a person asked.
+ *
+ * The ceiling exists to stop an unattended job looping on a photo that fails
+ * every time. A volunteer clicking Keep is not that: they are the "needs a
+ * volunteer" the ceiling was waiting for. Compare-and-swapped on 'failed', so
+ * it cannot disturb an item that is being fetched or is already in.
+ *
+ * @return bool whether there was a failed item to revive
+ */
+function gasf_crm_photo_item_revive( $submission_id, $graph_attachment_id ) {
+	global $wpdb;
+
+	return 1 === (int) $wpdb->query( $wpdb->prepare(
+		'UPDATE ' . gasf_crm_table( 'photo_items' ) . "
+		    SET state = 'pending_import', attempt_count = 0, lease_owner = NULL, lease_until = NULL,
+		        updated_at = %s, revision = revision + 1
+		  WHERE submission_id = %d AND graph_attachment_id = %s AND state = 'failed'",
+		current_time( 'mysql', true ), (int) $submission_id, (string) $graph_attachment_id
+	) );
+}
+
+/**
+ * What a submission still owes: photos not yet in, and photos given up on.
+ *
+ * Asked before a submission is closed. "Nothing was kept" is only "there were
+ * no images" if nothing is outstanding either; without this question the two
+ * were the same sentence.
+ *
+ * @return array{ open:int, failed:int, reason:string }
+ */
+function gasf_crm_photo_submission_owed( $submission_id ) {
+	global $wpdb;
+
+	$rows = (array) $wpdb->get_results( $wpdb->prepare(
+		'SELECT state, fail_reason FROM ' . gasf_crm_table( 'photo_items' ) . "
+		  WHERE submission_id = %d AND state IN ('pending_import','importing','failed')",
+		(int) $submission_id
+	), ARRAY_A );
+
+	$out = array( 'open' => 0, 'failed' => 0, 'reason' => '' );
+	foreach ( $rows as $r ) {
+		if ( 'failed' === $r['state'] ) {
+			$out['failed']++;
+			if ( '' === $out['reason'] ) { $out['reason'] = (string) $r['fail_reason']; }
+		} else {
+			$out['open']++;
+		}
+	}
+	return $out;
+}
+
+/**
  * Move whatever item owns this attachment, if one does.
  *
  * Deliberately quiet when there is no item. A volunteer can still act on a
@@ -3728,11 +3827,7 @@ function gasf_crm_photo_autoprocess_run() {
 
 			$id = gasf_crm_photo_approve( $thread, (string) $row['graph_message_id'], $att, $item['id'] );
 			if ( is_wp_error( $id ) ) {
-				gasf_crm_photo_item_move( $item['id'], 'importing', 'failed', array(
-					'fail_reason' => substr( $id->get_error_message(), 0, 191 ),
-					'lease_owner' => null,
-					'lease_until' => null,
-				), $item['owner'] );
+				gasf_crm_photo_item_fail( $item, $id->get_error_message() );
 				gasf_crm_log( 'CRM photos: auto-keep failed for ' . ( $a['name'] ?? '?' ) . ' — ' . $id->get_error_message() );
 				$stuck = $id->get_error_message();
 				continue;
@@ -3759,12 +3854,32 @@ function gasf_crm_photo_autoprocess_run() {
 		$taken += $fresh;
 
 		// A failed photo means the submission is not finished. It goes back to
-		// retry so the remaining images are fetched on a later pass, and the
-		// failed item is left where it is — its claim already records what
-		// went wrong, so a retry will not re-download what did work.
+		// retry so the remaining images are fetched on a later pass. The failed
+		// item goes back to pending_import (see gasf_crm_photo_item_fail), so
+		// that pass can claim it; what did work is skipped by already_kept.
 		if ( '' !== $stuck ) {
 			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'retry', $stuck, gasf_crm_photo_backoff( $sub ) );
 			continue;
+		}
+
+		// Nothing failed on THIS pass, which is not the same as nothing being
+		// owed: an item another worker still holds, or one that ran out of
+		// attempts earlier, is skipped by the claim without a word.
+		$owed = gasf_crm_photo_submission_owed( $sub['id'] );
+		if ( $owed['open'] ) {
+			gasf_crm_photo_submission_finish( $sub['id'], $owner, 'retry', 'a photo on this message is still being fetched', gasf_crm_photo_backoff( $sub ) );
+			continue;
+		}
+		if ( $owed['failed'] ) {
+			$why = $owed['failed'] . ' photo(s) could not be fetched — ' . ( '' !== $owed['reason'] ? $owed['reason'] : 'no reason was recorded' );
+			gasf_crm_log( 'CRM photos: message ' . (int) $row['id'] . ' — ' . $why . ' — needs a volunteer' );
+			gasf_crm_log_event( (int) $thread['id'], 'photo_failed', $why );
+			if ( ! $kept ) {
+				gasf_crm_photo_submission_finish( $sub['id'], $owner, 'held', $why );
+				continue;
+			}
+			// Some did come in. Those go on to their invitation as usual; the
+			// one that did not is on the thread's record, and Keep revives it.
 		}
 
 		if ( ! $kept ) {
