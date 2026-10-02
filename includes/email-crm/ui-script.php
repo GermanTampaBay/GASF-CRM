@@ -2233,7 +2233,7 @@ function gasf_crm_render_inbox_script() {
 		});
 
 		if (which === 'photos')  { loadPhotos(); }
-		if (which === 'library') { loadLib(); }
+		if (which === 'library') { loadLib({ cacheFirst: true }); }
 		if (which === 'upload')  { upFill(); }
 		remember();
 		window.scrollTo(0, 0);
@@ -3173,87 +3173,200 @@ function gasf_crm_render_inbox_script() {
 	// Only the newest request is allowed to paint.
 	var lgen = 0;
 
-	function loadLib(){
+	/* ---------- the gallery's saved copy ----------
+	   Opening the gallery means waiting several seconds for the server on this
+	   host before a single tile appears. So each answer is kept in this
+	   browser and shown at once the next time the same view is asked for,
+	   while the real answer is fetched behind it and painted over the top.
+
+	   Keyed by the plugin version and the volunteer: a deploy can change what
+	   a tile needs, and this device may be shared. Anything under another key
+	   is swept the next time something is saved, and the sign-in page clears
+	   the lot - so signing out, or a session simply ending, leaves no gallery
+	   behind on the device.
+
+	   Eight views, a week at most. While a saved copy is on screen the count
+	   says so, and bulk delete waits for the real answer: it is the one
+	   action that takes no revision from this page, so it must never act on a
+	   view that might be out of date. */
+	var LCACHE = 'gasf_lib_' + <?php
+		$gasf_ver = get_file_data( dirname( __DIR__, 2 ) . '/gasf-crm.php', array( 'v' => 'Version' ) );
+		echo wp_json_encode( preg_replace( '/[^0-9A-Za-z.]/', '', (string) ( $gasf_ver['v'] ?? '' ) ) );
+	?> + '_' + ME + '_';
+	var LCACHE_MAX = 8, LCACHE_AGE = 7 * 24 * 3600 * 1000;
+
+	// Every touch is wrapped: storage throws in a private window and when full,
+	// and no cache is fine where a broken gallery is not.
+	function lcacheIndex(){
+		try { return JSON.parse(localStorage.getItem(LCACHE + '#') || '{}') || {}; } catch (e) { return {}; }
+	}
+	function lcacheGet(slice){
+		try {
+			var v = JSON.parse(localStorage.getItem(LCACHE + slice) || 'null');
+			if (v && v.r && v.at && Date.now() - v.at < LCACHE_AGE) { return v; }
+		} catch (e) {}
+		return null;
+	}
+	function lcachePut(slice, r){
+		try {
+			for (var i = localStorage.length - 1; i >= 0; i--) {
+				var k = localStorage.key(i);
+				if (k && k.indexOf('gasf_lib_') === 0 && k.indexOf(LCACHE) !== 0) { localStorage.removeItem(k); }
+			}
+			var idx = lcacheIndex();
+			idx[slice] = Date.now();
+			var keys = Object.keys(idx).sort(function(a, b){ return idx[a] - idx[b]; });
+			while (keys.length > LCACHE_MAX) {
+				var old = keys.shift();
+				delete idx[old];
+				localStorage.removeItem(LCACHE + old);
+			}
+			localStorage.setItem(LCACHE + slice, JSON.stringify({ at: idx[slice], r: r }));
+			localStorage.setItem(LCACHE + '#', JSON.stringify(idx));
+		} catch (e) {
+			// Out of room, most likely. Clear ours rather than leave a half-written
+			// set that could be read back.
+			lcacheClear();
+		}
+	}
+	function lcacheClear(){
+		try {
+			for (var i = localStorage.length - 1; i >= 0; i--) {
+				var k = localStorage.key(i);
+				if (k && k.indexOf('gasf_lib_') === 0) { localStorage.removeItem(k); }
+			}
+		} catch (e) {}
+	}
+	function lago(at){
+		var m = Math.round((Date.now() - at) / 60000);
+		if (m < 1) { return 'just now'; }
+		if (m < 60) { return m + ' minute' + (m === 1 ? '' : 's') + ' ago'; }
+		var h = Math.round(m / 60);
+		if (h < 24) { return h + ' hour' + (h === 1 ? '' : 's') + ' ago'; }
+		var d = Math.round(h / 24);
+		return d + ' day' + (d === 1 ? '' : 's') + ' ago';
+	}
+	// A saved copy on screen, or the real thing. Bulk delete waits for the real one.
+	function lstale(on, text){
+		var del = document.getElementById('ldel');
+		if (del) {
+			del.disabled = !!on;
+			del.title = on ? 'Available once the gallery has refreshed' : '';
+		}
+		if (on && text) { document.getElementById('lcount').textContent = text; }
+	}
+	// No library on this page - the account has no photos access - so there is
+	// nothing here for a saved copy to be of.
+	if (!lgrid) { lcacheClear(); }
+
+	function loadLib(opts){
 		if (!lgrid) { return; }
 		var f = lfilters();
 		var qs = Object.keys(f).map(function(k){ return k + '=' + encodeURIComponent(f[k]); }).join('&');
 		var gen = ++lgen;
+		var slice = lpage + '|' + qs;
 
-		document.getElementById('lcount').textContent = 'Loading…';
+		// The saved copy first, when there is one and this is somebody moving
+		// around the gallery. NOT after an edit: those call loadLib() bare, and
+		// repainting the copy from before the edit would put a deleted photo back
+		// on screen for the seconds the refresh takes.
+		var saved = (opts && opts.cacheFirst) ? lcacheGet(slice) : null;
+		var savedCount = '';
+		if (saved) {
+			lpaint(saved.r);
+			savedCount = document.getElementById('lcount').textContent;
+			lstale(true, savedCount + ' · showing the copy saved ' + lago(saved.at) + ', refreshing…');
+		} else {
+			document.getElementById('lcount').textContent = 'Loading…';
+		}
+
 		return api('/photos/library?page=' + lpage + '&' + qs).then(function(r){
 			if (gen !== lgen) { return; }   // superseded while in flight
-			lids    = r.ids || [];
-			lfacets = r.facets;
-
-			lfill('lperson', r.facets.people, 'Anyone');
-			lfill('lgroup',  r.facets.groups, 'Any');
-			lfill('lplace',  r.facets.places, 'Anywhere');
-			lfill('levent',  r.facets.events, 'Any');
-			lfill('lyear',   r.facets.years,  'Any');
-
-			var count = document.getElementById('lcount');
-			if (!r.total) {
-				count.textContent = r.all
-					? 'No photos match that. Try clearing a filter.'
-					: 'No photos have been catalogued yet. Approved submissions land here.';
-			} else {
-				count.textContent = r.total === r.all
-					? r.total + ' photo' + (r.total === 1 ? '' : 's')
-					: r.total + ' of ' + r.all + ' photos';
-			}
-			document.getElementById('lall').hidden = !r.total;
-
-			lgrid.innerHTML = (r.photos || []).map(function(p){
-				var sub = [whenOf(p), (p.places[0] || ''), (p.events[0] || '')].filter(Boolean).join(' · ');
-				var who = p.people.length ? p.people.join(', ') : '';
-				var marks = p.flyer ? '<span class="badge fly">flyer/ad</span>' : '';
-				return '<div class="lcard' + (lsel[p.id] ? ' sel' : '') + '" data-id="' + p.id + '">' +
-					'<input type="checkbox" class="ltick" ' + (lsel[p.id] ? 'checked' : '') +
-						' aria-label="Select this photo">' +
-					(p.dlname
-						? '<a class="ldl" href="' + esc(p.url) + '" download="' + esc(p.dlname) + '" title="Download">&darr;</a>'
-						: '') +
-					(p.consent && p.consent.state === 'unknown'
-						? '<span class="lwarn" title="Sent in before we started asking for permission — check before publishing">no permission on record</span>'
-						: '') +
-					(p.consent && p.consent.state === 'refused'
-						? '<span class="lno" title="Somebody asked us not to publish this. It is left out of bulk downloads.">do not publish</span>'
-						: '') +
-					'<button type="button" class="lopen" aria-label="Open ' + esc(p.title || 'photo') + '">' +
-						(p.kind === 'video'
-							? '<span class="lthumb lvid" aria-hidden="true"><span>video</span></span>'
-							: '<img class="lthumb" src="' + esc(p.thumb || p.url) + '" alt="' + esc(p.title) + '" loading="lazy">') +
-					'</button>' +
-					'<div class="lmeta">' +
-						'<span class="lt">' + esc(who || p.title) + '</span>' +
-						'<span class="lsub">' + esc(sub || '—') + (marks ? ' ' + marks : '') + '</span>' +
-					'</div></div>';
-			}).join('');
-
-			// Kept for the lightbox and the download, so clicking a photo does not
-			// need another round trip.
-			lgrid._photos = {};
-			(r.photos || []).forEach(function(p){ lgrid._photos[p.id] = p; });
-
-			var pager = document.getElementById('lpager');
-			pager.hidden = (r.pages <= 1);
-			lpages = r.pages || 1;
-			document.getElementById('lpage').textContent = 'Page ' + r.page + ' of ' + r.pages;
-			document.getElementById('lprev').disabled = (r.page <= 1);
-			document.getElementById('lnext').disabled = (r.page >= r.pages);
-			lrenderJumps(r.page, r.pages);
-
-			document.getElementById('lzip').textContent = 'Download as a zip';
-			lsyncBar();
+			lpaint(r);
+			lstale(false);
+			lcachePut(slice, r);
 		}).catch(function(e){
 			if (gen !== lgen) { return; }   // a stale failure must not overwrite a live result
-			document.getElementById('lcount').textContent = e.message;
+			if (saved) {
+				// The copy stays - it is still the best picture there is - but the
+				// count says plainly that it could not be checked.
+				lstale(true, savedCount + ' · showing the copy saved ' + lago(saved.at) + '; could not refresh: ' + e.message);
+			} else {
+				document.getElementById('lcount').textContent = e.message;
+			}
 		});
+	}
+
+	/* One library answer - fresh or saved - drawn onto the gallery. */
+	function lpaint(r){
+		lids    = r.ids || [];
+		lfacets = r.facets;
+
+		lfill('lperson', r.facets.people, 'Anyone');
+		lfill('lgroup',  r.facets.groups, 'Any');
+		lfill('lplace',  r.facets.places, 'Anywhere');
+		lfill('levent',  r.facets.events, 'Any');
+		lfill('lyear',   r.facets.years,  'Any');
+
+		var count = document.getElementById('lcount');
+		if (!r.total) {
+			count.textContent = r.all
+				? 'No photos match that. Try clearing a filter.'
+				: 'No photos have been catalogued yet. Approved submissions land here.';
+		} else {
+			count.textContent = r.total === r.all
+				? r.total + ' photo' + (r.total === 1 ? '' : 's')
+				: r.total + ' of ' + r.all + ' photos';
+		}
+		document.getElementById('lall').hidden = !r.total;
+
+		lgrid.innerHTML = (r.photos || []).map(function(p){
+			var sub = [whenOf(p), (p.places[0] || ''), (p.events[0] || '')].filter(Boolean).join(' · ');
+			var who = p.people.length ? p.people.join(', ') : '';
+			var marks = p.flyer ? '<span class="badge fly">flyer/ad</span>' : '';
+			return '<div class="lcard' + (lsel[p.id] ? ' sel' : '') + '" data-id="' + p.id + '">' +
+				'<input type="checkbox" class="ltick" ' + (lsel[p.id] ? 'checked' : '') +
+					' aria-label="Select this photo">' +
+				(p.dlname
+					? '<a class="ldl" href="' + esc(p.url) + '" download="' + esc(p.dlname) + '" title="Download">&darr;</a>'
+					: '') +
+				(p.consent && p.consent.state === 'unknown'
+					? '<span class="lwarn" title="Sent in before we started asking for permission — check before publishing">no permission on record</span>'
+					: '') +
+				(p.consent && p.consent.state === 'refused'
+					? '<span class="lno" title="Somebody asked us not to publish this. It is left out of bulk downloads.">do not publish</span>'
+					: '') +
+				'<button type="button" class="lopen" aria-label="Open ' + esc(p.title || 'photo') + '">' +
+					(p.kind === 'video'
+						? '<span class="lthumb lvid" aria-hidden="true"><span>video</span></span>'
+						: '<img class="lthumb" src="' + esc(p.thumb || p.url) + '" alt="' + esc(p.title) + '" loading="lazy">') +
+				'</button>' +
+				'<div class="lmeta">' +
+					'<span class="lt">' + esc(who || p.title) + '</span>' +
+					'<span class="lsub">' + esc(sub || '—') + (marks ? ' ' + marks : '') + '</span>' +
+				'</div></div>';
+		}).join('');
+
+		// Kept for the lightbox and the download, so clicking a photo does not
+		// need another round trip.
+		lgrid._photos = {};
+		(r.photos || []).forEach(function(p){ lgrid._photos[p.id] = p; });
+
+		var pager = document.getElementById('lpager');
+		pager.hidden = (r.pages <= 1);
+		lpages = r.pages || 1;
+		document.getElementById('lpage').textContent = 'Page ' + r.page + ' of ' + r.pages;
+		document.getElementById('lprev').disabled = (r.page <= 1);
+		document.getElementById('lnext').disabled = (r.page >= r.pages);
+		lrenderJumps(r.page, r.pages);
+
+		document.getElementById('lzip').textContent = 'Download as a zip';
+		lsyncBar();
 	}
 
 	// Filters reset to page one: staying on page 4 of a result that now has two
 	// pages shows an empty grid and looks broken.
-	function lrefilter(){ lpage = 1; loadLib(); }
+	function lrefilter(){ lpage = 1; loadLib({ cacheFirst: true }); }
 
 	['lperson','lgroup','lplace','levent','lyear','ldesc','lreview','lsort'].forEach(function(id){
 		var e = document.getElementById(id);
@@ -3770,8 +3883,8 @@ function gasf_crm_render_inbox_script() {
 	}
 
 	var lprev = document.getElementById('lprev'), lnext = document.getElementById('lnext');
-	if (lprev) { lprev.onclick = function(){ if (lpage > 1) { lpage--; loadLib(); } }; }
-	if (lnext) { lnext.onclick = function(){ if (lpage < lpages) { lpage++; loadLib(); } }; }
+	if (lprev) { lprev.onclick = function(){ if (lpage > 1) { lpage--; loadLib({ cacheFirst: true }); } }; }
+	if (lnext) { lnext.onclick = function(){ if (lpage < lpages) { lpage++; loadLib({ cacheFirst: true }); } }; }
 	var ljumps = document.getElementById('ljumps');
 	if (ljumps) { ljumps.onclick = function(ev){
 		var b = ev.target.closest ? ev.target.closest('[data-page]') : null;
@@ -3779,7 +3892,7 @@ function gasf_crm_render_inbox_script() {
 		var to = parseInt(b.getAttribute('data-page'), 10) || 0;
 		if (to < 1 || to === lpage) { return; }
 		lpage = to;
-		loadLib();
+		loadLib({ cacheFirst: true });
 	}; }
 
 	if (lgrid) {

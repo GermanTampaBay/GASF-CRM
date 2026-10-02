@@ -3143,6 +3143,47 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The gallery shows a saved copy at once, then the real answer.
+	 *
+	 * Pinned on the page source, because the copy lives in the browser. What
+	 * is worth pinning is where it must NOT be used: after an edit, where
+	 * repainting the copy from before it would put a deleted photo back on
+	 * screen, and under bulk delete, which takes no revision from the page.
+	 */
+	public function test_gallery_saved_copy() {
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+
+		$this->ok(
+			false !== strpos( $src, "if (which === 'library') { loadLib({ cacheFirst: true }); }" ),
+			'gallery: opening it shows the saved copy first'
+		);
+		$this->ok(
+			false !== strpos( $src, "var LCACHE = 'gasf_lib_' + " ) && false !== strpos( $src, "+ '_' + ME + '_';" ),
+			'gallery: the copy is kept per volunteer and per plugin version'
+		);
+
+		$bs = strpos( $src, '/* ===================== bulk delete' );
+		$be = false === $bs ? false : strpos( $src, '}());', $bs );
+		$bd = ( false === $bs || false === $be ) ? '' : substr( $src, $bs, $be - $bs );
+		$this->ok(
+			'' !== $bd && false !== strpos( $bd, 'loadLib();' ) && false === strpos( $bd, 'cacheFirst' ),
+			'gallery: after a delete it asks the server straight away, not the saved copy'
+		);
+		$this->ok(
+			false !== strpos( $src, 'del.disabled = !!on;' ),
+			'gallery: bulk delete waits while a saved copy is on screen'
+		);
+
+		ob_start();
+		gasf_crm_render_signin();
+		$signin = (string) ob_get_clean();
+		$this->ok(
+			false !== strpos( $signin, "indexOf('gasf_lib_')===0" ),
+			'gallery: the sign-in page clears any saved copy on the device'
+		);
+	}
+
+	/**
 	 * Bulk delete goes through the single delete, and refuses - not trims - a
 	 * batch above the cap.
 	 *

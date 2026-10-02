@@ -133,7 +133,20 @@ function gasf_crm_render_app() {
 	echo '</body></html>';
 }
 
+/**
+ * Forget any photo gallery this browser was keeping.
+ *
+ * Printed wherever somebody is NOT looking at the CRM - signed out, or still
+ * waiting for approval - so that signing out, or a session simply ending,
+ * leaves no copy of the photo library on the device. The saved copy itself
+ * is described beside the gallery's loader in ui-script.php.
+ */
+function gasf_crm_lib_cache_forget() {
+	echo "<script>try{for(var i=localStorage.length-1;i>=0;i--){var k=localStorage.key(i);if(k&&k.indexOf('gasf_lib_')===0){localStorage.removeItem(k);}}}catch(e){}</script>";
+}
+
 function gasf_crm_render_signin() {
+	gasf_crm_lib_cache_forget();
 	$providers = gasf_crm_enabled_providers();
 	echo '<div class="center"><h1>' . esc_html( get_bloginfo( 'name' ) ) . '</h1>';
 	echo '<p>Sign in to read and answer mail sent to the club.</p>';
@@ -274,6 +287,7 @@ function gasf_crm_render_google_popup( array $p ) {
  * invites someone to end a browser session they wanted to keep.
  */
 function gasf_crm_render_pending( $status ) {
+	gasf_crm_lib_cache_forget();
 	echo '<div class="center"><h1>Awaiting approval</h1>';
 	if ( 'denied' === $status ) {
 		echo '<p>This account does not have access to the club inbox. If you think that is a mistake, speak to whoever looks after the website.</p>';
