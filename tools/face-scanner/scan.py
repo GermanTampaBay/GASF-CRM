@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.3"
+SCANNER_VERSION = "1.6.4"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -1122,20 +1122,30 @@ def _migrate(conn):
                   redundancy REAL NOT NULL DEFAULT 0,
                   active INTEGER NOT NULL DEFAULT 1,
                   captured_at TEXT NOT NULL DEFAULT '',
+                  thumb BLOB,
+                  quality_measured INTEGER NOT NULL DEFAULT 0,
                   vector BLOB NOT NULL,
                   UNIQUE(photo_id, engine, face_key)
                )"""
         )
+        # Every column the ALTERs above just added has to be declared and
+        # copied here too. thumb and quality_measured were not: the rebuild
+        # dropped them moments after they were created, and the first write of
+        # that run failed on "no such column: thumb". Add a column to
+        # ref_additions and it belongs in this statement as well - the selftest
+        # migrates a database of this shape and then uses it, to say so.
         conn.execute(
             """INSERT INTO refs_new (
                    id, person, photo_id, engine, face_key,
                    face_width, face_height, sharpness, clipping,
-                   quality, redundancy, active, captured_at, vector
+                   quality, redundancy, active, captured_at,
+                   thumb, quality_measured, vector
                )
                SELECT r.id, r.person, r.photo_id, r.engine,
                       COALESCE(NULLIF(r.face_key, ''), '0'),
                       r.face_width, r.face_height, r.sharpness, r.clipping,
-                      r.quality, r.redundancy, r.active, r.captured_at, r.vector
+                      r.quality, r.redundancy, r.active, r.captured_at,
+                      r.thumb, r.quality_measured, r.vector
                FROM refs r
                INNER JOIN (
                    SELECT photo_id, engine, COALESCE(NULLIF(face_key, ''), '0') AS face_key, MAX(id) AS keep_id
@@ -1384,6 +1394,10 @@ def apply_retired_names(api, conn, verbose=True):
     conn.commit()
     if touched or dropped:
         refresh_reference_selection(conn, None, touched or None)
+        # The reselection writes and does not commit. Left to whatever committed
+        # next, a run that stopped here kept the refiled names and lost which of
+        # each person's examples the matcher should use.
+        conn.commit()
     if verbose and (moved or dropped):
         print(
             f"retired names: {moved} example(s) refiled under the current spelling"
@@ -1391,6 +1405,12 @@ def apply_retired_names(api, conn, verbose=True):
             flush=True,
         )
     return moved + dropped
+
+
+def _http_gone(exc):
+    """Did the server say this thing is not there, as opposed to not answering?"""
+    response = getattr(exc, "response", None)
+    return getattr(response, "status_code", None) in (404, 410)
 
 
 def backfill_reference_quality(api, conn, backend, limit=QUALITY_BACKFILL_PHOTOS, verbose=True):
@@ -1420,16 +1440,32 @@ def backfill_reference_quality(api, conn, backend, limit=QUALITY_BACKFILL_PHOTOS
             (backend.name, int(limit)),
         )
     ]
-    measured = failed = 0
+    measured = failed = skipped = 0
     touched = set()
     for photo_id in photo_ids:
         rows = conn.execute(
             "SELECT id, person, vector FROM refs WHERE engine = ? AND photo_id = ? AND quality_measured = 0",
             (backend.name, photo_id),
         ).fetchall()
+        # Fetching and measuring fail for different reasons and mean different
+        # things. A timeout or a 503 says nothing about the photo, and marking
+        # its faces "tried, could not" on the strength of one - which is what a
+        # single except around both used to do - took them out of the queue for
+        # good, because only rows still at 0 are ever looked at again. Those
+        # rows are left alone and come round next run. A photo the server says
+        # is gone, or one that will not decode, really cannot be measured.
         try:
-            pixels = display_rgb_array(api.image(f"{api.base}/image?photo={photo_id}"))
-            found = backend.embed_rgb(pixels)
+            raw = api.image(f"{api.base}/image?photo={photo_id}")
+        except requests.RequestException as e:
+            if not _http_gone(e):
+                skipped += 1
+                continue
+            raw = None
+        except Exception:
+            raw = None
+        try:
+            pixels = display_rgb_array(raw) if raw is not None else None
+            found = backend.embed_rgb(pixels) if pixels is not None else []
         except Exception:
             found, pixels = [], None
         for ref_id, person, blob in rows:
@@ -1458,13 +1494,15 @@ def backfill_reference_quality(api, conn, backend, limit=QUALITY_BACKFILL_PHOTOS
         conn.commit()
     if touched:
         refresh_reference_selection(conn, backend.name, touched)
+        conn.commit()  # with the measurements it was made from - see apply_retired_names
     waiting = int(conn.execute(
         "SELECT COUNT(*) FROM refs WHERE engine = ? AND quality_measured = 0", (backend.name,)
     ).fetchone()[0])
-    if verbose and (measured or failed):
+    if verbose and (measured or failed or skipped):
         print(
             f"re-measured quality for {measured} older reference face(s)"
             + (f", {failed} could not be (photo gone or changed)" if failed else "")
+            + (f", {skipped} photo(s) could not be fetched and will be tried again" if skipped else "")
             + f"; {waiting} still waiting",
             flush=True,
         )
@@ -3526,6 +3564,12 @@ const labelFlow=__LABEL_FLOW__;
 const sessionToken=__LABEL_TOKEN__;
 let count=0, pos=0, current=null, activeGallery=[], allGallery=[], loadSeq=0, imageRenderSeq=0, photoAbort=null;
 let saving=false, finishing=false, dirty=false, finishPollFailures=0, finishReturnView='galleryView';
+/* Counts edits, so a save can tell whether what it sent is still what is on
+   screen. The name fields stay live while a save is in flight, and the save
+   used to finish by declaring the photo clean whatever had been typed since:
+   the next Save & Next then sent nothing, and the name typed during those two
+   seconds was gone. */
+let editSeq=0;
 let viewZoom=1, viewPanX=0, viewPanY=0, panPointer=null, panStartX=0, panStartY=0, panOriginX=0, panOriginY=0;
 const nameSet = new Map();
 async function j(url,opt){
@@ -3771,11 +3815,11 @@ function render(p){
     const i=b.getAttribute('data-fill');
     const hint=(p.hints||[]).find(h=>String(h.index)===String(i));
     const inp=rows.querySelector(`input[data-i="${i}"]`);
-    if(inp && hint && hint.name){inp.value=hint.name; dirty=true; inp.focus();}
+    if(inp && hint && hint.name){inp.value=hint.name; dirty=true; editSeq++; inp.focus();}
   });
   rows.querySelectorAll('input[data-i]').forEach(inp=>{
     inp.addEventListener('input', ()=>{
-      dirty=true;
+      dirty=true; editSeq++;
       if(!localNames.length){ inp.setAttribute('list','peopleListGlobal'); return; }
       const vA=foldName(inp.value||'', true);
       const vB=foldName(inp.value||'', false);
@@ -3826,8 +3870,10 @@ function paintGallery(){
   gl.innerHTML=activeGallery.map((g,i)=>`<button class="gbtn" data-i="${i}" title="Photo #${g.id}">${
     g.thumb ? `<img src="${g.thumb}" alt="">` : `<span class="gph" aria-hidden="true"></span>`
   }<span class="gmeta">#${g.id}</span></button>`).join('');
+  // Through saveAndOpen, like Back and Next. A thumbnail used to open its photo
+  // directly, so clicking one with names typed and unsaved threw them away.
   gl.querySelectorAll('.gbtn').forEach(b=>b.onclick=async()=>{
-    await openByPos(parseInt(b.getAttribute('data-i'),10)||0);
+    await saveAndOpen(parseInt(b.getAttribute('data-i'),10)||0);
   });
 }
 function applyFilter(){
@@ -3899,6 +3945,7 @@ function updateGalleryStatus(photoId){
 async function saveCurrentOnly(){
   if(!current || !dirty || saving){return 0;}
   const labels=collectLabels();
+  const sentSeq=editSeq, sentId=current.id;
   saving=true;
   const saveBtn=document.getElementById('save');
   const finishBtn=document.getElementById('finish');
@@ -3906,9 +3953,13 @@ async function saveCurrentOnly(){
   finishBtn.disabled=true;
   saveBtn.textContent='Saving...';
   try{
-    const out = await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:current.id,labels})});
-    updateGalleryStatus(current.id);
-    dirty=false;
+    const out = await j('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({photo:sentId,labels})});
+    // Only if this is still the photo that was saved: the status is read off
+    // the fields on screen, and they may belong to another photo by now.
+    if(current && current.id===sentId){ updateGalleryStatus(sentId); }
+    // Clean only if nothing was typed while it was away. Otherwise it stays
+    // dirty, and the next save sends what is actually there.
+    if(editSeq===sentSeq){ dirty=false; }
     return Number((out && out.stored) || 0);
   } finally {
     saving=false;
@@ -4473,6 +4524,12 @@ def local_label(
 # --------------------------------------------------------------------------- learn
 
 
+# How many runs in a row a photo may fail to download before learning stops
+# waiting for it. Enough to ride out a bad evening; not so many that one photo
+# the host will never serve makes every run redo the same work for ever.
+LEARN_RETRY_RUNS = 3
+
+
 def learn(api, conn, backend, verbose=True):
     """
     Grow the reference set from photos volunteers have actually tagged.
@@ -4487,6 +4544,16 @@ def learn(api, conn, backend, verbose=True):
 
     The watermark is per engine, so switching backends relearns from scratch
     into that engine's own vectors rather than trusting the other's homework.
+
+    The watermark only moves past photos that were actually dealt with. It used
+    to advance before each photo was fetched, so one timeout meant that photo
+    was never looked at again - nothing re-queues it but a volunteer editing it
+    a second time. Where the photo was a CORRECTION, the reference it was
+    meant to replace stayed, and went on suggesting the wrong name. Now the
+    first photo that could not be downloaded holds the saved watermark behind
+    it: this run carries on past it, the next run starts from it again
+    (relearning is idempotent), and after LEARN_RETRY_RUNS runs it is given up
+    on out loud rather than waited for indefinitely.
     """
     if verbose:
         print("Studying photos volunteers have tagged since the last run...", flush=True)
@@ -4498,6 +4565,31 @@ def learn(api, conn, backend, verbose=True):
     include_empty = bool(since_mod)
     added = removed = skipped = processed = 0
     learned_ids = set()
+    retry_key = state_key(backend.name, "learn_retry")
+    try:
+        retry = json.loads(state_get(conn, retry_key, "") or "{}")
+        retry = retry if isinstance(retry, dict) else {}
+    except ValueError:
+        retry = {}
+    held = None  # the watermark as it stood before the first photo that must be retried
+
+    def fetch_failed(exc, photo_id, before):
+        """A photo could not be fetched or read. Decide whether to wait for it."""
+        nonlocal held
+        transient = isinstance(exc, requests.RequestException) and not _http_gone(exc)
+        note = ""
+        if transient:
+            tries = int(retry.get(str(photo_id), 0)) + 1
+            if tries <= LEARN_RETRY_RUNS:
+                retry[str(photo_id)] = tries
+                if held is None:
+                    held = before
+                note = " - will be tried again next run"
+            else:
+                retry.pop(str(photo_id), None)
+                note = f" - given up on after {LEARN_RETRY_RUNS} runs; edit the photo's names to have it studied again"
+        if verbose:
+            print(f"  #{photo_id}: {exc}{note}")
     beat = _HeartbeatTicker(
         verbose,
         15,
@@ -4526,6 +4618,7 @@ def learn(api, conn, backend, verbose=True):
                 context = _photo_context(p)
                 captured_at = context["taken_at"] or context["uploaded_at"]
                 modified = str(p.get("modified") or "")
+                before = (since_mod, since_id)
                 if modified:
                     if modified > since_mod or (modified == since_mod and photo_id > since_id):
                         since_mod, since_id = modified, photo_id
@@ -4540,8 +4633,7 @@ def learn(api, conn, backend, verbose=True):
                             display_pixels = display_rgb_array(api.image(p["url"]))
                             found = backend.embed_rgb(display_pixels)
                         except Exception as e:  # a missing file must not stop the run
-                            if verbose:
-                                print(f"  #{p['id']}: {e}")
+                            fetch_failed(e, photo_id, before)
                             continue
                         if not found:
                             old_count, _ = replace_photo_references(
@@ -4599,8 +4691,7 @@ def learn(api, conn, backend, verbose=True):
                         display_pixels = display_rgb_array(api.image(p["url"]))
                         found = backend.embed_rgb(display_pixels)
                     except Exception as e:  # a missing file must not stop the run
-                        if verbose:
-                            print(f"  #{p['id']}: {e}")
+                        fetch_failed(e, photo_id, before)
                         continue
                     if len(found) != 1:
                         old_count, _ = replace_photo_references(
@@ -4633,10 +4724,16 @@ def learn(api, conn, backend, verbose=True):
                         )
 
             conn.commit()
-            if since_mod:
-                state_set(conn, wk_mod, since_mod)
-            state_set(conn, wk_id, since_id)
-            state_set(conn, state_key(backend.name, "learned_to"), since_id)
+            for done_id in learned_ids:
+                retry.pop(str(done_id), None)
+            # What is SAVED stops behind the first photo still owed; what this
+            # loop pages with (since_mod, since_id) carries on to the end.
+            keep_mod, keep_id = held if held is not None else (since_mod, since_id)
+            if keep_mod:
+                state_set(conn, wk_mod, keep_mod)
+            state_set(conn, wk_id, keep_id)
+            state_set(conn, state_key(backend.name, "learned_to"), keep_id)
+            state_set(conn, retry_key, json.dumps(retry))
     finally:
         beat.stop()
 
@@ -5593,6 +5690,82 @@ def selftest():
             "quality backfill: an old default is re-measured, an unmatched face is marked not guessed, a real score is kept",
         )
 
+    # A photo that could not be FETCHED says nothing about its faces: those rows
+    # stay waiting. Only a photo the server says is gone is given up on.
+    class _QDownApi:
+        base = "https://example.invalid/faces"
+
+        def __init__(self, status):
+            self.status = status
+
+        def image(self, _url):
+            response = requests.Response()
+            response.status_code = self.status
+            raise requests.HTTPError(f"HTTP {self.status}", response=response)
+
+    with sqlite3.connect(":memory:") as _qconn:
+        _migrate(_qconn)
+        _qconn.execute(
+            "INSERT INTO refs (person, photo_id, engine, face_key, vector) VALUES ('Anna', 5, ?, '0', ?)",
+            (backend.name, np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()),
+        )
+        _down = backfill_reference_quality(_QDownApi(503), _qconn, backend, verbose=False)
+        _after_down = _qconn.execute("SELECT quality_measured FROM refs").fetchone()[0]
+        _gone = backfill_reference_quality(_QDownApi(404), _qconn, backend, verbose=False)
+        _after_gone = _qconn.execute("SELECT quality_measured FROM refs").fetchone()[0]
+        check_that(
+            _down == (0, 0, 1) and _after_down == 0 and _gone == (0, 1, 0) and _after_gone == 2,
+            "quality backfill: a photo that could not be fetched stays waiting; one that is gone is marked so",
+        )
+
+    # The choice of which examples to use is saved WITH the measurements it was
+    # made from - on disk, through a second connection, with no later commit.
+    with tempfile.TemporaryDirectory() as _sel_dir:
+        _sel_path = os.path.join(_sel_dir, "faces.db")
+        _sconn = sqlite3.connect(_sel_path)
+        _migrate(_sconn)
+        _sconn.execute(
+            "INSERT INTO refs (person, photo_id, engine, face_key, vector, active) VALUES ('Anna', 5, ?, '0', ?, 0)",
+            (backend.name, np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()),
+        )
+        _sconn.commit()
+        backfill_reference_quality(_QApi(), _sconn, backend, verbose=False)
+        _sconn.close()  # closing rolls back anything left uncommitted
+        _sconn = sqlite3.connect(_sel_path)
+        _sel_row = _sconn.execute("SELECT quality_measured, active FROM refs").fetchone()
+        _sconn.close()
+        check_that(
+            tuple(_sel_row) == (1, 1),
+            "quality backfill: the reselection it triggers is committed with it, not left for a later commit",
+        )
+
+    # A database from before per-face keys is rebuilt, and the rebuild must keep
+    # the columns added since - then be USED, which is what found it losing them.
+    with sqlite3.connect(":memory:") as _lconn:
+        _lconn.execute(
+            """CREATE TABLE refs (
+                   id INTEGER PRIMARY KEY, person TEXT NOT NULL, photo_id INTEGER NOT NULL,
+                   engine TEXT NOT NULL DEFAULT '', vector BLOB NOT NULL, UNIQUE(photo_id, engine)
+               )"""
+        )
+        _lconn.execute(
+            "INSERT INTO refs (person, photo_id, engine, vector) VALUES ('Anna', 5, ?, ?)",
+            (backend.name, np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()),
+        )
+        _migrate(_lconn)
+        _lcols = {row[1] for row in _lconn.execute("PRAGMA table_info(refs)")}
+        try:
+            _lconn.execute("UPDATE refs SET thumb = ?, quality_measured = 1 WHERE person = 'Anna'", (b"jpeg",))
+            _lthumb = best_face_thumb(_lconn, backend.name, "Anna")
+        except sqlite3.Error:
+            _lthumb = None
+        check_that(
+            {"thumb", "quality_measured", "face_key"} <= _lcols
+            and _lthumb == b"jpeg"
+            and _lconn.execute("SELECT COUNT(*) FROM refs").fetchone()[0] == 1,
+            "migration: an old database is rebuilt with every current column, and works straight away",
+        )
+
     # Retired names: examples under a merged-away spelling are refiled under the
     # current one, and those under a removed name are dropped.
     class _RetiredApi:
@@ -6203,6 +6376,68 @@ def selftest():
             (backend.name,),
         ).fetchone()[0]
         check_that(left == 0, "learn: removing confirmed truth deletes the photo's stale references")
+
+        # A photo that could not be downloaded is studied on the next run, and
+        # the correction it carried lands - instead of the old name staying.
+        class FlakyLearnApi(LearnApi):
+            def __init__(self, photo, failures):
+                super().__init__(photo)
+                self.failures = failures
+
+            def get(self, path, **params):
+                if path != "/confirmed":
+                    raise RuntimeError(f"unexpected learn path {path}")
+                self.get_params.append(params)
+                after = (str(params.get("after") or ""), int(params.get("after_id") or 0))
+                mine = (str(self.photo["modified"]), int(self.photo["id"]))
+                return {"photos": [self.photo] if mine > after else []}
+
+            def image(self, _url):
+                if self.failures > 0:
+                    self.failures -= 1
+                    raise requests.ConnectionError("selftest: the host dropped the connection")
+                return encoded.getvalue()
+
+        learn(LearnApi({
+            "id": 502, "modified": "2026-08-09 01:00:00", "url": "selftest://502",
+            "people": [], "labels": [{"name": "Anna", "box": [10, 10, 20, 20]}],
+        }), conn, backend, verbose=False)
+        mark_before = state_get(conn, state_key(backend.name, "learned_modified"), "")
+        fix = {
+            "id": 502, "modified": "2026-08-09 02:00:00", "url": "selftest://502",
+            "people": [], "labels": [{"name": "Berta", "box": [10, 10, 20, 20]}],
+        }
+        flaky = FlakyLearnApi(fix, failures=1)
+        learn(flaky, conn, backend, verbose=False)
+        after_fail = conn.execute(
+            "SELECT person FROM refs WHERE photo_id = 502 AND engine = ?", (backend.name,)
+        ).fetchall()
+        mark_held = state_get(conn, state_key(backend.name, "learned_modified"), "")
+        learn(flaky, conn, backend, verbose=False)
+        after_retry = conn.execute(
+            "SELECT person FROM refs WHERE photo_id = 502 AND engine = ?", (backend.name,)
+        ).fetchall()
+        check_that(
+            after_fail == [("Anna",)] and mark_held == mark_before
+            and after_retry == [("Berta",)]
+            and state_get(conn, state_key(backend.name, "learned_modified"), "") == fix["modified"]
+            and json.loads(state_get(conn, state_key(backend.name, "learn_retry"), "{}")) == {},
+            "learn: a photo that could not be downloaded holds the watermark and is studied next run",
+        )
+        # One the host never serves is not waited for indefinitely.
+        dead = FlakyLearnApi({
+            "id": 503, "modified": "2026-08-09 03:00:00", "url": "selftest://503",
+            "people": [], "labels": [{"name": "Cora", "box": [10, 10, 20, 20]}],
+        }, failures=99)
+        for _ in range(LEARN_RETRY_RUNS):
+            learn(dead, conn, backend, verbose=False)
+        still_held = state_get(conn, state_key(backend.name, "learned_modified"), "") == fix["modified"]
+        learn(dead, conn, backend, verbose=False)
+        check_that(
+            still_held
+            and state_get(conn, state_key(backend.name, "learned_modified"), "") == "2026-08-09 03:00:00",
+            "learn: a photo that never downloads is given up on after a few runs, not waited for indefinitely",
+        )
         conn.close()
 
         # migration: a pre-engine database is stamped as dlib, not reinterpreted.
@@ -6484,6 +6719,15 @@ def selftest():
                 and '<option value="active">Active learning</option>' in page.text
                 and "setupViewControls()" in page.text,
                 "label UI: side controls and the optional active-learning filter are present",
+            )
+            # Source shape only, and said to be: the page's behaviour cannot be
+            # driven from here without a browser. This pins that a save compares
+            # the edit count it sent with, and that a thumbnail saves before it
+            # opens - not that either works.
+            check_that(
+                "if(editSeq===sentSeq){ dirty=false; }" in page.text
+                and "await saveAndOpen(parseInt(b.getAttribute('data-i'),10)||0);" in page.text,
+                "label UI: a save only clears edits it actually sent, and a thumbnail saves first (source check)",
             )
             cleared = requests.post(
                 base + "/api/save",
