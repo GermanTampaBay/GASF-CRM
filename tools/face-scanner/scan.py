@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.2"
+SCANNER_VERSION = "1.6.3"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -3208,6 +3208,39 @@ def prioritize_active_learning(items, conn, backend, tolerance):
         ranked[0][2]["active_learning"] = True
 
 
+def _label_item_apply_saved(item, labels):
+    """Make a board item say what was just saved for it.
+
+    The board builds each photo's names once, at start-up, and every save
+    REPLACES the photo's labels on the server. Nothing used to write a save
+    back into the item - so going Back to a photo showed its fields as they
+    were at start-up, usually empty, and the next save from there replaced the
+    names already saved with whatever was on screen. Save Anna, come back, add
+    Berta, save: Anna was deleted, and nothing said so.
+
+    The page sends each label's box exactly as the item gave it, so matching is
+    equality, not overlap. Hints stay as they were - they are the matcher's
+    opinion, and a save does not change it.
+    """
+    boxes = [[int(v) for v in b] for b in (item.get("boxes") or [])]
+    prefill = {}
+    for lbl in labels or []:
+        if not isinstance(lbl, dict):
+            continue
+        name = str(lbl.get("name") or "").strip()
+        try:
+            box = [int(v) for v in (lbl.get("box") or [])]
+        except (TypeError, ValueError):
+            continue
+        if not name or box not in boxes:
+            continue
+        prefill.setdefault(str(boxes.index(box)), name)
+    item["prefill"] = prefill
+    item["status"] = _label_item_status(
+        len(boxes), prefill, item.get("hints"), int(item.get("known_threshold") or 0)
+    )
+
+
 def _label_item_status(face_count, prefill, hints, known_threshold):
     """Classify corpus work, counting strict known matches as already resolved."""
     resolved = set()
@@ -4295,6 +4328,11 @@ def local_label(
                 with state["lock"]:
                     state["saved"] += kept
                     saved_total = state["saved"]
+                    # The server has these now, so the board must too - or the
+                    # next save from this photo replaces them with a stale set.
+                    for it in state["items"]:
+                        if int(it.get("id") or 0) == photo:
+                            _label_item_apply_saved(it, labels)
                 return self._write(200, json.dumps({"ok": True, "stored": kept, "saved_total": saved_total}))
 
             if u.path == "/api/ignore":
@@ -6377,6 +6415,9 @@ def selftest():
     label_posts = []
 
     class StubApi:
+        def image(self, _url):
+            return b"\xff\xd8\xff\xe0 not a real picture"
+
         def post(self, path, payload):
             if path != "/label":
                 raise RuntimeError(f"unexpected stub path {path}")
@@ -6456,6 +6497,33 @@ def selftest():
                 and label_posts[-1].get("labels") == [],
                 "label UI: clearing every name persists an empty replacement",
             )
+            # A save is remembered by the board. Without that, coming back to
+            # the photo shows empty fields, and the next save - which replaces
+            # the photo's labels - deletes the name saved the first time.
+            requests.post(
+                base + "/api/save",
+                headers=headers,
+                json={"photo": 7, "labels": [{"name": "Anna", "box": [10, 10, 20, 20]}]},
+                timeout=3,
+            )
+            reopened = requests.get(base + "/api/photo?i=0", headers=headers, timeout=3)
+            gallery = requests.get(base + "/api/meta", headers=headers, timeout=3).json().get("gallery") or [{}]
+            check_that(
+                reopened.status_code == 200
+                and reopened.json().get("prefill") == {"0": "Anna"}
+                and gallery[0].get("status") == "full",
+                "label UI: a saved name is still there when the photo is reopened",
+            )
+            requests.post(
+                base + "/api/save",
+                headers=headers,
+                json={"photo": 7, "labels": []},
+                timeout=3,
+            )
+            check_that(
+                requests.get(base + "/api/photo?i=0", headers=headers, timeout=3).json().get("prefill") == {},
+                "label UI: clearing the names is remembered too",
+            )
             accepted = requests.post(
                 base + "/api/finish",
                 headers=headers,
@@ -6484,7 +6552,8 @@ def selftest():
             )
             label_thread.join(timeout=4.0)
             check_that(
-                not label_thread.is_alive() and label_result.get("saved") == 1,
+                # Two: the reopen check above saved Anna once, and finish saved her again.
+                not label_thread.is_alive() and label_result.get("saved") == 2,
                 "label UI: finish closes server after persisting labels",
             )
     except requests.RequestException as e:
