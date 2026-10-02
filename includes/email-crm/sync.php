@@ -133,8 +133,11 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 		return $inbox->get_error_message();
 	}
 
+	$unsaved = array(); // stamps of messages the database would not take
+
 	foreach ( $inbox['items'] as $m ) {
 		$r = gasf_crm_ingest( $m, 'in', $stream );
+		if ( ! empty( $r['failed'] ) ) { $unsaved[] = (int) $r['stamp']; }
 		if ( ! $r['thread_id'] ) { continue; }
 		$touched[ $r['thread_id'] ] = true;
 
@@ -160,6 +163,7 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 	} else {
 		foreach ( $sent['items'] as $m ) {
 			$r = gasf_crm_ingest( $m, 'out', $stream );
+			if ( ! empty( $r['failed'] ) ) { $unsaved[] = (int) $r['stamp']; }
 			if ( ! $r['thread_id'] ) { continue; }
 			$touched[ $r['thread_id'] ] = true;
 
@@ -187,26 +191,28 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 	 *  - Sent Items failed outright: do not advance at all. Inbound is already
 	 *    ingested and the UNIQUE key makes the re-read free; a cursor past an
 	 *    unread Sent window would leave answered threads marked new forever.
+	 *
+	 * And a fourth, which was missing: a message that was fetched and could not
+	 * be SAVED. "Read completely" is not "stored", and the cursor used to check
+	 * only the first. See gasf_crm_sync_cursor().
 	 */
 	if ( ! $sent_failed ) {
-		$cursor = $started;
-		$hold   = false;
-
+		$folders = array();
 		foreach ( array(
 			array( $inbox, 'receivedDateTime' ),
 			array( $sent, 'sentDateTime' ),
 		) as $pair ) {
 			list( $folder, $field ) = $pair;
-			if ( $folder['complete'] ) { continue; }
-			$items = $folder['items'];
+			$items     = $folder['items'];
 			$last_item = $items ? end( $items ) : null;
-			$ts        = $last_item ? strtotime( (string) ( $last_item[ $field ] ?? '' ) ) : false;
-			if ( $ts ) {
-				$cursor = min( $cursor, $ts );
-			} else {
-				$hold = true; // truncated with nothing usable — keep the old cursor
-			}
+			$folders[] = array(
+				'complete' => ! empty( $folder['complete'] ),
+				'last'     => $last_item ? (int) strtotime( (string) ( $last_item[ $field ] ?? '' ) ) : 0,
+			);
 		}
+
+		$cursor = gasf_crm_sync_cursor( $started, $folders, $unsaved );
+		$hold   = null === $cursor;
 
 		if ( ! $hold ) {
 			// Re-read config immediately before writing: a sibling stream in this
@@ -219,8 +225,18 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
 			if ( 'general' === $stream ) { $cfg['last_sync'] = $cursor; } // legacy display field
 			gasf_crm_save_cfg( $cfg );
 		} else {
-			gasf_crm_log( 'CRM sync: cursor held for ' . $mailbox . ' — truncated read returned no usable timestamp.' );
+			gasf_crm_log( 'CRM sync: cursor held for ' . $mailbox . ' — a truncated read or an unsaved message had no usable timestamp.' );
 		}
+	}
+
+	// Reported as this mailbox's failure, so the health check goes red and the
+	// alert fires if it keeps happening. Mail that is not being stored is mail
+	// that is not reaching the club, whatever Graph said.
+	if ( $unsaved ) {
+		$why = sprintf( '%d message(s) were fetched but could not be saved; they will be asked for again', count( $unsaved ) );
+		$result['errors'][] = $mailbox . ': ' . $why;
+		gasf_crm_log( 'CRM sync: ' . $mailbox . ' — ' . $why );
+		return $why;
 	}
 
 	return '';
@@ -234,7 +250,7 @@ function gasf_crm_sync_stream( $stream, $mailbox, array &$result, array &$fresh,
  * singleton thread that never groups with its own replies.
  */
 function gasf_crm_ingest( array $m, $direction, $stream = 'general' ) {
-	$none = array( 'inserted' => false, 'adopted' => false, 'reopened' => false, 'thread_id' => 0, 'from' => '' );
+	$none = array( 'inserted' => false, 'adopted' => false, 'reopened' => false, 'thread_id' => 0, 'from' => '', 'failed' => false, 'stamp' => 0 );
 
 	$conversation_id = (string) ( $m['conversationId'] ?? '' );
 	$graph_id        = (string) ( $m['id'] ?? '' );
@@ -263,10 +279,14 @@ function gasf_crm_ingest( array $m, $direction, $stream = 'general' ) {
 	);
 
 	// A thread id of 0 means the upsert genuinely failed (see upsert_thread).
-	// Skip the message — the overlap window usually re-reads it next run —
-	// rather than inserting it orphaned under thread 0, where no list query
-	// would ever surface it again.
-	if ( empty( $thread['id'] ) ) { return $none; }
+	// Skip the message rather than inserting it orphaned under thread 0, where
+	// no list query would ever surface it again -- and SAY it failed, with its
+	// stamp, so the cursor stays behind it. This used to rely on the overlap
+	// window to re-read it, and the overlap is fifteen minutes of an hourly
+	// run: a message from earlier in the hour was never fetched again.
+	if ( empty( $thread['id'] ) ) {
+		return array_merge( $none, array( 'failed' => true, 'stamp' => $stamp ? (int) strtotime( $stamp ) : 0 ) );
+	}
 
 	/*
 	 * A reply from somebody the thread was handed off to belongs to the FORK.
@@ -298,7 +318,7 @@ function gasf_crm_ingest( array $m, $direction, $stream = 'general' ) {
 		? gasf_crm_adopt_placeholder( $thread['id'], $graph_id, $sent_at, ! empty( $m['hasAttachments'] ) )
 		: false;
 
-	$inserted = $adopted ? false : gasf_crm_insert_message( array(
+	$outcome = $adopted ? 'adopted' : gasf_crm_insert_message_outcome( array(
 		'thread_id'        => $thread['id'],
 		// The mailbox this was actually read from, passed explicitly rather than
 		// derived later — it is what makes graph_message_id unique, and the sync
@@ -315,6 +335,7 @@ function gasf_crm_ingest( array $m, $direction, $stream = 'general' ) {
 		'has_attachments'  => ! empty( $m['hasAttachments'] ),
 		'sent_by_user_id'  => 0,
 	) );
+	$inserted = 'inserted' === $outcome;
 
 	// File the sender only on a genuinely new message. The overlap window
 	// re-reads the same messages every run, and counting those would inflate the
@@ -329,7 +350,42 @@ function gasf_crm_ingest( array $m, $direction, $stream = 'general' ) {
 		'reopened'  => $thread['reopened'],
 		'thread_id' => $thread['id'],
 		'from'      => $from_name ? $from_name : $from_addr,
+		// The thread exists and the message does not: the database refused it.
+		'failed'    => 'error' === $outcome,
+		'stamp'     => $stamp ? (int) strtotime( $stamp ) : 0,
 	);
+}
+
+/**
+ * Where the sync cursor may move to after one mailbox's run.
+ *
+ * The cursor is the one place mail can be silently lost, so it only ever moves
+ * past what is KNOWN to be stored:
+ *
+ *  - both folders read completely and everything saved: the fetch start;
+ *  - a folder hit the page cap: no further than the last message it fetched;
+ *  - a message could not be saved: no further than that message, so the next
+ *    run asks for it again. One that never saves pins the cursor, the run keeps
+ *    reporting it, and the health alert fires -- which is the point: it used to
+ *    be skipped for good with the health light green.
+ *
+ * @param array $folders       each array( 'complete' => bool, 'last' => int stamp of the last item fetched, 0 if none )
+ * @param int[] $failed_stamps stamps of messages that could not be saved; 0 for one with no usable stamp
+ * @return int|null the new cursor, or null to leave it where it is
+ */
+function gasf_crm_sync_cursor( $started, array $folders, array $failed_stamps = array() ) {
+	$cursor = (int) $started;
+
+	foreach ( $folders as $f ) {
+		if ( ! empty( $f['complete'] ) ) { continue; }
+		if ( empty( $f['last'] ) ) { return null; } // truncated with nothing usable
+		$cursor = min( $cursor, (int) $f['last'] );
+	}
+	foreach ( $failed_stamps as $ts ) {
+		if ( (int) $ts <= 0 ) { return null; } // failed, and no way to say when it was
+		$cursor = min( $cursor, (int) $ts );
+	}
+	return $cursor;
 }
 
 /**

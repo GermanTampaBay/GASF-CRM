@@ -723,6 +723,21 @@ function gasf_crm_upsert_thread( $conversation_id, $subject, $from_name, $from_a
  * spanning it, would be a collision rather than a mislabel.
  */
 function gasf_crm_insert_message( array $m ) {
+	return 'inserted' === gasf_crm_insert_message_outcome( $m );
+}
+
+/**
+ * Insert a message and say which of three things happened.
+ *
+ * INSERT IGNORE answers 0 for "already here" and false for "the database
+ * refused", and a bool cannot tell them apart. The sync treated both as
+ * nothing to do and moved its cursor on -- so a message the database refused
+ * was never asked for again, and the thread it belonged to looked like one
+ * nobody had written to.
+ *
+ * @return string 'inserted', 'duplicate', or 'error'
+ */
+function gasf_crm_insert_message_outcome( array $m ) {
 	global $wpdb;
 
 	$stream = (string) ( $m['stream'] ?? '' );
@@ -742,7 +757,12 @@ function gasf_crm_insert_message( array $m ) {
 		$m['to_addrs'], $m['sent_at'], $m['body_preview'], $m['body_html'],
 		$m['has_attachments'] ? 1 : 0, (int) $m['sent_by_user_id']
 	);
-	return (bool) $wpdb->query( $sql );
+	$n = $wpdb->query( $sql ); // phpcs:ignore WordPress.DB.PreparedSQL -- prepared above.
+	if ( false === $n ) {
+		gasf_crm_log( 'CRM: message insert failed for thread ' . (int) $m['thread_id'] . ' — ' . $wpdb->last_error );
+		return 'error';
+	}
+	return $n ? 'inserted' : 'duplicate';
 }
 
 /**
@@ -1223,7 +1243,10 @@ function gasf_crm_case_state_from_thread_status( $thread_status ) {
 
 function gasf_crm_case_allowed_transition( $from, $to ) {
 	static $map = array(
-		'new'             => array( 'active', 'cancelled' ),
+		// 'resolved' straight from 'new': a thread answered from Outlook, or
+		// settled by the sync, is finished without anybody having opened it
+		// here. Without this its case sat in the unassigned queue for good.
+		'new'             => array( 'active', 'resolved', 'cancelled' ),
 		'active'          => array( 'waiting_external', 'blocked', 'ready_to_publish', 'resolved', 'cancelled', 'active' ),
 		'waiting_external'=> array( 'active', 'blocked', 'cancelled' ),
 		'blocked'         => array( 'active', 'cancelled' ),
@@ -1322,15 +1345,62 @@ function gasf_crm_case_sync_from_thread( $thread_id, $event_type = 'thread_sync'
 	$row         = $wpdb->get_row( $wpdb->prepare( "SELECT state FROM {$cases_table} WHERE id = %d", $case_id ), ARRAY_A );
 	if ( ! $row ) { return false; }
 	$current = (string) $row['state'];
-	$next    = gasf_crm_case_allowed_transition( $current, $target_state ) ? $target_state : $current;
+	$closed  = array( 'resolved', 'cancelled' );
 	$now     = current_time( 'mysql', true );
 
-	$wpdb->update( $cases_table, array(
+	/*
+	 * A closed case whose thread is open again is REOPENED.
+	 *
+	 * Nothing leads out of resolved or cancelled, which is right for an edit
+	 * and wrong for this: a member writing back on an answered thread, or a
+	 * volunteer pressing Restore, put the thread back in the Open list while
+	 * its case stayed closed. A closed case is in no work queue, and the inbox
+	 * filed the thread under "Active" -- so the one thing that needed picking
+	 * up looked as though somebody already had it.
+	 *
+	 * Back to 'new' and to nobody, the same as the thread, whose lock is
+	 * cleared when it reopens. Whoever closed it is on the timeline.
+	 */
+	if ( in_array( $current, $closed, true ) && ! in_array( $target_state, $closed, true ) ) {
+		$was    = $wpdb->get_row( $wpdb->prepare( "SELECT owner_user_id FROM {$cases_table} WHERE id = %d", $case_id ), ARRAY_A );
+		$reopen = array(
+			'state'            => 'new',
+			'closed_at'        => null,
+			'last_activity_at' => $now,
+			'updated_at'       => $now,
+		);
+		// Only when the thread is open and unheld. If somebody has it open --
+		// which is how an old mismatch gets found -- they have just been made
+		// its owner, and that stands.
+		if ( 'new' === $target_state ) {
+			$reopen['owner_user_id']    = null;
+			$reopen['owner_claimed_at'] = null;
+		}
+		$wpdb->update( $cases_table, $reopen, array( 'id' => $case_id ) );
+		gasf_crm_case_log_event( $case_id, 'case.reopened', array(
+			'thread_id'           => (int) $thread_id,
+			'from_state'          => $current,
+			'reason'              => (string) $event_type,
+			'prior_owner_user_id' => $was && $was['owner_user_id'] ? (int) $was['owner_user_id'] : null,
+		), 'system', null );
+		$current = 'new'; // and on through the ordinary transition, new -> whatever the thread says
+	}
+
+	$next = gasf_crm_case_allowed_transition( $current, $target_state ) ? $target_state : $current;
+
+	// closed_at is when it CLOSED. This used to be re-stamped on every sync of
+	// an already-closed case, so it read as "last touched".
+	$data = array(
 		'state'            => $next,
 		'last_activity_at' => $now,
 		'updated_at'       => $now,
-		'closed_at'        => in_array( $next, array( 'resolved', 'cancelled' ), true ) ? $now : null,
-	), array( 'id' => $case_id ) );
+	);
+	if ( ! in_array( $next, $closed, true ) ) {
+		$data['closed_at'] = null;
+	} elseif ( $next !== $current ) {
+		$data['closed_at'] = $now;
+	}
+	$wpdb->update( $cases_table, $data, array( 'id' => $case_id ) );
 
 	gasf_crm_case_log_event( $case_id, (string) $event_type, array(
 		'thread_id'     => (int) $thread_id,

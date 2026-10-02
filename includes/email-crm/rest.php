@@ -50,6 +50,26 @@ function gasf_crm_rest_require_case_workflow() {
 	return new WP_Error( 'gasf_crm_case_workflow_disabled', 'Case workflow is disabled.', array( 'status' => 404 ) );
 }
 
+/**
+ * One case event, in the shape the timeline draws.
+ *
+ * A case event is stored as event_type / actor_type / actor_user_id /
+ * payload_json. This used to read actor / action / detail_json -- the columns
+ * of the THREAD event table -- so every row arrived with nothing in it and the
+ * timeline said "update · system" for a claim, a takeover and a state change
+ * alike, with a PHP warning per missing key behind each one.
+ */
+function gasf_crm_rest_case_event( array $e ) {
+	$uid   = (int) ( $e['actor_user_id'] ?? 0 );
+	$actor = $uid > 0 ? (string) gasf_crm_display_name( $uid ) : '';
+	return array(
+		'actor'  => '' !== $actor ? $actor : (string) ( $e['actor_type'] ?? 'system' ),
+		'action' => (string) ( $e['event_type'] ?? '' ),
+		'detail' => (string) ( $e['payload_json'] ?? '' ),
+		'at'     => (string) ( $e['created_at'] ?? '' ),
+	);
+}
+
 function gasf_crm_op_id_from_request( WP_REST_Request $req ) {
 	$raw = (string) $req->get_param( 'op_id' );
 	if ( '' === $raw ) {
@@ -206,14 +226,7 @@ add_action( 'rest_api_init', function () {
 							'resolved_at' => (string) $t['resolved_at'],
 						);
 					}, $tasks ),
-					'events' => array_map( function ( $e ) {
-						return array(
-							'actor' => (string) $e['actor'],
-							'action' => (string) $e['action'],
-							'detail' => (string) $e['detail_json'],
-							'at' => (string) $e['created_at'],
-						);
-					}, $cevs ),
+					'events' => array_map( 'gasf_crm_rest_case_event', $cevs ),
 				),
 				// Who "Reply" actually writes to, said out loud. The screen must
 				// never make a volunteer infer this: on a handed-off thread the

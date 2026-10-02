@@ -47,7 +47,26 @@ final class GASF_CRM_Selftest {
 	/** Options snapshotted before a test altered them. */
 	private $saved_options = array();
 
+	/** Upload-relative paths of library fixtures, without extension - see cleanup(). */
+	private $made_stems = array();
+
+	/** The newest term id when the run began; anything a test strands is above it. */
+	private $term_floor = null;
+
+	/** Keys of the retired-names option when the run began, or null if unread. */
+	private $retired_before = null;
+
 	public function __construct() {
+		global $wpdb;
+		$this->term_floor = (int) $wpdb->get_var( "SELECT MAX(term_id) FROM {$wpdb->terms}" );
+
+		// The retired names there were before ANY test ran. Several tests retire
+		// names and only one snapshots the option - after the others have already
+		// written, so "restoring" it put their selftest names back, every run.
+		if ( defined( 'GASF_CRM_PERSON_RETIRED_OPTION' ) ) {
+			$this->retired_before = array_keys( (array) get_option( GASF_CRM_PERSON_RETIRED_OPTION, array() ) );
+		}
+
 		$GLOBALS['gasf_crm_mail_bypass'] = true;
 		register_shutdown_function( array( $this, 'cleanup' ) );
 	}
@@ -69,18 +88,64 @@ final class GASF_CRM_Selftest {
 	}
 
 	public function cleanup() {
+		global $wpdb;
+
 		foreach ( $this->made as $id ) {
 			if ( get_post( $id ) ) { wp_delete_attachment( $id, true ); }
 		}
+
+		/*
+		 * The WebP twins of this run's fixtures.
+		 *
+		 * The host's image optimiser answers a new image with a second
+		 * attachment - same name, .webp - which is in nobody's list. Every run
+		 * since it was switched on left one per library fixture in the media
+		 * library, and 639 had piled up before anybody looked. Found by exact
+		 * path, from stems this run wrote down: nothing is matched by pattern,
+		 * so nothing from an earlier run or a real upload can be caught by it.
+		 */
+		foreach ( $this->made_stems as $stem ) {
+			$twins = $wpdb->get_col( $wpdb->prepare(
+				"SELECT post_id FROM {$wpdb->postmeta} WHERE meta_key = '_wp_attached_file' AND meta_value = %s",
+				$stem . '.webp'
+			) );
+			foreach ( $twins as $tid ) { wp_delete_attachment( (int) $tid, true ); }
+		}
+
 		foreach ( $this->made_people as $term_id ) {
 			if ( term_exists( $term_id, 'gasf_photo_person' ) ) {
 				wp_delete_term( $term_id, 'gasf_photo_person' );
 			}
 		}
+
+		// Catalogue terms this run created and no test handed over: newer than
+		// the newest term there was when the run began, and named as a fixture.
+		if ( null !== $this->term_floor ) {
+			$stray = $wpdb->get_results( $wpdb->prepare(
+				"SELECT t.term_id, tt.taxonomy FROM {$wpdb->terms} t
+				   JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id
+				  WHERE t.term_id > %d AND t.name LIKE %s AND tt.taxonomy LIKE %s",
+				(int) $this->term_floor, 'Selftest %', 'gasf\_photo\_%'
+			) );
+			foreach ( $stray as $s ) { wp_delete_term( (int) $s->term_id, (string) $s->taxonomy ); }
+		}
 		foreach ( $this->saved_options as $name => $val ) {
 			if ( null === $val ) { delete_option( $name ); }
 			else { update_option( $name, $val, false ); }
 		}
+
+		// Selftest names this run retired. Only those: a name a volunteer retired
+		// while the suite was running stays retired, and so does everything that
+		// was there before it started.
+		if ( null !== $this->retired_before ) {
+			$now  = (array) get_option( GASF_CRM_PERSON_RETIRED_OPTION, array() );
+			$keep = $now;
+			foreach ( array_keys( $now ) as $k ) {
+				if ( 0 === strpos( (string) $k, 'selftest ' ) && ! in_array( $k, $this->retired_before, true ) ) { unset( $keep[ $k ] ); }
+			}
+			if ( count( $keep ) !== count( $now ) ) { update_option( GASF_CRM_PERSON_RETIRED_OPTION, $keep, false ); }
+		}
+
 		unset( $GLOBALS['gasf_crm_mail_bypass'] );
 	}
 
@@ -128,11 +193,20 @@ final class GASF_CRM_Selftest {
 
 	/** A synthetic photo in the LIBRARY (published area, confirmed). */
 	private function library_photo( $slug ) {
-		$up = wp_upload_bits( $slug . '-' . wp_rand() . '.jpg', null, $this->jpeg_bytes() );
+		// Written straight to disk, not through wp_upload_bits(): that fires
+		// wp_handle_upload, and the host's image optimiser answers it by sending
+		// the picture to its conversion service and filing a WebP twin.
+		$dir  = wp_upload_dir();
+		$name = $slug . '-' . wp_rand() . '.jpg';
+		$up   = array( 'file' => trailingslashit( $dir['path'] ) . $name );
+		file_put_contents( $up['file'], $this->jpeg_bytes() );
+		$rel = ltrim( trailingslashit( ltrim( (string) $dir['subdir'], '/' ) ) . $name, '/' );
+		$this->made_stems[] = substr( $rel, 0, -4 );
+
 		$id = wp_insert_attachment( array(
 			'post_title' => $slug, 'post_mime_type' => 'image/jpeg', 'post_status' => 'inherit',
 		), $up['file'] );
-		update_post_meta( $id, '_wp_attached_file', str_replace( trailingslashit( wp_upload_dir()['basedir'] ), '', $up['file'] ) );
+		update_post_meta( $id, '_wp_attached_file', $rel );
 		update_post_meta( $id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
 		$this->made[] = $id;
 		return $id;
@@ -3726,6 +3800,199 @@ final class GASF_CRM_Selftest {
 				$wpdb->query( "DELETE FROM {$C} WHERE id IN ({$cin})" );      // phpcs:ignore WordPress.DB
 			}
 			$wpdb->query( "DELETE FROM {$T} WHERE id IN ({$in})" ); // phpcs:ignore WordPress.DB
+		}
+	}
+
+	/**
+	 * The sync cursor never moves past mail that was not stored.
+	 *
+	 * It used to check that each folder was READ completely and nothing else.
+	 * A message the database refused was skipped with the cursor moved on, the
+	 * health light green, and only fifteen minutes of each hour re-read. The
+	 * arithmetic is pinned as a pure function, and the one fact it depends on -
+	 * that a refused insert is distinguishable from a duplicate - on the table.
+	 */
+	public function test_sync_cursor_waits_for_unsaved_mail() {
+		global $wpdb;
+
+		$done = array( 'complete' => true, 'last' => 900 );
+		$this->ok( 1000 === gasf_crm_sync_cursor( 1000, array( $done, $done ) ),
+			'sync cursor: everything read and saved moves it to the start of the run' );
+		$this->ok( 700 === gasf_crm_sync_cursor( 1000, array( array( 'complete' => false, 'last' => 700 ), $done ) ),
+			'sync cursor: a folder cut short moves it only as far as the last message fetched' );
+		$this->ok( null === gasf_crm_sync_cursor( 1000, array( array( 'complete' => false, 'last' => 0 ), $done ) ),
+			'sync cursor: a folder cut short with nothing usable leaves it where it is' );
+		$this->ok( 800 === gasf_crm_sync_cursor( 1000, array( $done, $done ), array( 800 ) ),
+			'sync cursor: a message that could not be saved holds it at that message' );
+		$this->ok( 600 === gasf_crm_sync_cursor( 1000, array( $done, $done ), array( 800, 600 ) ),
+			'sync cursor: at the earliest of them when there are several' );
+		$this->ok( null === gasf_crm_sync_cursor( 1000, array( $done, $done ), array( 0 ) ),
+			'sync cursor: and one with no stamp at all leaves it where it is' );
+
+		$T   = gasf_crm_table( 'threads' );
+		$M   = gasf_crm_table( 'messages' );
+		$t   = gasf_crm_upsert_thread( 'st-sync-' . wp_rand(), 'Selftest sync', 'A Member', 'st-sync@example.com', current_time( 'mysql', true ), true, 'general' );
+		$tid = (int) $t['id'];
+		if ( ! $this->ok( $tid > 0, 'sync cursor: the fixture thread exists' ) ) { return; }
+
+		$msg = array(
+			'thread_id' => $tid, 'stream' => 'general', 'graph_message_id' => 'st-sync-msg-' . wp_rand(),
+			'direction' => 'in', 'from_name' => 'A Member', 'from_addr' => 'st-sync@example.com',
+			'to_addrs' => '[]', 'sent_at' => current_time( 'mysql', true ),
+			'body_preview' => 'hello', 'body_html' => '<p>hello</p>', 'has_attachments' => 0, 'sent_by_user_id' => 0,
+		);
+		$break = function ( $sql ) use ( $M ) {
+			return 0 === strpos( ltrim( $sql ), 'INSERT IGNORE INTO ' . $M ) ? str_replace( $M, $M . '_selftest_missing', $sql ) : $sql;
+		};
+
+		try {
+			$this->ok( 'inserted' === gasf_crm_insert_message_outcome( $msg ), 'sync cursor: a new message is reported inserted' );
+			$this->ok( 'duplicate' === gasf_crm_insert_message_outcome( $msg ), 'sync cursor: the same message again is a duplicate' );
+
+			$msg['graph_message_id'] = 'st-sync-refused-' . wp_rand();
+			$quiet = $wpdb->suppress_errors( true );
+			add_filter( 'query', $break );
+			try {
+				$refused = gasf_crm_insert_message_outcome( $msg );
+			} finally {
+				remove_filter( 'query', $break );
+				$wpdb->suppress_errors( $quiet );
+			}
+			$this->ok( 'error' === $refused, 'sync cursor: a message the database refuses is an error, not a duplicate' );
+			$this->ok( true === gasf_crm_insert_message( $msg ) && false === gasf_crm_insert_message( $msg ),
+				'sync cursor: asked for again, the refused message saves - once' );
+		} finally {
+			$case = gasf_crm_case_by_thread( $tid );
+			if ( $case ) {
+				$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . gasf_crm_table( 'case_events' ) . ' WHERE case_id = %d', (int) $case['id'] ) );
+				$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . gasf_crm_table( 'cases' ) . ' WHERE id = %d', (int) $case['id'] ) );
+			}
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$M} WHERE thread_id = %d", $tid ) );
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$T} WHERE id = %d", $tid ) );
+		}
+	}
+
+	/**
+	 * A thread that comes back to the Open list brings its case with it, and the
+	 * case timeline says what happened and who did it.
+	 *
+	 * Nothing leads out of a closed case, so a member writing back on an answered
+	 * thread - or a volunteer pressing Restore - reopened the thread and left the
+	 * case resolved: in no work queue, and filed by the inbox as already active.
+	 */
+	public function test_reopened_thread_reopens_its_case() {
+		global $wpdb;
+		$T = gasf_crm_table( 'threads' );
+		$C = gasf_crm_table( 'cases' );
+		$E = gasf_crm_table( 'case_events' );
+
+		$conv = 'st-reopen-' . wp_rand();
+		$t    = gasf_crm_upsert_thread( $conv, 'Selftest reopen', 'A Member', 'st-reopen@example.com', current_time( 'mysql', true ), true, 'general' );
+		$tid  = (int) $t['id'];
+		if ( ! $this->ok( $tid > 0, 'reopen: the fixture thread exists' ) ) { return; }
+		$me = get_current_user_id();
+
+		try {
+			// Answered without ever being opened here - a reply from Outlook. The
+			// case goes straight from new to resolved, which nothing used to allow:
+			// it stayed "new" and unassigned behind a thread that was finished.
+			gasf_crm_case_set_owner_by_thread( $tid, $me, 'case-owner:claim', $me );
+			gasf_crm_set_status( $tid, 'addressed' );
+			$case = gasf_crm_case_by_thread( $tid );
+			$this->ok( $case && 'resolved' === $case['state'] && ! empty( $case['closed_at'] ),
+				'reopen: answering a thread resolves its case and stamps when, even one nobody opened first' );
+
+			// closed_at is when it closed, not when it was last looked at.
+			$wpdb->update( $C, array( 'closed_at' => '2020-01-01 00:00:00' ), array( 'id' => (int) $case['id'] ) );
+			gasf_crm_case_sync_from_thread( $tid, 'selftest_resync' );
+			$case = gasf_crm_case_by_thread( $tid );
+			$this->ok( '2020-01-01 00:00:00' === (string) $case['closed_at'],
+				'reopen: syncing a case that is already closed does not move its closing time' );
+
+			// The member writes back.
+			$r    = gasf_crm_upsert_thread( $conv, 'Selftest reopen', 'A Member', 'st-reopen@example.com', current_time( 'mysql', true ), true, 'general' );
+			$case = gasf_crm_case_by_thread( $tid );
+			$this->ok( ! empty( $r['reopened'] ) && 'new' === gasf_crm_get_thread( $tid )['status'], 'reopen: new mail reopens the thread' );
+			$this->ok( $case && 'new' === $case['state'] && empty( $case['closed_at'] ),
+				'reopen: and its case comes back as new, no longer closed' );
+			$this->ok( $case && empty( $case['owner_user_id'] ), 'reopen: and unassigned, so it shows as needing somebody' );
+
+			$shown = array_map( 'gasf_crm_rest_case_event', gasf_crm_case_events( (int) $case['id'], 24 ) );
+			$this->ok( in_array( 'case.reopened', wp_list_pluck( $shown, 'action' ), true ),
+				'reopen: the timeline names the reopening as what it was' );
+
+			// Ignored, then Restore.
+			gasf_crm_set_status( $tid, 'ignored' );
+			$this->ok( 'cancelled' === gasf_crm_case_by_thread( $tid )['state'], 'reopen: ignoring a thread cancels its case' );
+			gasf_crm_set_status( $tid, 'new' );
+			$this->ok( 'new' === gasf_crm_case_by_thread( $tid )['state'], 'reopen: Restore brings a cancelled case back too' );
+
+			// The timeline's shape: who, what, and the detail the page reads.
+			gasf_crm_case_log_event( (int) $case['id'], 'case.state_set', array( 'via' => 'selftest', 'state' => 'blocked' ), 'user', $me );
+			$mine = null;
+			foreach ( gasf_crm_case_events( (int) $case['id'], 24 ) as $e ) {
+				$row = gasf_crm_rest_case_event( $e );
+				if ( 'case.state_set' === $row['action'] ) { $mine = $row; break; }
+			}
+			$this->ok( is_array( $mine ) && gasf_crm_display_name( $me ) === $mine['actor'],
+				'case timeline: an event names the person who did it' );
+			$this->ok( is_array( $mine ) && 'selftest' === ( json_decode( $mine['detail'], true )['via'] ?? '' ),
+				'case timeline: and carries its detail' );
+			$sys = gasf_crm_rest_case_event( array( 'event_type' => 'thread_sync', 'actor_type' => 'system', 'actor_user_id' => null, 'payload_json' => '{}', 'created_at' => 'x' ) );
+			$this->ok( 'system' === $sys['actor'] && 'thread_sync' === $sys['action'], 'case timeline: a system event says so' );
+		} finally {
+			$case = gasf_crm_case_by_thread( $tid );
+			if ( $case ) {
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$E} WHERE case_id = %d", (int) $case['id'] ) );
+				$wpdb->query( $wpdb->prepare( "DELETE FROM {$C} WHERE id = %d", (int) $case['id'] ) );
+			}
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$T} WHERE id = %d", $tid ) );
+		}
+	}
+
+	/** The schema check passes on this database with the case tables in it. */
+	public function test_schema_check_covers_cases() {
+		$this->ok( array() === gasf_crm_schema_gaps(),
+			'schema: nothing this version needs is missing, the three case tables and the one-case-per-thread key included' );
+	}
+
+	/**
+	 * An edited photo is not backed up until its untouched original is.
+	 *
+	 * Pinned on the question the backup asks before each photo, with no upload:
+	 * a record that matches in every other way but has no original must still
+	 * say there is work to do - and must NOT say so when there is no original
+	 * on disk to send, or the photo would fail every run for nothing.
+	 */
+	public function test_backup_asks_for_a_missing_original() {
+		$id   = $this->library_photo( 'st-backup-orig' );
+		$file = get_attached_file( $id );
+		$side = gasf_crm_photo_edit_sidecar( $file );
+
+		update_post_meta( $id, '_gasf_photo_rev', 3 );
+		$state = array(
+			'at' => gmdate( 'c' ), 'rev' => 3, 'md5' => md5_file( $file ),
+			'name' => gasf_crm_backup_name( $id, $file ), 'folder' => 'selftest',
+			'items' => array( 'img' => 'selftest-img', 'json' => 'selftest-json' ),
+		);
+		update_post_meta( $id, '_gasf_photo_backup', $state );
+
+		try {
+			$this->ok( '' === gasf_crm_backup_needed( $id ), 'backup: an unedited photo with a matching record is current' );
+
+			update_post_meta( $id, '_gasf_photo_edit', array( 'selftest' => 1 ) );
+			$this->ok( '' === gasf_crm_backup_needed( $id ),
+				'backup: an edited photo whose original is not on disk is not held up for it' );
+
+			file_put_contents( $side, $this->jpeg_bytes() );
+			$this->ok( '' !== gasf_crm_backup_needed( $id ),
+				'backup: an edited photo whose original never reached the archive still needs backing up' );
+
+			$state['items']['orig'] = 'selftest-orig';
+			update_post_meta( $id, '_gasf_photo_backup', $state );
+			$this->ok( '' === gasf_crm_backup_needed( $id ), 'backup: and is current once the original is recorded' );
+		} finally {
+			if ( is_file( $side ) ) { unlink( $side ); }
 		}
 	}
 

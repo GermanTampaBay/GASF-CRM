@@ -437,6 +437,10 @@ if ( true ) {
 			'threads', 'messages', 'contacts', 'events', 'attachments',
 			'photo_submissions', 'photo_items', 'photo_invite_items', 'photo_invites', 'auth_log',
 			'vendor_apps',
+			// The case workflow's three. Created by the same upgrade and left out
+			// of this list, so a failed CREATE would have been stamped complete:
+			// every case_ensure returning 0, every event dropped, nothing retried.
+			'cases', 'case_tasks', 'case_events',
 		);
 		foreach ( $tables as $t ) {
 			$name = gasf_crm_table( $t );
@@ -452,6 +456,8 @@ if ( true ) {
 			'threads'  => 'conv_stream',
 			'contacts' => 'stream_email',
 			'messages' => 'stream_message',
+			// One case per thread. Without it two syncs racing make two.
+			'cases'    => 'thread_id',
 		) as $t => $index ) {
 			$name = gasf_crm_table( $t );
 			if ( ! in_array( 'table ' . $t . ' is missing', $gaps, true )

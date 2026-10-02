@@ -369,8 +369,29 @@ function gasf_crm_backup_needed( $id ) {
 		if ( md5_file( $file ) !== (string) ( $state['md5'] ?? '' ) ) {
 			return 'file content changed';
 		}
+		// An edited photo is not backed up until its ORIGINAL is. The record
+		// used to be written whether or not that upload worked, and nothing
+		// here looked at it - so one failed upload left the archive without
+		// the untouched copy for good, and every later pass called it current.
+		// Only when the original is there to send: see the name check above.
+		if ( '' !== gasf_crm_backup_original_path( $id, $file ) && empty( $state['items']['orig'] ) ) {
+			return 'the untouched original is not in the archive yet';
+		}
 	}
 	return '';
+}
+
+/**
+ * The untouched original an edited photo owes the archive, or '' if none.
+ *
+ * None means either the photo has never been edited or its original is not on
+ * disk - and a file that is not there cannot be owed, or it would fail the
+ * backup on every run for something no retry can fix.
+ */
+function gasf_crm_backup_original_path( $id, $file ) {
+	if ( ! get_post_meta( $id, '_gasf_photo_edit', true ) || ! function_exists( 'gasf_crm_photo_edit_sidecar' ) ) { return ''; }
+	$op = gasf_crm_photo_edit_sidecar( $file );
+	return is_file( $op ) ? $op : '';
 }
 
 /**
@@ -425,12 +446,15 @@ function gasf_crm_backup_one( $id ) {
 
 	// The untouched original rides along when the photo has been edited.
 	$orig_item = '';
-	if ( get_post_meta( $id, '_gasf_photo_edit', true ) && function_exists( 'gasf_crm_photo_edit_sidecar' ) ) {
-		$op = gasf_crm_photo_edit_sidecar( $file );
-		if ( is_file( $op ) ) {
-			$oname = preg_replace( '~(\.[a-z0-9]+)$~i', '-original$1', $name );
-			$or    = gasf_crm_backup_put( $folder, $oname, $op );
-			if ( ! is_wp_error( $or ) ) { $orig_item = (string) ( $or['id'] ?? '' ); }
+	$orig_fail = null;
+	$op        = gasf_crm_backup_original_path( $id, $file );
+	if ( '' !== $op ) {
+		$oname = preg_replace( '~(\.[a-z0-9]+)$~i', '-original$1', $name );
+		$or    = gasf_crm_backup_put( $folder, $oname, $op );
+		if ( is_wp_error( $or ) ) {
+			$orig_fail = $or;
+		} else {
+			$orig_item = (string) ( $or['id'] ?? '' );
 		}
 	}
 
@@ -454,6 +478,16 @@ function gasf_crm_backup_one( $id ) {
 	$index        = (array) get_option( 'gasf_crm_backup_index', array() );
 	$index[ $id ] = array( 'name' => $name, 'folder' => $folder, 'items' => $new_state['items'] );
 	update_option( 'gasf_crm_backup_index', $index, false );
+
+	// Recorded first, reported second. The image and its sidecar ARE up, and
+	// after a rename their old copies are gone, so the record has to name the
+	// new ones. But the photo is not done: with no 'orig' in that record
+	// gasf_crm_backup_needed() asks for it again, and this pass counts a failure.
+	if ( $orig_fail ) {
+		return new WP_Error( 'gasf_crm_backup_orig', sprintf(
+			'#%d is up but its untouched original is not: %s', $id, $orig_fail->get_error_message()
+		) );
+	}
 
 	return $new_state;
 }
