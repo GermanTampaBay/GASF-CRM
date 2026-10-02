@@ -2033,9 +2033,20 @@ function gasf_crm_render_inbox_script() {
 			};
 		}
 
+		/* One operation id per REPLY, not per click.
+		   The id is what lets the server recognise a reply it has already sent.
+		   A fresh one on every press of Send meant it never could: if the answer
+		   to a successful send was lost on the way back, pressing Send again was
+		   a new operation, refused because the thread was by then answered. The
+		   same words to the same thread are the same reply and keep their id;
+		   change a word, or an attachment, and it is a new one. */
+		var replyOpId = '', replyOpFor = null;
+
 		if(send){
 			send.onclick = function(){
 				if(!edText(ta)){ out.innerHTML = '<div class="note err">Write something first.</div>'; return; }
+				var replySig = ta.innerHTML + '|' + attached.map(function(a){ return a.id; }).join(',');
+				if (replySig !== replyOpFor) { replyOpFor = replySig; replyOpId = nextOpId('reply-' + id); }
 				busy(true, send);
 				api('/threads/' + id + '/reply', {method:'POST', body: JSON.stringify({
 					body: ta.innerHTML,
@@ -2044,7 +2055,7 @@ function gasf_crm_render_inbox_script() {
 					// if it no longer matches, so a thread that moved on between
 					// reading and pressing send cannot redirect the message.
 					reply_to: (thread && thread.reply_to && thread.reply_to.addr) || '',
-					op_id: nextOpId('reply-' + id)
+					op_id: replyOpId
 				})})
 					.then(function(){ open(id); })
 					.catch(function(e){ fail(e, send); });

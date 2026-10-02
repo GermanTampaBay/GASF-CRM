@@ -4239,6 +4239,64 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * A reply that already went is answered as sent, and a thread that is already
+	 * answered says so.
+	 *
+	 * Sending a reply marks the thread answered, and an answered thread cannot be
+	 * claimed. So the same reply arriving twice - the first answer lost on the way
+	 * back - was refused at the claim, with "Someone else is replying to this
+	 * thread", before the replay guard was asked anything. Neither path reaches
+	 * the mail system: both return before the send.
+	 */
+	public function test_reply_replay_is_recognised() {
+		global $wpdb;
+		$T = gasf_crm_table( 'threads' );
+
+		$t   = gasf_crm_upsert_thread( 'st-replay-' . wp_rand(), 'Selftest replay', 'A Member', 'st-replay@example.com', current_time( 'mysql', true ), true, 'general' );
+		$tid = (int) $t['id'];
+		if ( ! $this->ok( $tid > 0, 'reply replay: the fixture thread exists' ) ) { return; }
+
+		$req = new WP_REST_Request( 'POST', '' );
+		$req->set_param( 'id', $tid );
+		$req->set_param( 'body', '<p>Selftest reply</p>' );
+		$req->set_param( 'op_id', 'st-reply-' . wp_rand() );
+		$key = gasf_crm_op_key( 'thread-reply:' . $tid, $req->get_param( 'op_id' ) );
+
+		try {
+			$this->ok( false === gasf_crm_op_is_done( 'thread-reply:' . $tid, $req ), 'reply replay: a reply that has not been sent is not reported as done' );
+
+			// As the thread stands after a successful send: answered, and the
+			// operation recorded as finished.
+			gasf_crm_set_status( $tid, 'addressed' );
+			set_transient( $key, 'done', 60 );
+
+			$again = gasf_crm_rest_reply( $req );
+			$this->ok( is_array( $again ) && ! empty( $again['ok'] ) && ! empty( $again['duplicate'] ),
+				'reply replay: the same reply arriving again is told it was already sent' );
+
+			// A DIFFERENT reply to the answered thread is refused, in words that are true.
+			$req->set_param( 'op_id', 'st-reply-other-' . wp_rand() );
+			$other = gasf_crm_rest_reply( $req );
+			$this->ok(
+				is_wp_error( $other ) && 'gasf_crm_answered' === $other->get_error_code()
+				&& false !== strpos( $other->get_error_message(), 'already been answered' )
+				&& false === strpos( $other->get_error_message(), 'is replying' ),
+				'reply replay: a new reply to an answered thread is told it is answered, not that somebody is replying'
+			);
+			$this->ok( 'addressed' === gasf_crm_get_thread( $tid )['status'], 'reply replay: and the thread is left as it was' );
+		} finally {
+			delete_transient( $key );
+			$case = gasf_crm_case_by_thread( $tid );
+			if ( $case ) {
+				$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . gasf_crm_table( 'case_events' ) . ' WHERE case_id = %d', (int) $case['id'] ) );
+				$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . gasf_crm_table( 'cases' ) . ' WHERE id = %d', (int) $case['id'] ) );
+			}
+			$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . gasf_crm_table( 'events' ) . ' WHERE thread_id = %d', $tid ) );
+			$wpdb->query( $wpdb->prepare( "DELETE FROM {$T} WHERE id = %d", $tid ) );
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

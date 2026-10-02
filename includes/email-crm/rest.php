@@ -131,6 +131,20 @@ function gasf_crm_op_start( $scope, WP_REST_Request $req, $running_ttl = 900, $l
 	}
 }
 
+/**
+ * Has this exact operation already finished? Asks; claims nothing.
+ *
+ * For a handler whose preconditions stop being true BECAUSE it succeeded. A
+ * reply marks its thread answered, and an answered thread cannot be claimed -
+ * so the same reply arriving a second time, after the first answer was lost on
+ * the way back, was refused at the claim before the replay guard was ever
+ * consulted. Asked first, it can be told the truth: that one went.
+ */
+function gasf_crm_op_is_done( $scope, WP_REST_Request $req ) {
+	$op_id = gasf_crm_op_id_from_request( $req );
+	return '' !== $op_id && 'done' === get_transient( gasf_crm_op_key( $scope, $op_id ) );
+}
+
 function gasf_crm_op_finish( array $token, $ok = true, $done_ttl = 3600 ) {
 	if ( empty( $token['enabled'] ) || empty( $token['key'] ) ) { return; }
 	if ( $ok ) {
@@ -939,9 +953,28 @@ function gasf_crm_rest_reply( WP_REST_Request $req ) {
 	if ( is_wp_error( $thread ) ) { return $thread; }
 	$stream = (string) $thread['stream'];
 
+	// This very reply, arriving again after it already went: say so, before
+	// any check that its own success has since made fail. After the access
+	// check above, so the answer is only ever given to somebody who may ask.
+	if ( gasf_crm_op_is_done( 'thread-reply:' . $thread_id, $req ) ) {
+		return array( 'ok' => true, 'duplicate' => true );
+	}
+
 	// Re-check the lock at send time. The claim happened when the thread was
 	// opened, possibly an hour ago — by now it may have expired and been taken.
 	if ( ! gasf_crm_claim_thread( $thread_id, $user_id ) ) {
+		// A thread that is no longer open cannot be claimed by anybody, and that
+		// is not somebody else replying. It used to be reported as exactly that
+		// - "Someone else is replying to this thread" - to the person who had
+		// just answered it and pressed Send a second time.
+		if ( in_array( (string) $thread['status'], array( 'addressed', 'ignored' ), true ) ) {
+			return new WP_Error( 'gasf_crm_answered',
+				'addressed' === (string) $thread['status']
+					? 'This thread has already been answered, so nothing was sent. Reload it to see the reply.'
+					: 'This thread has been set aside as ignored, so nothing was sent. Restore it to reply.',
+				array( 'status' => 409 )
+			);
+		}
 		$holder = get_userdata( (int) $thread['locked_by'] );
 		return new WP_Error( 'gasf_crm_locked',
 			( $holder ? gasf_crm_display_name( $holder->ID ) : 'Someone else' ) . ' is replying to this thread.',

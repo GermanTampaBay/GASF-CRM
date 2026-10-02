@@ -388,12 +388,12 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.71.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.72.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
 The face scanner has its own: `SCANNER_VERSION` near the top of
-`tools/face-scanner/scan.py` (1.6.4 as of learning retrying a photo that failed to download), shown at the
+`tools/face-scanner/scan.py` (1.6.5 as of the one shared label-to-face match), shown at the
 top of the launcher's *Advanced settings* and by `scan.py --version`. Bump it
 with every change to that folder; it is the only way to tell from the scanning
 PC which copy is running. The `1.3` in its `USER_AGENT` is a fixed string
