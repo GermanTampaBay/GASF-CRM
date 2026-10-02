@@ -3143,6 +3143,49 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * A private photo's path stays in marker form, whoever writes it.
+	 *
+	 * Replays exactly what the club's image compressor did: read the path back
+	 * through get_attached_file(), which yields the real absolute path, and
+	 * write it straight back with update_attached_file(). Six photos lost their
+	 * marker that way, broke in the gallery, and one approval silently published
+	 * nothing. Both copies of the path are checked, because the compressor
+	 * rewrote both.
+	 */
+	public function test_private_path_stays_canonical() {
+		$id = $this->held_photo( 'st-canon' );
+		if ( is_wp_error( $id ) ) { $this->ok( false, 'path: a held photo fixture could be made' ); return; }
+		$abs = (string) get_attached_file( $id );
+		$this->ok(
+			0 === strpos( $abs, gasf_crm_photo_private_root() ),
+			'path: get_attached_file gives the real path inside the private store'
+		);
+
+		update_attached_file( $id, $abs );
+		$this->ok(
+			GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $abs ) === (string) get_post_meta( $id, '_wp_attached_file', true ),
+			'path: writing that absolute path back stores the marker form'
+		);
+		$this->ok( gasf_crm_photo_is_private( $id ), 'path: so the photo still counts as private' );
+		$this->ok( $abs === (string) get_attached_file( $id ), 'path: and still resolves to the same file' );
+
+		$md         = (array) wp_get_attachment_metadata( $id );
+		$md['file'] = $abs;
+		wp_update_attachment_metadata( $id, $md );
+		$after = (array) wp_get_attachment_metadata( $id );
+		$this->ok(
+			GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $abs ) === (string) ( $after['file'] ?? '' ),
+			'path: the metadata copy of the path is kept in marker form too'
+		);
+
+		$this->ok(
+			'2026/10/x.jpg' === gasf_crm_photo_canonical_path( '2026/10/x.jpg' )
+				&& '/elsewhere/x.jpg' === gasf_crm_photo_canonical_path( '/elsewhere/x.jpg' ),
+			'path: a path outside the private store is left alone'
+		);
+	}
+
+	/**
 	 * The gallery shows a saved copy at once, then the real answer.
 	 *
 	 * Pinned on the page source, because the copy lives in the browser. What

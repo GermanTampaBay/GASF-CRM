@@ -801,6 +801,44 @@ add_filter( 'get_attached_file', function ( $file, $id ) {
 	return $rel ? gasf_crm_photo_private_root() . '/' . basename( $rel ) : $file;
 }, 10, 2 );
 
+/*
+ * Keep a private photo's stored path in the one form this plugin can read.
+ *
+ * Everything here recognises a private photo by the marker at the front of
+ * _wp_attached_file - "gasf-photo-review/name.jpg" - and this plugin only ever
+ * writes that form, because during its own writes the upload_dir filter makes
+ * WordPress shorten the path to it. Nothing guarantees anybody ELSE writes
+ * inside that window.
+ *
+ * The club's image compressor (GASF-Utilities, modules/38-image-compress.php)
+ * reads the path through get_attached_file() - which the filter above turns
+ * into the real absolute path - converts the photo to WebP, and saves the new
+ * path with update_attached_file(). WordPress can only shorten paths inside
+ * the public uploads folder, so it stored "/home4/germanta/gasf-photo-review/
+ * x.webp" in full. With no marker the photo stopped counting as private: the
+ * gallery built a public URL out of the server's directory path, the thumbnail
+ * broke, and approving a held photo silently published nothing - publish asks
+ * "is this private?", got no, and returned "already published".
+ *
+ * So both copies of the path are put back into marker form at the one place
+ * every write passes through - sanitize_meta - whoever made it. Paths outside
+ * the private store are left exactly as they were.
+ */
+function gasf_crm_photo_canonical_path( $path ) {
+	if ( ! is_string( $path ) || '' === $path ) { return $path; }
+	$root = wp_normalize_path( trailingslashit( gasf_crm_photo_private_root() ) );
+	return 0 === strpos( wp_normalize_path( $path ), $root )
+		? GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $path )
+		: $path;
+}
+add_filter( 'sanitize_post_meta__wp_attached_file', 'gasf_crm_photo_canonical_path' );
+add_filter( 'sanitize_post_meta__wp_attachment_metadata', function ( $meta ) {
+	if ( is_array( $meta ) && isset( $meta['file'] ) ) {
+		$meta['file'] = gasf_crm_photo_canonical_path( $meta['file'] );
+	}
+	return $meta;
+} );
+
 add_filter( 'wp_get_attachment_url', function ( $url, $id ) {
 	// A private file has no public URL. Returning the uploads path anyway would
 	// hand out a 404 that looks like a broken image rather than a boundary.
