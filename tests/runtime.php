@@ -3996,6 +3996,31 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * A photo waiting for review stays on the Review tab however many newer
+	 * photos there are.
+	 *
+	 * The gallery used to take the newest three hundred and sort them into
+	 * buckets afterwards, so one large upload pushed every older unreviewed
+	 * photo out of the list. Staged with the cap turned down to one rather than
+	 * with three hundred fixtures: the older photo is unreviewed, the newer one
+	 * is finished, and a list that limits before it filters cannot contain both.
+	 */
+	public function test_review_tab_is_not_capped_by_newer_photos() {
+		$old = $this->held_photo( 'st-review-old' );
+		if ( ! $this->ok( ! is_wp_error( $old ), 'review tab: the held fixture exists' ) ) { return; }
+		$new = $this->library_photo( 'st-review-new' );
+		update_post_meta( $new, '_gasf_photo_source', array( 'thread' => 0, 'stream' => 'photos', 'name' => 'Selftest', 'upload' => true ) );
+
+		$this->ok( $new > $old, 'review tab: the finished photo is the newer of the two' );
+
+		$r   = gasf_crm_photo_gallery( 'review', 1 );
+		$ids = array_map( 'intval', wp_list_pluck( $r['photos'], 'id' ) );
+		$this->ok( in_array( $old, $ids, true ), 'review tab: an unreviewed photo is listed though a newer one filled the cap' );
+		$this->ok( ! in_array( $new, $ids, true ), 'review tab: and a finished photo is not offered for review' );
+		$this->ok( (int) $r['counts']['review'] >= 1, 'review tab: and the count of work to do includes it' );
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

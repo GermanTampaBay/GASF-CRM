@@ -5400,25 +5400,62 @@ function gasf_crm_photo_sender_known( $email ) {
  * 'review' is the default because it is the only bucket that is actually work:
  * a sender has answered, or the grace period ran out and nobody did.
  */
-function gasf_crm_photo_gallery( $state = '' ) {
-	$q = new WP_Query( array(
+function gasf_crm_photo_gallery( $state = '', $recent_max = 300 ) {
+	$recent_cap = max( 1, (int) $recent_max );
+	$base       = array(
 		'post_type'      => 'attachment',
 		// Pending photos are 'private' so core keeps them out of REST, feeds,
 		// sitemaps and attachment pages. The CRM is the one caller that must
 		// still see them, so it asks for both.
 		'post_status'    => array( 'inherit', 'private' ),
-		'posts_per_page' => 300,
 		'orderby'        => 'ID',
 		'order'          => 'DESC',
 		'fields'         => 'ids',
 		'no_found_rows'  => true,
-		'meta_query'     => array( array( 'key' => '_gasf_photo_source', 'compare' => 'EXISTS' ) ),
+	);
+	$sourced = array( 'key' => '_gasf_photo_source', 'compare' => 'EXISTS' );
+
+	// The newest three hundred, whatever state they are in...
+	$recent = new WP_Query( $base + array(
+		'posts_per_page' => $recent_cap,
+		'meta_query'     => array( $sourced ),
 	) );
+
+	/*
+	 * ...AND every photo nobody has confirmed, however old.
+	 *
+	 * This used to be the first query alone, with the buckets sorted out
+	 * afterwards. Everything that comes in carries a source - email, the
+	 * doors, a volunteer's own upload - so one event's worth of uploads, three
+	 * hundred and one of them, pushed every older unreviewed photo off the end
+	 * of the list. The Review tab then said there was less to do than there
+	 * was, and the photos it had dropped were the ones waiting longest.
+	 *
+	 * The limit belongs after the question, not before it. Unconfirmed is the
+	 * only state that is work, so that is the set fetched whole.
+	 */
+	$open = new WP_Query( $base + array(
+		'posts_per_page' => 1000,
+		'meta_query'     => array(
+			'relation' => 'AND',
+			$sourced,
+			// The two ways gasf_crm_photo_state() calls a photo unfinished: it
+			// was never confirmed, or the sender has described it since.
+			array(
+				'relation' => 'OR',
+				array( 'key' => '_gasf_photo_confirmed', 'compare' => 'NOT EXISTS' ),
+				array( 'key' => '_gasf_photo_pending', 'compare' => 'EXISTS' ),
+			),
+		),
+	) );
+
+	$ids = array_values( array_unique( array_map( 'intval', array_merge( $recent->posts, $open->posts ) ) ) );
+	rsort( $ids );
 
 	$out    = array();
 	$counts = array( 'review' => 0, 'waiting' => 0, 'done' => 0, 'all' => 0 );
 
-	foreach ( $q->posts as $id ) {
+	foreach ( $ids as $id ) {
 		$card = gasf_crm_photo_card( (int) $id );
 		if ( ! $card ) { continue; }
 

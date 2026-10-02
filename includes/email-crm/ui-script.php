@@ -351,8 +351,21 @@ function gasf_crm_render_inbox_script() {
 		pane.innerHTML = '<p class="muted">Select a message on the left.</p>';
 	}
 
+	/* Newest request wins.
+	   The list, the thread pane and the photo pane are each repainted by
+	   whichever answer arrives LAST, and answers do not arrive in the order
+	   they were asked for: the minute refresh overlaps a tab click, a slow
+	   thread overlaps the one clicked after it. The loser used to paint over
+	   the winner - the wrong filter's list, or thread A's text in a pane whose
+	   buttons belonged to thread B. Each loader takes a number on the way out
+	   and drops its answer if a later one has been issued since; the library
+	   has done this from the start (lgen). */
+	var listGen = 0, openGen = 0, photoGen = 0;
+
 	function loadList(){
+		var gen = ++listGen;
 		return api('/threads?status=' + status + (stream ? '&stream=' + encodeURIComponent(stream) : '')).then(function(rows){
+			if (gen !== listGen) { return; }
 			loadCaseKpis();
 			// If the thread on screen has grown a newer message, say so rather
 			// than reloading underneath someone who is mid-reply.
@@ -399,7 +412,10 @@ function gasf_crm_render_inbox_script() {
 			Array.prototype.forEach.call(list.querySelectorAll('.item'), function(el){
 				el.onclick = function(){ open(parseInt(el.dataset.id, 10)); };
 			});
-		}).catch(function(e){ list.innerHTML = '<div class="pane note err">' + esc(e.message) + '</div>'; });
+		}).catch(function(e){
+			if (gen !== listGen) { return; }   // a stale failure must not replace a live list
+			list.innerHTML = '<div class="pane note err">' + esc(e.message) + '</div>';
+		});
 	}
 
 	function flagNewMessage(){
@@ -437,7 +453,9 @@ function gasf_crm_render_inbox_script() {
 		remember();
 		attached = []; // attachments belong to the reply being written, not to the app
 		pane.innerHTML = '<p class="muted">Loading…</p>';
+		var gen = ++openGen;
 		api('/threads/' + id).then(function(t){
+			if (gen !== openGen) { return; }   // another thread was opened while this one loaded
 			// The pane takes the THREAD's mailbox colour, whichever list it was
 			// opened from: in the All view the surrounding chrome is the club's
 			// gold, but this particular message may not be a general one.
@@ -663,7 +681,10 @@ function gasf_crm_render_inbox_script() {
 			}).catch(function(){});
 
 			loadList();
-		}).catch(function(e){ pane.innerHTML = '<div class="note err">' + esc(e.message) + '</div>'; });
+		}).catch(function(e){
+			if (gen !== openGen) { return; }
+			pane.innerHTML = '<div class="note err">' + esc(e.message) + '</div>';
+		});
 	}
 
 	// Minimal rich text on a contenteditable div. execCommand is deprecated but
@@ -1103,7 +1124,16 @@ function gasf_crm_render_inbox_script() {
 			CANONICAL_PEOPLE = gasfPrepare(r.canonical_people || r.people || []);
 			peopleLoading = null;
 			return PEOPLE;
-		}).catch(function(){ PEOPLE = []; CANONICAL_PEOPLE = []; peopleLoading = null; return PEOPLE; });
+		}).catch(function(){
+			// A failed lookup is NOT an empty list. This used to store [] in both,
+			// and an empty array is truthy: every later call returned "nobody"
+			// from the cache without asking again, so one dropped request turned
+			// the suggestions off until the page was reloaded - and suggestions
+			// are what stop Müller, Mueller and Muller becoming three people.
+			// Left unset, the next keystroke simply asks again.
+			peopleLoading = null;
+			return [];
+		});
 		return peopleLoading;
 	}
 
@@ -1395,7 +1425,7 @@ function gasf_crm_render_inbox_script() {
 			// keystroke after the one that opened the list: type "Mü" and you got
 			// suggestions, type "Mül" and they vanished and never came back.
 			close();
-			items = gasfPeopleMatch(q, input.classList.contains('nminto') ? CANONICAL_PEOPLE : PEOPLE, taken);
+			items = gasfPeopleMatch(q, (input.classList.contains('nminto') ? CANONICAL_PEOPLE : PEOPLE) || [], taken);
 			if (!items.length) { return; }
 
 			var box = document.createElement('div');
@@ -2868,7 +2898,9 @@ function gasf_crm_render_inbox_script() {
 		pcur = id;
 		remember();
 		ppane.innerHTML = '<p class="muted">Loading…</p>';
+		var gen = ++photoGen;
 		api('/photos/detail?photo=' + id).then(function(p){
+			if (gen !== photoGen) { return; }   // another photo was opened while this one loaded
 			window._crmPhotoCards = window._crmPhotoCards || {};
 			window._crmPhotoCards[p.id] = p;
 			// The sender's answers if they gave any, otherwise whatever is already
@@ -2911,7 +2943,10 @@ function gasf_crm_render_inbox_script() {
 
 			ppane.innerHTML = h;
 			wirePhotoPane(id, p);
-		}).catch(function(e){ ppane.innerHTML = '<div class="note err">' + esc(e.message) + '</div>'; });
+		}).catch(function(e){
+			if (gen !== photoGen) { return; }
+			ppane.innerHTML = '<div class="note err">' + esc(e.message) + '</div>';
+		});
 	}
 
 	function wirePhotoPane(id, p){
@@ -4861,7 +4896,16 @@ function gasf_crm_render_inbox_script() {
 				// broken connection reading as "nothing new" is the worst
 				// outcome this button could have.
 				check.textContent = 'Check failed';
-				pane.innerHTML = '<div class="note err">Could not reach the mailbox: ' + esc(e.message) + '</div>';
+				// Added ABOVE whatever is in the pane, never instead of it. This
+				// used to replace the pane, and the pane is where a half-written
+				// reply and its attachments live: a mailbox hiccup deleted them.
+				var old = document.getElementById('syncerr');
+				if (old) { old.parentNode.removeChild(old); }
+				var warn = document.createElement('div');
+				warn.id = 'syncerr';
+				warn.className = 'note err';
+				warn.textContent = 'Could not reach the mailbox: ' + e.message;
+				pane.insertBefore(warn, pane.firstChild);
 			}).then(function(){
 				setTimeout(function(){
 					check.disabled = false;
