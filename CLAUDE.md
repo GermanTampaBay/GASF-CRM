@@ -74,10 +74,14 @@ ref costs ten seconds and has caught real breakage.
 including the ones that are "obviously safe", and read the number. Two hours of
 this project's history are the argument.
 
-**Never let a run be killed part-way.** A run that dies never reaches its
-cleanup: its fixtures stay in the library and the options it changed stay
-changed. That is what `GASF_RT_SLICE` is for - four runs died that way on the
-v2.67.0 deploy and left five fixture photos and a list of selftest names behind.
+**Never let a run be killed part-way.** See the sixth trap. The suite now
+defends itself three ways - it restores options and reaps fixtures after every
+test, it turns SIGTERM/SIGHUP into a clean exit, and it stops between tests
+once it has been starting them for 40 seconds (`GASF_RT_BUDGET`), printing the
+`GASF_RT_FROM=<n>` command that carries on. So a plain run is safe to launch;
+it may just need a second command to finish. **A run that printed STOPPED is
+not a full run** - run the rest and add the counts. The host is shared and the
+same suite takes nine seconds or ninety.
 
 **It is also not free.** The suite runs against live WordPress because there is
 no second environment, so it competes with whoever is using the site — and one
@@ -108,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 181 assertions, run on the server against live
+- **`tests/runtime.php`** — 594 assertions in 75 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -301,9 +305,9 @@ being filed under a thread id that belonged to another table**.
 
 ---
 
-## Five traps worth remembering
+## Six traps worth remembering
 
-All five are the same shape: **state that is correct when you read it and wrong
+The first five are the same shape: **state that is correct when you read it and wrong
 by the time you use it**, failing silently, looking exactly like the normal
 failure everyone already knows about. None produced an error a reader could
 trust. Four reached production, and the fifth was caused by the suite that is
@@ -363,6 +367,21 @@ review on every later scan — a volunteer doing the right thing made the prompt
 permanent. "Wrong person" and "not a person to tag" are different answers and
 need different verbs: `_gasf_face_ignored` is the second one. Watch for this
 shape generally — a negative signal wired into a positive test can invert it.
+
+**A killed test run left selftest values in the club's live settings.** The
+suite snapshotted each option it changed and restored them all at the END. On
+2026-10-02 it was launched through the SSH connector, which gives up on a
+command after about a minute; the host then kills the process, and a killed
+process runs no shutdown function. The fifth such run died after the vendor
+tests, so `gasf_crm_vendor` - the event name, date and pitch fees printed on
+the PUBLIC vendor application - was left as `terms_version: selftest,
+fee_outside: 999`. Every later run then snapshotted that and faithfully put it
+back. Nothing failed; the suite passed, repeatedly, on top of the damage. Two
+lessons, both about the suite rather than the code under test: **restore where
+you changed it, per test, not at the end** (the fourth trap said this about one
+credential and it was true of every option), and **after any interrupted run,
+look at what it was in the middle of** - the option list is short
+(`snapshot_option` in `tests/runtime.php`) and checking it takes a minute.
 
 ---
 

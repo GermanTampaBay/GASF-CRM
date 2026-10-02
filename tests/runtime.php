@@ -69,6 +69,28 @@ final class GASF_CRM_Selftest {
 
 		$GLOBALS['gasf_crm_mail_bypass'] = true;
 		register_shutdown_function( array( $this, 'cleanup' ) );
+
+		/*
+		 * A run that is told to stop, stops properly.
+		 *
+		 * The shutdown reaper above survives a fatal. It does not survive a
+		 * signal: PHP's default answer to SIGTERM or SIGHUP is to die where it
+		 * stands, shutdown functions unrun. That is what an SSH session ending
+		 * does to this script, and on 2026-10-02 it did it five times - the
+		 * last one after the vendor tests, which left the club's live event
+		 * settings holding "selftest" and a $999 pitch fee on the public form.
+		 * Turned into an ordinary exit, the reaper runs. (SIGKILL cannot be
+		 * caught; the per-test restore in run() is what limits that.)
+		 */
+		if ( function_exists( 'pcntl_async_signals' ) && function_exists( 'pcntl_signal' ) ) {
+			pcntl_async_signals( true );
+			foreach ( array( SIGTERM, SIGHUP, SIGINT ) as $sig ) {
+				pcntl_signal( $sig, function ( $signo ) {
+					echo "\nINTERRUPTED by signal $signo - cleaning up and stopping.\n";
+					exit( 130 );
+				} );
+			}
+		}
 	}
 
 	/* ------------------------------------------------------------------ rig */
@@ -88,11 +110,27 @@ final class GASF_CRM_Selftest {
 	}
 
 	public function cleanup() {
+		$this->reap();
+		unset( $GLOBALS['gasf_crm_mail_bypass'] );
+	}
+
+	/**
+	 * Put back everything the tests so far have made or changed.
+	 *
+	 * Called after EVERY test, not only at the end. It used to run once, when
+	 * the whole suite had finished - so a run that was killed part-way left
+	 * every option the earlier tests had changed still changed, and the next
+	 * run then "snapshotted" the wrong value and faithfully restored it. An
+	 * option is now out of its real state only for the length of the one test
+	 * that needs it. Safe to call twice: each list is emptied as it is used.
+	 */
+	private function reap() {
 		global $wpdb;
 
 		foreach ( $this->made as $id ) {
 			if ( get_post( $id ) ) { wp_delete_attachment( $id, true ); }
 		}
+		$this->made = array();
 
 		/*
 		 * The WebP twins of this run's fixtures.
@@ -111,12 +149,14 @@ final class GASF_CRM_Selftest {
 			) );
 			foreach ( $twins as $tid ) { wp_delete_attachment( (int) $tid, true ); }
 		}
+		$this->made_stems = array();
 
 		foreach ( $this->made_people as $term_id ) {
 			if ( term_exists( $term_id, 'gasf_photo_person' ) ) {
 				wp_delete_term( $term_id, 'gasf_photo_person' );
 			}
 		}
+		$this->made_people = array();
 
 		// Catalogue terms this run created and no test handed over: newer than
 		// the newest term there was when the run began, and named as a fixture.
@@ -133,6 +173,7 @@ final class GASF_CRM_Selftest {
 			if ( null === $val ) { delete_option( $name ); }
 			else { update_option( $name, $val, false ); }
 		}
+		$this->saved_options = array();
 
 		// Selftest names this run retired. Only those: a name a volunteer retired
 		// while the suite was running stays retired, and so does everything that
@@ -145,8 +186,6 @@ final class GASF_CRM_Selftest {
 			}
 			if ( count( $keep ) !== count( $now ) ) { update_option( GASF_CRM_PERSON_RETIRED_OPTION, $keep, false ); }
 		}
-
-		unset( $GLOBALS['gasf_crm_mail_bypass'] );
 	}
 
 	/** A JPEG's bytes, generated fresh so no two runs collide on the md5. */
@@ -4226,7 +4265,32 @@ final class GASF_CRM_Selftest {
 			printf( "slice %s: %d of %d tests\n", $slice, count( $tests ), $all );
 		}
 
-		foreach ( $tests as $m ) {
+		/*
+		 * GASF_RT_FROM=31 starts at the thirty-first test. GASF_RT_BUDGET is how
+		 * many seconds the run may START tests for, 40 unless told otherwise and
+		 * 0 for no limit.
+		 *
+		 * Together they make a plain, unsliced run safe to launch over a
+		 * connection that gives up after a minute: instead of being killed
+		 * mid-test it stops between two, cleans up, says how far it got and
+		 * what to type to carry on. The host is a shared one and the same
+		 * suite takes nine seconds or ninety depending on its mood, so "it
+		 * fitted last time" is not a plan.
+		 */
+		$from = max( 1, (int) getenv( 'GASF_RT_FROM' ) );
+		if ( $from > 1 ) {
+			$tests = array_slice( $tests, $from - 1 );
+			printf( "from test %d: %d test(s)\n", $from, count( $tests ) );
+		}
+		$budget  = getenv( 'GASF_RT_BUDGET' );
+		$budget  = ( false === $budget || '' === $budget ) ? 40 : max( 0, (int) $budget );
+		$stopped = 0;
+
+		foreach ( $tests as $i => $m ) {
+			if ( $budget > 0 && ( microtime( true ) - $t0 ) > $budget ) {
+				$stopped = $from + $i;
+				break;
+			}
 			echo "· $m\n";
 			try {
 				$this->$m();
@@ -4234,16 +4298,26 @@ final class GASF_CRM_Selftest {
 				$this->fail++;
 				$this->failures[] = "$m threw: " . $e->getMessage();
 				echo '  FAIL  ' . $m . ' threw: ' . $e->getMessage() . "\n";
+			} finally {
+				// After every test - see reap().
+				try { $this->reap(); } catch ( Throwable $e ) { echo '  cleanup after ' . $m . ' threw: ' . $e->getMessage() . "\n"; }
 			}
 		}
 
 		$this->cleanup();
 		printf( "\n%d passed, %d failed  (%.1fs)\n", $this->pass, $this->fail, microtime( true ) - $t0 );
+		if ( $stopped ) {
+			printf(
+				"\nSTOPPED before test %d - over the %d-second budget. NOT a full run: nothing is left behind, but the tests from %d on have not been run.\nCarry on with:  GASF_RT_FROM=%d wp eval-file %s\n",
+				$stopped, $budget, $stopped, $stopped, __FILE__
+			);
+		}
 		if ( $this->fail ) {
 			echo "\nFailures:\n";
 			foreach ( $this->failures as $f ) { echo "  - $f\n"; }
 			exit( 1 );
 		}
+		if ( $stopped ) { exit( 2 ); }
 	}
 }
 
