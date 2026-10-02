@@ -3737,8 +3737,29 @@ final class GASF_CRM_Selftest {
 
 		wp_set_current_user( (int) get_users( array( 'role' => 'administrator', 'number' => 1, 'fields' => 'ID' ) )[0] );
 
-		foreach ( get_class_methods( $this ) as $m ) {
-			if ( 0 !== strpos( $m, 'test_' ) ) { continue; }
+		$tests = array_values( array_filter( get_class_methods( $this ), function ( $m ) { return 0 === strpos( $m, 'test_' ); } ) );
+
+		/*
+		 * GASF_RT_SLICE=2/6 runs the second sixth of the tests, in order.
+		 *
+		 * The whole suite takes about two and a half minutes, and the SSH tool
+		 * it is usually run through gives up on a command well before that -
+		 * and when it gives up, the host kills the run where it stands. A run
+		 * killed there never reaches cleanup(): its fixtures stay, and so do
+		 * the options it had changed. Six short runs each finish and clean up
+		 * after themselves. Every slice must be run; the counts add up to the
+		 * whole, and the slice says how many tests it holds so a missing one
+		 * shows.
+		 */
+		$slice = (string) getenv( 'GASF_RT_SLICE' );
+		if ( preg_match( '~^(\d+)/(\d+)$~', $slice, $mm ) && (int) $mm[2] > 0 && (int) $mm[1] >= 1 && (int) $mm[1] <= (int) $mm[2] ) {
+			$per   = (int) ceil( count( $tests ) / (int) $mm[2] );
+			$all   = count( $tests );
+			$tests = array_slice( $tests, ( (int) $mm[1] - 1 ) * $per, $per );
+			printf( "slice %s: %d of %d tests\n", $slice, count( $tests ), $all );
+		}
+
+		foreach ( $tests as $m ) {
 			echo "· $m\n";
 			try {
 				$this->$m();
