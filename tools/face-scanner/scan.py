@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.4"
+SCANNER_VERSION = "1.6.5"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -1860,25 +1860,10 @@ def unresolved_observations(photo, found, references, backend, tolerance, image_
         boxes.append(box)
         vectors.append(vector)
 
-    explicit = set()
-    labels = [item for item in (photo.get("labels") or []) if isinstance(item, dict)]
-    used = set()
-    for label in labels:
-        target = label.get("box") or []
-        name = str(label.get("name") or "").strip()
-        if not name or not isinstance(target, (list, tuple)) or len(target) != 4:
-            continue
-        target = [int(value) for value in target]
-        best_i, best_iou = -1, 0.0
-        for index, box in enumerate(boxes):
-            if index in used:
-                continue
-            overlap = box_iou_xywh(target, box)
-            if overlap > best_iou:
-                best_i, best_iou = index, overlap
-        if best_i >= 0 and best_iou >= 0.15:
-            explicit.add(best_i)
-            used.add(best_i)
+    explicit = {
+        box_index
+        for _, box_index, _, _ in match_labels_to_boxes(photo.get("labels") or [], boxes)
+    }
 
     one_face_truth = len(boxes) == 1 and len(
         [name for name in (photo.get("people") or []) if str(name).strip()]
@@ -2204,6 +2189,58 @@ def box_iou_xywh(a, b):
     area_b = float(max(0, bw) * max(0, bh))
     union = area_a + area_b - inter
     return inter / union if union > 0 else 0.0
+
+
+# How much a saved label's rectangle must overlap a detected face to be that
+# face. Deliberately loose: the label was drawn on one detection run and is
+# being matched against another, and a crop or a re-encode moves boxes about.
+LABEL_MATCH_IOU = 0.15
+
+
+def match_labels_to_boxes(labels, boxes, skip=None):
+    """
+    Pair saved face labels with detected faces. The one place this is decided.
+
+    Each label, in the order given, takes the detected box that overlaps it
+    most among those not already taken, provided the overlap reaches
+    LABEL_MATCH_IOU. A label with no name or no four-number box is passed
+    over, and so is one whose name `skip` answers true for - before it can
+    take a box, so a rejected name does not use up a face.
+
+    This was written out three times - in learning, in the labelling board's
+    pre-fill and in the unknown-face pass - and the three had started to differ
+    in what they did around it. The pairing itself is the part that must never
+    differ: if learning and the board disagree about which face a label is on,
+    a volunteer is shown one face and the matcher is taught another.
+
+    `boxes` are [x, y, w, h], prepared however the caller needs. Returns
+    (label_index, box_index, name, target) tuples, label_index counting every
+    entry of `labels` so a caller can key on a label's position.
+    """
+    out = []
+    used = set()
+    for label_index, label in enumerate(labels or []):
+        if not isinstance(label, dict):
+            continue
+        name = str(label.get("name") or "").strip()
+        box = label.get("box") or []
+        if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        if skip is not None and skip(name):
+            continue
+        target = [int(value) for value in box]
+        best_i, best_iou = -1, 0.0
+        for box_index, candidate in enumerate(boxes):
+            if box_index in used:
+                continue
+            overlap = box_iou_xywh(target, candidate)
+            if overlap > best_iou:
+                best_i, best_iou = box_index, overlap
+        if best_i < 0 or best_iou < LABEL_MATCH_IOU:
+            continue
+        used.add(best_i)
+        out.append((label_index, best_i, name, target))
+    return out
 
 
 # --------------------------------------------------------------------------- people discovery
@@ -3060,27 +3097,14 @@ def _collect_label_items(api, conn, backend, tolerance, limit, uploaded_after=""
                 )
 
             # Pre-fill from previously saved labels on matching rectangles.
-            prefill = {}
-            labels = [l for l in (p.get("labels") or []) if isinstance(l, dict)]
-            used = set()
-            for lbl in labels:
-                name = str(lbl.get("name") or "").strip()
-                box = lbl.get("box") or []
-                if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
-                    continue
-                if _face_name_rejected(name, rejected):
-                    continue
-                target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
-                best_i, best_iou = -1, 0.0
-                for i, db in enumerate(boxes):
-                    if i in used:
-                        continue
-                    iou = box_iou_xywh(target, db)
-                    if iou > best_iou:
-                        best_i, best_iou = i, iou
-                if best_i >= 0 and best_iou >= 0.15:
-                    used.add(best_i)
-                    prefill[str(best_i)] = name
+            prefill = {
+                str(box_index): name
+                for _, box_index, name, _ in match_labels_to_boxes(
+                    p.get("labels") or [],
+                    boxes,
+                    skip=lambda name: _face_name_rejected(name, rejected),
+                )
+            }
 
             status = _label_item_status(len(boxes), prefill, hints, known_threshold)
             # A one-face photo that already has exactly one person tag is already
@@ -4645,24 +4669,8 @@ def learn(api, conn, backend, verbose=True):
                             continue
 
                         det_boxes = [css_box_to_xywh(b) for (b, _) in found]
-                        used = set()
                         replacements = []
-                        for li, lbl in enumerate(labels):
-                            name = str(lbl.get("name") or "").strip()
-                            box = lbl.get("box") or []
-                            if not name or not isinstance(box, (list, tuple)) or len(box) != 4:
-                                continue
-                            target = [int(box[0]), int(box[1]), int(box[2]), int(box[3])]
-                            best_i, best_iou = -1, 0.0
-                            for j, db in enumerate(det_boxes):
-                                if j in used:
-                                    continue
-                                iou = box_iou_xywh(target, db)
-                                if iou > best_iou:
-                                    best_i, best_iou = j, iou
-                            if best_i < 0 or best_iou < 0.15:
-                                continue
-                            used.add(best_i)
+                        for li, best_i, name, target in match_labels_to_boxes(labels, det_boxes):
                             box_css, vector = found[best_i]
                             face_key = f"b:{target[0]},{target[1]},{target[2]},{target[3]}:{li}"
                             metrics = reference_quality(display_pixels, box_css)
@@ -6376,6 +6384,29 @@ def selftest():
             (backend.name,),
         ).fetchone()[0]
         check_that(left == 0, "learn: removing confirmed truth deletes the photo's stale references")
+
+        # The one pairing of labels to faces, pinned on its own.
+        _mboxes = [[0, 0, 20, 20], [100, 0, 20, 20], [200, 0, 20, 20]]
+        _mlabels = [
+            {"name": "Anna", "box": [101, 1, 20, 20]},     # on the second face
+            "not a label",
+            {"name": "", "box": [0, 0, 20, 20]},           # no name
+            {"name": "Berta", "box": [100, 0, 20, 20]},    # second face again: taken
+            {"name": "Cora", "box": [2, 2, 20, 20]},       # on the first face
+            {"name": "Dora", "box": [500, 500, 20, 20]},   # on nothing
+            {"name": "Erna", "box": [200, 0, 20]},         # not a box
+        ]
+        _pairs = match_labels_to_boxes(_mlabels, _mboxes)
+        check_that(
+            [(li, bi, name) for li, bi, name, _ in _pairs] == [(0, 1, "Anna"), (4, 0, "Cora")]
+            and _pairs[0][3] == [101, 1, 20, 20],
+            "label matching: each label takes its best free face once; bad, unplaced and second-comer labels take none",
+        )
+        check_that(
+            [(li, bi, name) for li, bi, name, _ in match_labels_to_boxes(
+                _mlabels, _mboxes, skip=lambda name: name == "Anna")] == [(3, 1, "Berta"), (4, 0, "Cora")],
+            "label matching: a skipped name does not use up the face it sits on",
+        )
 
         # A photo that could not be downloaded is studied on the next run, and
         # the correction it carried lands - instead of the old name staying.

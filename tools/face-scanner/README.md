@@ -152,7 +152,7 @@ face rectangles use the same orientation Edge displays.
 | `python scan.py --discover` | Refresh unresolved observations, cluster them locally, and open the loopback-only People Discovery contact-sheet board. |
 | `python scan.py --watch 900` | Keep going: learn, scan, sleep 15 min, repeat. |
 | `python scan.py --uploaded-after 2026-08-01 --uploaded-before 2026-08-14` | Only process photos uploaded in that date window (inclusive) for scanning, `--label`, and `--discover`. Useful for "new uploads only" runs. |
-| `python scan.py --status` | Active/retained corpus counts and quality, what is waiting, and the latest conservative calibration recommendation. No ML is loaded. |
+| `python scan.py --status` | Active/retained corpus counts and quality, what is waiting, and the latest conservative calibration recommendation. Publishes that calibration report to the site's admin panel; changes no photos, names, or settings. No ML is loaded. |
 | `python scan.py --check` | Preflight: backend, config, database, and that the server accepts the key. |
 | `python scan.py --selftest` | Exercise the non-ML plumbing. Needs no backend, no config, no network. |
 | `python scan-gui.py` | The launcher window: every mode above as a plainly described task, with its output shown in the same window. |

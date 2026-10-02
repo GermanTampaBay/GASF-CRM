@@ -267,8 +267,9 @@ TASKS = [
         "about": (
             "A quick summary: how many people it can recognize, how good its "
             "example photos are, how many photos are still waiting to be looked "
-            "at, and how trustworthy its confidence scores currently are. Changes "
-            "nothing."
+            "at, and how trustworthy its confidence scores currently are. It also "
+            "sends that confidence report to the club website, where the photo "
+            "administrators can see it. It changes no photos, names, or settings."
         ),
         "when": "Use this when you are curious how far along it is.",
         "button": "Show progress",
@@ -284,7 +285,7 @@ TASKS = [
             "Confirms that the face-recognition software is installed and loads, "
             "the settings file is valid, the local database can be written, the "
             "caption model is available, and the club website accepts this "
-            "computer's scanner key. Changes nothing."
+            "computer's scanner key. Changes nothing on the website."
         ),
         "when": "Use this first on a new computer, or whenever something seems off.",
         "button": "Run the check",
