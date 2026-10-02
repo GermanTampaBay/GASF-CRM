@@ -79,23 +79,56 @@ function gasf_crm_op_id_from_request( WP_REST_Request $req ) {
 	return '' === $raw ? '' : substr( $raw, 0, 120 );
 }
 
-function gasf_crm_op_start( $scope, WP_REST_Request $req, $running_ttl = 900 ) {
+function gasf_crm_op_key( $scope, $op_id ) {
+	return 'gasf_crm_op_' . md5( (string) $scope . '|' . (string) $op_id . '|' . get_current_user_id() );
+}
+
+/** The MySQL advisory lock that makes an operation's check-and-claim one step. */
+function gasf_crm_op_lock_name( $key ) {
+	return 'gasf_op_' . substr( md5( (string) $key ), 0, 40 );
+}
+
+/**
+ * Claim an operation id, or say it is already running or already done.
+ *
+ * This read the marker and then wrote it, as two steps: two requests carrying
+ * the same id could both read "nothing here" before either wrote "running",
+ * and both went ahead - the one thing the guard exists to stop. The read and
+ * the write now happen under an advisory lock named for the operation, the
+ * same primitive the photo doors use for their counters, so of two that arrive
+ * together one sees the other's claim.
+ *
+ * @param int $lock_wait seconds to wait for that lock; a request that cannot
+ *                       get it is told the action is in progress, which it is
+ */
+function gasf_crm_op_start( $scope, WP_REST_Request $req, $running_ttl = 900, $lock_wait = 3 ) {
+	global $wpdb;
+
 	$op_id = gasf_crm_op_id_from_request( $req );
 	if ( '' === $op_id ) {
 		return array( 'enabled' => false, 'duplicate' => false, 'key' => '' );
 	}
 
-	$key   = 'gasf_crm_op_' . md5( (string) $scope . '|' . $op_id . '|' . get_current_user_id() );
-	$state = get_transient( $key );
-	if ( 'done' === $state ) {
-		return array( 'enabled' => true, 'duplicate' => true, 'key' => $key );
-	}
-	if ( 'running' === $state ) {
-		return new WP_Error( 'gasf_crm_inflight', 'That action is already in progress.', array( 'status' => 409 ) );
-	}
+	$key  = gasf_crm_op_key( $scope, $op_id );
+	$lock = gasf_crm_op_lock_name( $key );
+	$busy = new WP_Error( 'gasf_crm_inflight', 'That action is already in progress.', array( 'status' => 409 ) );
 
-	set_transient( $key, 'running', max( 30, (int) $running_ttl ) );
-	return array( 'enabled' => true, 'duplicate' => false, 'key' => $key );
+	if ( 1 !== (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', $lock, max( 0, (int) $lock_wait ) ) ) ) {
+		return $busy;
+	}
+	try {
+		$state = get_transient( $key );
+		if ( 'done' === $state ) {
+			return array( 'enabled' => true, 'duplicate' => true, 'key' => $key );
+		}
+		if ( 'running' === $state ) {
+			return $busy;
+		}
+		set_transient( $key, 'running', max( 30, (int) $running_ttl ) );
+		return array( 'enabled' => true, 'duplicate' => false, 'key' => $key );
+	} finally {
+		$wpdb->get_var( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', $lock ) );
+	}
 }
 
 function gasf_crm_op_finish( array $token, $ok = true, $done_ttl = 3600 ) {

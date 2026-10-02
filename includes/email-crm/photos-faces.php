@@ -2643,60 +2643,109 @@ add_action( 'rest_api_init', function () {
 				else { $after = gmdate( 'Y-m-d H:i:s', $ts ); }
 			}
 
-			$ids = get_posts( array(
-				'post_type'      => 'attachment',
-				'post_status'    => array( 'inherit', 'private' ),
-				'posts_per_page' => $limit,
-				'fields'         => 'ids',
-				'no_found_rows'  => true,
-				'orderby'        => array( 'modified' => 'ASC', 'ID' => 'ASC' ),
-				'post_mime_type' => 'image',
-				'post__not_in'   => array(),
-				'meta_query'     => array(
-					array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
-				),
-				'tax_query'      => array(),
-				'date_query'     => '' !== $after
-					? array(
-						array(
-							'column'    => 'post_modified_gmt',
-							'after'     => $after,
-							'inclusive' => true,
-						),
-					)
-					: array(),
-			) );
+			/*
+			 * An empty page means "there is nothing more", so a page is never
+			 * returned empty while there is more.
+			 *
+			 * Two things used to make one. The (modified, id) tie-break was
+			 * applied here in PHP, AFTER the query's limit, so a hundred photos
+			 * sharing one second - a bulk tag does that - came back as the same
+			 * hundred every time and were all dropped as already seen. And the
+			 * flyer, not-in-library and nothing-to-learn filters also ran after
+			 * the limit, so a run of a hundred such photos did the same. The
+			 * scanner stops at an empty page without moving its cursor, so
+			 * either way learning ended there for good, on every later run,
+			 * and said nothing.
+			 *
+			 * The cursor is in the SQL now, and a page that filtered down to
+			 * nothing fetches the next one itself.
+			 */
+			$out      = array();
+			$cur_mod  = $after;
+			$cur_id   = $after_id;
+			$rounds   = 0;
+			do {
+				$ids  = gasf_crm_faces_confirmed_ids( $cur_mod, $cur_id, $limit );
+				$last = null;
+				foreach ( $ids as $id ) {
+					$stamp = (string) get_post_field( 'post_modified_gmt', $id );
+					$last  = array( $stamp, (int) $id );
+					if ( (int) $id <= $since ) { continue; }
+					$modified = $stamp;
+					if ( '0000-00-00 00:00:00' === $modified || '' === $modified ) {
+						$modified = (string) get_post_field( 'post_date_gmt', $id );
+					}
+					if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
+					if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+					$labels = gasf_crm_face_labels_for( $id );
+					$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+					if ( ! $include_empty && ! $labels && ! $people ) { continue; }
+					$out[] = array(
+						'id'     => (int) $id,
+						'modified' => $modified,
+						'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+						'image_rev' => gasf_crm_photo_image_rev( $id ),
+						'people' => array_map( 'html_entity_decode', $people ),
+						'labels' => $labels,
+						'pipeline' => gasf_crm_faces_photo_state( $id ),
+					);
+				}
+				// Only the cursor form can carry on: the legacy 'since' form has
+				// no position to resume from, and behaves as it always did.
+				$again = ! $out && '' !== $after && $last && count( $ids ) === $limit && ++$rounds < 50;
+				if ( $again ) { list( $cur_mod, $cur_id ) = $last; }
+			} while ( $again );
 
-			$out = array();
-			foreach ( $ids as $id ) {
-				if ( (int) $id <= $since ) { continue; }
-				$modified = (string) get_post_field( 'post_modified_gmt', $id );
-				if ( '0000-00-00 00:00:00' === $modified || '' === $modified ) {
-					$modified = (string) get_post_field( 'post_date_gmt', $id );
-				}
-				if ( '' !== $after ) {
-					if ( $modified < $after ) { continue; }
-					if ( $modified === $after && (int) $id <= $after_id ) { continue; }
-				}
-				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
-				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
-				$labels = gasf_crm_face_labels_for( $id );
-				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
-				if ( ! $include_empty && ! $labels && ! $people ) { continue; }
-				$out[] = array(
-					'id'     => (int) $id,
-					'modified' => $modified,
-					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
-					'image_rev' => gasf_crm_photo_image_rev( $id ),
-					'people' => array_map( 'html_entity_decode', $people ),
-					'labels' => $labels,
-					'pipeline' => gasf_crm_faces_photo_state( $id ),
-				);
-			}
 			return array( 'photos' => $out );
 		},
 	) );
 } );
+
+/**
+ * One page of confirmed photos, strictly after a (modified, id) position.
+ *
+ * In SQL, because that is the only place a cursor and a limit can be applied
+ * in the right order. Ordered by the same column the cursor compares - the GMT
+ * one; it used to sort by local time and filter by GMT.
+ *
+ * @param string $after_mod 'Y-m-d H:i:s' GMT, or '' for the beginning
+ * @return int[]
+ */
+function gasf_crm_faces_confirmed_ids( $after_mod, $after_id, $limit ) {
+	global $wpdb;
+
+	$where = function ( $sql ) use ( $wpdb, $after_mod, $after_id ) {
+		if ( '' === (string) $after_mod ) { return $sql; }
+		return $sql . $wpdb->prepare(
+			" AND ( {$wpdb->posts}.post_modified_gmt > %s OR ( {$wpdb->posts}.post_modified_gmt = %s AND {$wpdb->posts}.ID > %d ) )",
+			(string) $after_mod, (string) $after_mod, (int) $after_id
+		);
+	};
+	$order = function () use ( $wpdb ) {
+		return "{$wpdb->posts}.post_modified_gmt ASC, {$wpdb->posts}.ID ASC";
+	};
+
+	add_filter( 'posts_where', $where, 99 );
+	add_filter( 'posts_orderby', $order, 99 );
+	try {
+		$ids = get_posts( array(
+			'post_type'        => 'attachment',
+			'post_status'      => array( 'inherit', 'private' ),
+			'posts_per_page'   => max( 1, (int) $limit ),
+			'fields'           => 'ids',
+			'no_found_rows'    => true,
+			'post_mime_type'   => 'image',
+			'suppress_filters' => false, // get_posts() turns the two above off otherwise
+			'meta_query'       => array(
+				array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
+			),
+		) );
+	} finally {
+		remove_filter( 'posts_where', $where, 99 );
+		remove_filter( 'posts_orderby', $order, 99 );
+	}
+	return array_map( 'intval', (array) $ids );
+}
 
 /** How many library photos still have no scan stamp. */
 function gasf_crm_faces_queue_bound( $raw ) {

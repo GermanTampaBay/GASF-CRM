@@ -123,20 +123,11 @@ notepad config.json
 python scan.py --check
 ```
 
-### One-command setup (Ollama + model + scanner config)
-
-If you want a full bootstrap on Windows, use:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File install-ollama.ps1 `
-  -ScannerKey "gasf_face_xxxxx" `
-  -SiteUrl "https://germantampabay.com" `
-  -CaptionModel "qwen3-vl:30b"
-```
-
-That script installs Ollama (if missing), starts/verifies the local API, pulls
-the vision model, installs scanner Python dependencies, writes `config.json`,
-and runs `scan.py --check`.
+For Ollama and the caption model as well, use the installer above rather than
+doing it by hand: it checks every step it runs. (`install-ollama.ps1`, which
+this section used to recommend, is gone. It failed under Windows PowerShell 5.1
+on a second run, printed "Done." after steps that had failed, and took the
+scanner key as a command-line argument, which leaves it in the shell history.)
 
 The **scanner key** comes from **wp-admin → Email CRM → Photos → Face
 suggestions → Issue a scanner key**. It is shown once; if you lose it, issue a
@@ -438,7 +429,7 @@ batch of `--status` and the chips in the library before loosening it.
 | `build-installer.ps1`, `Install-GASFFaceScanner.ps1` | Build and run the source-free Windows laptop installer. |
 | `requirements.txt`, `config.example.json` | Committed. |
 | `config.json` | Your URL + key. **Gitignored** — never commit it. |
-| `faces.db` | The biometric vectors. **Gitignored** — never commit it, never copy it off this machine. |
+| `faces.db` | The biometric vectors. **Gitignored** — never commit it, and never copy it anywhere unencrypted. The one supported move to another computer is the encrypted transfer under *Move an existing face corpus securely*. |
 | `scan.log` | Run log from the task. Gitignored. |
 
 Deleting somebody's face data is deleting their rows in `faces.db`. Deleting

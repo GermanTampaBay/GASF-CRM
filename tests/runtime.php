@@ -4108,6 +4108,94 @@ final class GASF_CRM_Selftest {
 		$this->ok( ! is_file( $gone ), 'edit original: deleting a photo deletes its untouched original with it' );
 	}
 
+	/**
+	 * The scanner's learning feed never answers "nothing more" while there is more.
+	 *
+	 * The scanner stops at an empty page without moving its cursor. Two things
+	 * produced one early: photos sharing a modified second (the tie-break was
+	 * applied after the limit), and a page made up entirely of photos it does
+	 * not learn from (so were the filters). Staged with a limit of one, three
+	 * photos in the same second, and the first two marked as flyers.
+	 *
+	 * That second is in 2001, deliberately. The real scanner polls this feed
+	 * while the suite runs, and takes its cursor from whatever it is handed: a
+	 * fixture stamped in the FUTURE would move the live cursor past every real
+	 * photo there will ever be. Behind every cursor, the fixtures are invisible.
+	 */
+	public function test_learning_feed_does_not_stall() {
+		global $wpdb;
+		$stamp = '2001-01-01 00:00:00';
+		$ids   = array();
+		foreach ( array( 'a', 'b', 'c' ) as $k ) {
+			$id = $this->library_photo( 'st-feed-' . $k );
+			wp_set_object_terms( $id, array( 'Selftest Feed ' . wp_rand() ), 'gasf_photo_person', false );
+			$wpdb->update( $wpdb->posts, array( 'post_modified_gmt' => $stamp, 'post_modified' => $stamp ), array( 'ID' => $id ) );
+			clean_post_cache( $id );
+			$ids[] = $id;
+		}
+		update_post_meta( $ids[0], '_gasf_photo_flyer', 1 );
+		update_post_meta( $ids[1], '_gasf_photo_flyer', 1 );
+
+		$route = '/gasf/v1/crm/photos/faces/confirmed';
+		$page  = $this->rest_get( $route, array( 'after' => '2000-12-31 00:00:00', 'after_id' => 0, 'limit' => 1 ) );
+		$got   = array_map( 'intval', wp_list_pluck( (array) ( $page['photos'] ?? array() ), 'id' ) );
+		$this->ok( array( $ids[2] ) === $got,
+			'learning feed: a page of photos it cannot learn from is skipped over, not returned as the end' );
+
+		$page = $this->rest_get( $route, array( 'after' => $stamp, 'after_id' => $ids[1], 'limit' => 1 ) );
+		$got  = array_map( 'intval', wp_list_pluck( (array) ( $page['photos'] ?? array() ), 'id' ) );
+		$this->ok( array( $ids[2] ) === $got,
+			'learning feed: photos sharing one modified second are paged through by id, not served the same one again' );
+
+		$page = $this->rest_get( $route, array( 'after' => $stamp, 'after_id' => $ids[2], 'limit' => 1 ) );
+		$next = (array) ( $page['photos'] ?? array() );
+		$this->ok(
+			! array_intersect( $ids, array_map( 'intval', wp_list_pluck( $next, 'id' ) ) )
+			&& ( ! $next || (string) $next[0]['modified'] > $stamp ),
+			'learning feed: and past the last of them it moves on to later photos, none of these again'
+		);
+	}
+
+	/**
+	 * Claiming an operation id is one step, not a read followed by a write.
+	 *
+	 * Two requests with the same id used to both read "not started" before
+	 * either wrote "running". A race cannot be staged in one thread, so the
+	 * primitive is pinned: while ANOTHER database connection holds the
+	 * operation's advisory lock, a claim must be refused - which a return to
+	 * read-then-write, taking no lock, would not be.
+	 */
+	public function test_operation_claim_is_atomic() {
+		$scope = 'selftest-op:' . wp_rand();
+		$req   = new WP_REST_Request( 'POST', '' );
+		$req->set_param( 'op_id', 'st-op-' . wp_rand() );
+		$key   = gasf_crm_op_key( $scope, $req->get_param( 'op_id' ) );
+
+		$other = new wpdb( DB_USER, DB_PASSWORD, DB_NAME, DB_HOST );
+		$held  = 1 === (int) $other->get_var( $other->prepare( 'SELECT GET_LOCK(%s, 0)', gasf_crm_op_lock_name( $key ) ) );
+		try {
+			$this->ok( $held, 'operation claim: a second connection can hold the operation\'s lock' );
+			$r = gasf_crm_op_start( $scope, $req, 60, 0 );
+			$this->ok( is_wp_error( $r ) && 'gasf_crm_inflight' === $r->get_error_code() && false === get_transient( $key ),
+				'operation claim: while another request is claiming it, this one is refused and writes nothing' );
+		} finally {
+			$other->get_var( $other->prepare( 'SELECT RELEASE_LOCK(%s)', gasf_crm_op_lock_name( $key ) ) );
+			$other->close();
+		}
+
+		try {
+			$first = gasf_crm_op_start( $scope, $req, 60, 0 );
+			$this->ok( is_array( $first ) && empty( $first['duplicate'] ), 'operation claim: with the lock free, the first claim wins' );
+			$again = gasf_crm_op_start( $scope, $req, 60, 0 );
+			$this->ok( is_wp_error( $again ), 'operation claim: the same id again while it runs is refused' );
+			gasf_crm_op_finish( $first, true, 60 );
+			$after = gasf_crm_op_start( $scope, $req, 60, 0 );
+			$this->ok( is_array( $after ) && ! empty( $after['duplicate'] ), 'operation claim: and once it has finished, is answered as already done' );
+		} finally {
+			delete_transient( $key );
+		}
+	}
+
 	/* ------------------------------------------------------------------ run */
 
 	public function run() {

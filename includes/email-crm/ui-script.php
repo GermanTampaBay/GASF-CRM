@@ -1155,22 +1155,10 @@ function gasf_crm_render_inbox_script() {
 		return matches.length === 1 ? matches[0] : null;
 	}
 
-	/* Two normalised forms per name, because German has two conventions and
-	 * people use both. expand=true gives the spelled-out form (Müller→mueller),
-	 * matching somebody who types "Mueller"; expand=false strips the diacritic
-	 * (Müller→muller), matching somebody who types "Muller" — or who cannot
-	 * produce an umlaut on their keyboard at all, which is most people. */
-
-
-	// Levenshtein, capped — beyond the threshold the exact distance is of no
-	// interest, and bailing early keeps this cheap enough to run on every
-	// keystroke against every name.
-
-
-	/* Ranked, best first. The order is deliberate: what somebody has typed the
-	 * beginning of is far more likely to be what they mean than something it is
-	 * merely close to, so every exact-ish match outranks every fuzzy one. */
-
+	/* The name matching itself - the two normalised forms, the capped
+	 * Levenshtein, the ranking - lives in gasf_photo_matcher_js(), shared with
+	 * the public tagging page. Its comments went with it; three of them were
+	 * left here describing functions that are no longer in this file. */
 
 	// Every non-empty box, in the order they appear. Trimmed and de-duplicated,
 	// because "Hans" typed twice is one person and the taxonomy would otherwise
