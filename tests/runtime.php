@@ -164,8 +164,12 @@ final class GASF_CRM_Selftest {
 			$stray = $wpdb->get_results( $wpdb->prepare(
 				"SELECT t.term_id, tt.taxonomy FROM {$wpdb->terms} t
 				   JOIN {$wpdb->term_taxonomy} tt ON tt.term_id = t.term_id
-				  WHERE t.term_id > %d AND t.name LIKE %s AND tt.taxonomy LIKE %s",
-				(int) $this->term_floor, 'Selftest %', 'gasf\_photo\_%'
+				  WHERE t.term_id > %d AND tt.taxonomy LIKE %s
+				    AND ( t.name LIKE %s OR t.name LIKE %s OR t.name LIKE %s )",
+				// The face tests name their people "... Calibration" and
+				// "... Example" rather than "Selftest ...", and three of those
+				// were left behind by every run until this covered them too.
+				(int) $this->term_floor, 'gasf\_photo\_%', 'Selftest %', '% Calibration', '% Example'
 			) );
 			foreach ( $stray as $s ) { wp_delete_term( (int) $s->term_id, (string) $s->taxonomy ); }
 		}
