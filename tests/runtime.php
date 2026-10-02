@@ -3143,6 +3143,153 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * Publishing never moves a photo onto a name another file already has.
+	 *
+	 * On 2026-09-13 two uploads named 022.jpg and 023.jpg were published into
+	 * 2026/09, where two Picnic photos from September 6th already had those
+	 * names. Publish skipped every file whose name was taken but pointed the new
+	 * photos at those names anyway: they showed the Picnic pictures, were
+	 * deleted as wrong, and the deletion took the Picnic files with them.
+	 *
+	 * Reproduced with decoys already sitting at the fixture's own name and at one
+	 * of its size names, in the folder it publishes into. The first assertion
+	 * checks the fixture really has sizes, or "every size is in place" would
+	 * pass on an empty list.
+	 */
+	public function test_publish_never_takes_a_name_in_use() {
+		$id = $this->held_photo( 'st-clash', $this->jpeg_bytes( 400, 300 ) );
+		if ( is_wp_error( $id ) ) { $this->ok( false, 'clash: a held photo fixture could be made' ); return; }
+		$priv = (string) get_attached_file( $id );
+		wp_update_attachment_metadata( $id, gasf_crm_photo_generate_metadata( $id, $priv ) );
+		$sizes = array_values( array_filter( wp_list_pluck( (array) ( wp_get_attachment_metadata( $id )['sizes'] ?? array() ), 'file' ) ) );
+		if ( ! $this->ok( count( $sizes ) > 0, 'clash: the fixture has generated sizes to move' ) ) { return; }
+
+		$up    = wp_upload_dir( get_post_field( 'post_date', $id ) );
+		$dest  = trailingslashit( $up['path'] );
+		$main  = basename( $priv );
+		$decoy = array(
+			$dest . $main      => 'another photo ' . wp_rand(),
+			$dest . $sizes[0]  => 'another photo\'s size ' . wp_rand(),
+		);
+		wp_mkdir_p( $dest );
+		try {
+			foreach ( $decoy as $f => $bytes ) { file_put_contents( $f, $bytes ); }
+
+			// A record whose file has gone missing still owns its name - #25603's
+			// state for three weeks. Asked of the picker directly, against a
+			// library fixture whose file is deleted out from under its record.
+			$lib  = $this->library_photo( 'st-claim' );
+			$lrel = (string) get_post_meta( $lib, '_wp_attached_file', true );
+			$lf   = (string) get_attached_file( $lib );
+			@unlink( $lf ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			$pick = gasf_crm_photo_free_names( $id, dirname( $priv ), dirname( $lf ), dirname( $lrel ), array( basename( $lrel ) ), pathinfo( $lrel, PATHINFO_FILENAME ) );
+			$this->ok(
+				! is_wp_error( $pick ) && basename( $lrel ) !== $pick[ basename( $lrel ) ],
+				'clash: a name whose file is missing still belongs to the photo that records it'
+			);
+
+			$pub = gasf_crm_photo_publish( $id );
+			if ( ! $this->ok( true === $pub, 'clash: publish succeeds when its names are taken' ) ) { return; }
+
+			foreach ( $decoy as $f => $bytes ) {
+				$this->ok( is_file( $f ) && file_get_contents( $f ) === $bytes, 'clash: the file already at ' . basename( $f ) . ' is untouched' );
+			}
+			$rel  = (string) get_post_meta( $id, '_wp_attached_file', true );
+			$file = (string) get_attached_file( $id );
+			$this->ok( ! gasf_crm_photo_is_private( $id ), 'clash: the photo was published' );
+			$this->ok( basename( $rel ) !== $main, 'clash: under a name of its own (' . basename( $rel ) . ')' );
+			$this->ok( is_file( $file ) && false !== @getimagesize( $file ), 'clash: and its own picture is at that name' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+			$stem = pathinfo( $rel, PATHINFO_FILENAME );
+			$md   = (array) wp_get_attachment_metadata( $id );
+			$here = true;
+			$same = true;
+			foreach ( (array) ( $md['sizes'] ?? array() ) as $s ) {
+				$here = $here && is_file( $dest . $s['file'] ) && ! isset( $decoy[ $dest . $s['file'] ] );
+				$same = $same && 0 === strpos( $s['file'], $stem );
+			}
+			$this->ok( $here, 'clash: every size is in place, none of them on the other photo\'s' );
+			$this->ok( $same, 'clash: and renamed with it, so the set still reads as one' );
+
+			$left = glob( trailingslashit( dirname( $priv ) ) . pathinfo( $main, PATHINFO_FILENAME ) . '*' ) ?: array();
+			$this->ok( 0 === count( $left ), 'clash: nothing is left behind in the review folder (' . count( $left ) . ')' );
+		} finally {
+			foreach ( $decoy as $f => $bytes ) { @unlink( $f ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+	}
+
+	/**
+	 * Withdrawing a photo never moves it onto a name in the review folder.
+	 *
+	 * Same-named photos are the ORDINARY case there - every phone calls its
+	 * pictures IMG_1234.jpg - so withdrawal checks it as hard as publish checks
+	 * uploads.
+	 */
+	public function test_withdraw_never_takes_a_name_in_use() {
+		$review = gasf_crm_photo_review_dir();
+		if ( is_wp_error( $review ) ) { $this->ok( false, 'withdraw clash: the review folder is there' ); return; }
+		$id    = $this->library_photo( 'st-wclash' );
+		$pub   = (string) get_attached_file( $id );
+		$name  = basename( $pub );
+		$decoy = trailingslashit( $review ) . $name;
+		$bytes = 'a pending photo ' . wp_rand();
+		try {
+			file_put_contents( $decoy, $bytes );
+			$r = gasf_crm_photo_unpublish( $id );
+			if ( ! $this->ok( true === $r, 'withdraw clash: withdrawal succeeds when the name is taken' ) ) { return; }
+
+			$file = (string) get_attached_file( $id );
+			$this->ok( file_get_contents( $decoy ) === $bytes, 'withdraw clash: the pending photo already at that name is untouched' );
+			$this->ok( gasf_crm_photo_is_private( $id ), 'withdraw clash: the photo is private' );
+			$this->ok(
+				basename( $file ) !== $name && is_file( $file ) && false !== @getimagesize( $file ), // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				'withdraw clash: and in the review folder under a name of its own (' . basename( $file ) . ')'
+			);
+			$this->ok( ! file_exists( $pub ), 'withdraw clash: nothing is left in public uploads' );
+		} finally {
+			@unlink( $decoy ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+	}
+
+	/**
+	 * The move under publish and withdrawal cannot replace a file.
+	 *
+	 * Checking that a name is free and then calling rename() is not enough:
+	 * rename() silently replaces whatever is at the destination, so a file that
+	 * appears between the check and the move is destroyed. This suite cannot
+	 * stage that race, so the primitive the fix relies on is pinned instead - a
+	 * "simplification" back to rename() fails the first assertion.
+	 */
+	public function test_move_never_replaces_a_file() {
+		$dir = trailingslashit( get_temp_dir() ) . 'gasf-st-move-' . wp_rand();
+		wp_mkdir_p( $dir );
+		try {
+			file_put_contents( "$dir/a.jpg", 'moving' );
+			file_put_contents( "$dir/b.jpg", 'already here' );
+			$r = gasf_crm_photo_move_file( "$dir/a.jpg", "$dir/b.jpg" );
+			$this->ok( is_wp_error( $r ), 'move: onto an existing file is refused' );
+			$this->ok( 'already here' === file_get_contents( "$dir/b.jpg" ), 'move: and the file there is untouched' );
+			$this->ok( 'moving' === file_get_contents( "$dir/a.jpg" ), 'move: and the one being moved is still where it was' );
+
+			$r = gasf_crm_photo_move_file( "$dir/a.jpg", "$dir/c.jpg" );
+			$this->ok( true === $r && 'moving' === file_get_contents( "$dir/c.jpg" ) && ! file_exists( "$dir/a.jpg" ), 'move: to a free name, it moves' );
+
+			// Interrupted between making the new name and dropping the old one.
+			file_put_contents( "$dir/d.jpg", 'interrupted' );
+			if ( @link( "$dir/d.jpg", "$dir/e.jpg" ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				$r = gasf_crm_photo_move_file( "$dir/d.jpg", "$dir/e.jpg" );
+				$this->ok(
+					true === $r && ! file_exists( "$dir/d.jpg" ) && 'interrupted' === file_get_contents( "$dir/e.jpg" ),
+					'move: an interrupted move of the same file is finished, not refused'
+				);
+			}
+		} finally {
+			foreach ( glob( "$dir/*" ) ?: array() as $f ) { @unlink( $f ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+	}
+
+	/**
 	 * Every photo gets its own archive file.
 	 *
 	 * The archive overwrote itself for two months: photos from the same day,

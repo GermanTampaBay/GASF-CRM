@@ -1275,14 +1275,193 @@ function gasf_crm_photo_scrub( $path ) {
 }
 
 /**
+ * The same file under two names? One inode is what a hard link makes.
+ */
+function gasf_crm_photo_same_file( $a, $b ) {
+	$sa = @stat( $a ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	$sb = @stat( $b ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	return $sa && $sb && $sa['dev'] === $sb['dev'] && $sa['ino'] === $sb['ino'];
+}
+
+/**
+ * Move one file, never over another.
+ *
+ * rename() REPLACES whatever is at the destination - silently, atomically, by
+ * design - so even "check the name is free, then rename" destroys a file that
+ * appears in between. link() cannot: it fails when the name exists, and it is
+ * atomic, so of two moves racing for one name exactly one gets it. The old
+ * name is dropped only once the new one exists.
+ *
+ * A destination that is already the same file is a move interrupted between
+ * those two steps, and finishing it is just dropping the old name. Where there
+ * are no hard links (another filesystem) it falls back to an exclusive create -
+ * fopen 'x', which also fails when the name exists - and a copy.
+ *
+ * @return true|WP_Error
+ */
+function gasf_crm_photo_move_file( $src, $dst ) {
+	if ( ! is_file( $src ) ) {
+		return new WP_Error( 'gasf_crm_move', basename( $src ) . ' is not there to move.' );
+	}
+	if ( @link( $src, $dst ) || gasf_crm_photo_same_file( $src, $dst ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		@unlink( $src ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return true;
+	}
+	if ( file_exists( $dst ) ) {
+		return new WP_Error( 'gasf_crm_move', basename( $dst ) . ' already belongs to another file.' );
+	}
+
+	$out = @fopen( $dst, 'xb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	if ( ! $out ) {
+		return new WP_Error( 'gasf_crm_move', 'Could not create ' . basename( $dst ) . '.' );
+	}
+	$in = @fopen( $src, 'rb' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	$ok = $in && false !== stream_copy_to_stream( $in, $out );
+	if ( $in ) { fclose( $in ); }
+	fclose( $out );
+	clearstatcache();
+	if ( ! $ok || filesize( $dst ) !== filesize( $src ) ) {
+		@unlink( $dst ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		return new WP_Error( 'gasf_crm_move', 'Could not copy ' . basename( $src ) . '.' );
+	}
+	@chmod( $dst, fileperms( $src ) & 0777 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- a rename would keep the mode
+	@unlink( $src ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	return true;
+}
+
+/**
+ * Names for a photo's whole set of files that nobody has at the destination.
+ *
+ * The set is renamed together, the way WordPress names an upload that clashes:
+ * "022.jpg" becomes "022-1.jpg", its "022-300x225.jpg" becomes
+ * "022-1-300x225.jpg", and "022-scaled.jpg" becomes "022-1-scaled.jpg" - every
+ * name in the set begins with the same stem, and the number goes in right
+ * after it.
+ *
+ * A name is free only if no file has it AND no other photo's record claims it.
+ * A photo whose file has gone missing still owns its name: handing that name
+ * to a newcomer means two records share one file the moment the first is
+ * restored, and deleting either then deletes both.
+ *
+ * @param string   $rel_to Where $to sits in _wp_attached_file terms - "2026/09", or the review dir.
+ * @param string[] $names  The set, as bare file names.
+ * @return array|WP_Error  Each old name => its name at the destination.
+ */
+function gasf_crm_photo_free_names( $id, $from, $to, $rel_to, array $names, $stem ) {
+	global $wpdb;
+	$from   = trailingslashit( $from );
+	$to     = trailingslashit( $to );
+	$rel_to = trim( (string) $rel_to, '/' );
+	$prefix = '' === $rel_to ? '' : $rel_to . '/';
+	$stem   = (string) $stem;
+
+	for ( $n = 0; $n <= 200; $n++ ) {
+		$map = array();
+		foreach ( $names as $name ) {
+			if ( 0 === $n ) {
+				$new = $name;
+			} elseif ( '' !== $stem && 0 === strpos( $name, $stem ) ) {
+				$new = $stem . '-' . $n . substr( $name, strlen( $stem ) );
+			} else {
+				$ext = pathinfo( $name, PATHINFO_EXTENSION );
+				$new = pathinfo( $name, PATHINFO_FILENAME ) . '-' . $n . ( '' !== $ext ? '.' . $ext : '' );
+			}
+			$map[ $name ] = $new;
+		}
+		if ( count( array_unique( $map ) ) !== count( $map ) ) { continue; }
+
+		$taken = false;
+		foreach ( $map as $old => $new ) {
+			if ( file_exists( $to . $new ) && ! gasf_crm_photo_same_file( $from . $old, $to . $new ) ) {
+				$taken = true;
+				break;
+			}
+		}
+		if ( $taken ) { continue; }
+
+		$rels = array();
+		foreach ( $map as $new ) { $rels[] = $prefix . $new; }
+		$claimed = (int) $wpdb->get_var( $wpdb->prepare(
+			"SELECT COUNT(*) FROM {$wpdb->postmeta}
+			 WHERE meta_key = '_wp_attached_file' AND post_id <> %d
+			 AND meta_value IN (" . implode( ',', array_fill( 0, count( $rels ), '%s' ) ) . ')',
+			array_merge( array( (int) $id ), $rels )
+		) );
+		if ( ! $claimed ) { return $map; }
+	}
+	return new WP_Error( 'gasf_crm_name', sprintf( 'Could not find a free name for %s - too many photos share it.', $stem ) );
+}
+
+/**
+ * Move a photo's whole set of files to another folder - renamed together if any
+ * of its names is taken there - all or nothing.
+ *
+ * All or nothing because the metadata records every size as a bare name in ONE
+ * directory: a set split across two folders is a photo whose thumbnails point
+ * at nothing. If any file cannot be moved, the ones that already were are put
+ * back before the error is returned.
+ *
+ * @return array|WP_Error Each old name => its name at the destination.
+ */
+function gasf_crm_photo_move_set( $id, $from, $to, $rel_to, array $names, $stem, $mode ) {
+	$from = trailingslashit( $from );
+	$to   = trailingslashit( $to );
+	$map  = gasf_crm_photo_free_names( $id, $from, $to, $rel_to, $names, $stem );
+	if ( is_wp_error( $map ) ) { return $map; }
+
+	$done = array();
+	foreach ( $map as $old => $new ) {
+		if ( ! file_exists( $from . $old ) ) { continue; } // a size that was never generated
+		$was = fileperms( $from . $old ) & 0777;
+		$r   = gasf_crm_photo_move_file( $from . $old, $to . $new );
+		if ( is_wp_error( $r ) ) {
+			foreach ( array_reverse( $done, true ) as $o => $d ) {
+				$back = gasf_crm_photo_move_file( $to . $d['name'], $from . $o );
+				if ( is_wp_error( $back ) ) {
+					gasf_crm_log( 'CRM photos: media #' . (int) $id . ' - could not put ' . $d['name'] . ' back after a failed move: ' . $back->get_error_message() );
+				} else {
+					@chmod( $from . $o, $d['mode'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+				}
+			}
+			return $r;
+		}
+		@chmod( $to . $new, $mode ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		$done[ $old ] = array( 'name' => $new, 'mode' => $was );
+	}
+	return $map;
+}
+
+/** Point a photo's metadata at the names its files were moved to. */
+function gasf_crm_photo_meta_renamed( array $meta, array $map ) {
+	if ( ! empty( $meta['original_image'] ) && isset( $map[ $meta['original_image'] ] ) ) {
+		$meta['original_image'] = $map[ $meta['original_image'] ];
+	}
+	foreach ( (array) ( $meta['sizes'] ?? array() ) as $k => $s ) {
+		if ( ! empty( $s['file'] ) && isset( $map[ $s['file'] ] ) ) {
+			$meta['sizes'][ $k ]['file'] = $map[ $s['file'] ];
+		}
+	}
+	return $meta;
+}
+
+/**
  * Move an approved photo out of the private folder into normal uploads.
  *
  * The whole set moves together — the full-size file, WordPress's untouched
  * original, and every generated size — because they share a directory and the
  * metadata records the sizes as bare filenames relative to it.
  *
- * The name was already made unique against the destination at intake, so this
- * cannot collide with an existing file and no size has to be renamed.
+ * Under names nobody else has. This used to trust the intake to have made the
+ * name unique against the destination, skip any file whose name was taken
+ * there, and point the photo at that name anyway. Nothing made the trust good:
+ * the upload checks only the review folder, and the destination is chosen
+ * here. On 2026-09-13 two uploads named 022.jpg and 023.jpg were "published"
+ * onto two Picnic photos from September 6th. They showed the Picnic pictures,
+ * were deleted as wrong, and the deletion took the Picnic files with them -
+ * while their own pictures sat in the review folder, owned by nothing.
+ *
+ * Now a taken name renames the whole set (022-1.jpg, 022-1-300x225.jpg), and
+ * no file is ever moved over another - see gasf_crm_photo_move_file().
  */
 function gasf_crm_photo_publish( $attachment_id ) {
 	$id = (int) $attachment_id;
@@ -1301,6 +1480,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	foreach ( (array) ( $meta['sizes'] ?? array() ) as $s ) {
 		if ( ! empty( $s['file'] ) ) { $names[] = $s['file']; }
 	}
+	$names = array_values( array_unique( $names ) );
 
 	/*
 	 * Strip every file BEFORE any of them moves.
@@ -1318,7 +1498,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	 * not happen is a volunteer clicking again; a published photo carrying the
 	 * coordinates of somebody's house cannot be taken back.
 	 */
-	foreach ( array_unique( $names ) as $n ) {
+	foreach ( $names as $n ) {
 		$src = $from . $n;
 		if ( ! file_exists( $src ) ) { continue; }
 		$clean = gasf_crm_photo_scrub( $src );
@@ -1338,7 +1518,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	 * all. Reproduced by accident while testing something else, which is the
 	 * only reason it was found.
 	 *
-	 * Checked before the rename loop so nothing has moved when it fails.
+	 * Checked before the move so nothing has moved when it fails.
 	 */
 	$main = $from . basename( $rel );
 	if ( ! file_exists( $main ) ) {
@@ -1351,7 +1531,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	/*
 	 * Files in the review folder are 0600 — deliberately, so nothing but this
 	 * process can read an unreviewed photo even if the directory protection
-	 * fails. rename() PRESERVES permissions, so every approved photo arrived in
+	 * fails. A move PRESERVES permissions, so every approved photo arrived in
 	 * public uploads still readable only by the owner, and the web server
 	 * answered 403 for all of it.
 	 *
@@ -1363,40 +1543,39 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	 * WordPress uses for its own uploads, which is the correct thing to match
 	 * rather than a hardcoded 0644 that ignores a host's umask.
 	 */
-	$mode = defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644;
+	$mode   = defined( 'FS_CHMOD_FILE' ) ? FS_CHMOD_FILE : 0644;
+	$subdir = trim( (string) $up['subdir'], '/' );
+	$to     = trailingslashit( $up['path'] );
+	$stem   = pathinfo( ! empty( $meta['original_image'] ) ? $meta['original_image'] : basename( $rel ), PATHINFO_FILENAME );
 
-	$moved_any = false;
-	foreach ( array_unique( $names ) as $n ) {
-		$src = $from . $n;
-		$dst = trailingslashit( $up['path'] ) . $n;
-		if ( ! file_exists( $src ) || file_exists( $dst ) ) { continue; }
-		if ( ! @rename( $src, $dst ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			return new WP_Error( 'gasf_crm_pub', 'Could not move ' . $n . ' out of the review folder.' );
-		}
-		@chmod( $dst, $mode ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
-		$moved_any = true;
+	$map = gasf_crm_photo_move_set( $id, $from, $to, $subdir, $names, $stem, $mode );
+	if ( is_wp_error( $map ) ) {
+		gasf_crm_log( 'CRM photos: NOT publishing media #' . $id . ' — ' . $map->get_error_message() );
+		return new WP_Error( 'gasf_crm_pub', 'This photo has not been published: ' . $map->get_error_message() );
 	}
+	$main_name = $map[ basename( $rel ) ];
+	$main_pub  = $to . $main_name;
 
 	// Verified, not assumed — the whole point of publishing is that the picture
 	// can be seen, and "the bytes are in the right folder" is not that.
-	$main_pub = trailingslashit( $up['path'] ) . basename( $rel );
 	if ( is_file( $main_pub ) && ! is_readable( $main_pub ) ) {
 		return new WP_Error( 'gasf_crm_pub', sprintf(
 			'%s was moved but is not readable by the web server, so it would show as a broken image. Publishing stopped.',
-			basename( $rel )
+			$main_name
 		) );
 	}
 
-	// Belt and braces on the same point: if the destination has no main file
-	// either, something moved it out from under us between the check above and
-	// here, and recording this as published would be a lie.
-	if ( ! $moved_any && ! file_exists( trailingslashit( $up['path'] ) . basename( $rel ) ) ) {
+	// Belt and braces on the same point: if the destination has no main file,
+	// something moved it out from under us between the check above and here,
+	// and recording this as published would be a lie.
+	if ( ! is_file( $main_pub ) ) {
 		return new WP_Error( 'gasf_crm_pub', 'Nothing was moved out of the review folder, so this photo has not been published.' );
 	}
 
-	$new_rel = ltrim( trailingslashit( ltrim( (string) $up['subdir'], '/' ) ) . basename( $rel ), '/' );
+	$new_rel = ( '' !== $subdir ? $subdir . '/' : '' ) . $main_name;
 	update_post_meta( $id, '_wp_attached_file', $new_rel );
 	if ( $meta ) {
+		$meta         = gasf_crm_photo_meta_renamed( $meta, $map );
 		$meta['file'] = $new_rel;
 
 		// Re-read from the files that now exist. Re-encoding changes every byte
@@ -1404,16 +1583,15 @@ function gasf_crm_photo_publish( $attachment_id ) {
 		// height — recorded dimensions that disagree with the image make layouts
 		// reserve the wrong space, and a wrong number is harder to spot than a
 		// missing one.
-		$main = trailingslashit( $up['path'] ) . basename( $rel );
-		$dim  = @getimagesize( $main ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		$dim = @getimagesize( $main_pub ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		if ( $dim ) {
 			$meta['width']  = (int) $dim[0];
 			$meta['height'] = (int) $dim[1];
 		}
-		if ( isset( $meta['filesize'] ) && is_file( $main ) ) { $meta['filesize'] = filesize( $main ); }
+		if ( isset( $meta['filesize'] ) ) { $meta['filesize'] = filesize( $main_pub ); }
 
 		foreach ( (array) ( $meta['sizes'] ?? array() ) as $k => $s ) {
-			$f = trailingslashit( $up['path'] ) . ( $s['file'] ?? '' );
+			$f = $to . ( $s['file'] ?? '' );
 			if ( ! empty( $s['file'] ) && is_file( $f ) ) {
 				$sd = @getimagesize( $f ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 				if ( $sd ) {
@@ -1431,7 +1609,8 @@ function gasf_crm_photo_publish( $attachment_id ) {
 	// before the move would advertise a file still sitting behind the boundary.
 	wp_update_post( array( 'ID' => $id, 'post_status' => 'inherit' ) );
 
-	gasf_crm_log( 'CRM photos: media #' . $id . ' published to ' . $new_rel );
+	gasf_crm_log( 'CRM photos: media #' . $id . ' published to ' . $new_rel
+		. ( basename( $rel ) !== $main_name ? ' (' . basename( $rel ) . ' was already taken there)' : '' ) );
 	return true;
 }
 
@@ -1444,6 +1623,7 @@ function gasf_crm_photo_publish( $attachment_id ) {
  * than not claiming it, so they get moved rather than explained away.
  *
  * Runs on demand, not on a schedule: it is a one-off correction of history.
+ * Also the way back for a photo whose consent no longer allows the web.
  */
 function gasf_crm_photo_unpublish( $attachment_id ) {
 	$id = (int) $attachment_id;
@@ -1475,28 +1655,29 @@ function gasf_crm_photo_unpublish( $attachment_id ) {
 		if ( ! empty( $s['file'] ) ) { $names[] = $s['file']; }
 	}
 
-	foreach ( array_unique( $names ) as $n ) {
-		$src = $from . $n;
-		$dst = trailingslashit( $review ) . $n;
-		if ( ! file_exists( $src ) || file_exists( $dst ) ) { continue; }
-		if ( ! @rename( $src, $dst ) ) { // phpcs:ignore WordPress.PHP.NoSilencedErrors
-			return new WP_Error( 'gasf_crm_unpub', 'Could not move ' . $n . ' into the review folder.' );
-		}
-		// The mirror of publish: a file coming BACK from public uploads carries
-		// its public 0644 with it, which would leave a withdrawn photo more
-		// readable than one that never left. Withdrawing has to actually
-		// withdraw it.
-		@chmod( $dst, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	// The same rule as publish, the other way: never onto a name another photo
+	// holds in the review folder, where same-named photos are the ORDINARY case
+	// - every phone calls its pictures IMG_1234.jpg.
+	//
+	// 0600, the mirror of publish: a file coming BACK from public uploads
+	// carries its public 0644 with it, which would leave a withdrawn photo more
+	// readable than one that never left. Withdrawing has to actually withdraw it.
+	$stem = pathinfo( ! empty( $meta['original_image'] ) ? $meta['original_image'] : basename( $rel ), PATHINFO_FILENAME );
+	$map  = gasf_crm_photo_move_set( $id, $from, $review, GASF_CRM_PHOTO_REVIEW_DIR, array_values( array_unique( $names ) ), $stem, 0600 );
+	if ( is_wp_error( $map ) ) {
+		return new WP_Error( 'gasf_crm_unpub', 'Could not move this photo into the review folder: ' . $map->get_error_message() );
 	}
 
-	$new_rel = GASF_CRM_PHOTO_REVIEW_DIR . '/' . basename( $rel );
+	$new_rel = GASF_CRM_PHOTO_REVIEW_DIR . '/' . $map[ basename( $rel ) ];
 	update_post_meta( $id, '_wp_attached_file', $new_rel );
 	if ( $meta ) {
+		$meta         = gasf_crm_photo_meta_renamed( $meta, $map );
 		$meta['file'] = $new_rel;
 		wp_update_attachment_metadata( $id, $meta );
 	}
 
-	gasf_crm_log( 'CRM photos: media #' . $id . ' withdrawn from public uploads pending review' );
+	gasf_crm_log( 'CRM photos: media #' . $id . ' withdrawn from public uploads pending review'
+		. ( basename( $rel ) !== $map[ basename( $rel ) ] ? ' as ' . $map[ basename( $rel ) ] . ' (' . basename( $rel ) . ' was already taken there)' : '' ) );
 	return true;
 }
 
