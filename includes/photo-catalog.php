@@ -135,7 +135,7 @@ if ( true ) {
 		if ( get_option( 'gasf_photo_seeded_groups' ) ) { return; }
 		update_option( 'gasf_photo_seeded_groups', 1, false );
 
-		foreach ( array( 'Bayen Munich', 'Krampus', 'Schuhplattlers' ) as $name ) {
+		foreach ( array( 'Bayern Munich', 'Krampus', 'Schuhplattlers' ) as $name ) {
 			if ( term_exists( $name, 'gasf_photo_group' ) ) { continue; }
 			wp_insert_term( $name, 'gasf_photo_group' );
 		}
