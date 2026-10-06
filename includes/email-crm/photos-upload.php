@@ -210,6 +210,84 @@ function gasf_crm_photo_upload_schedule_derivatives( $attachment_id ) {
 }
 
 /*
+ * The sweeper: whatever has no thumbnails gets them, eventually, whatever
+ * happened to its own scheduled job.
+ *
+ * Found 2026-10-06: 947 photos had none, newest among them uploads from the
+ * night before. The host ends any process at 120 s of CPU, the scheduler runs
+ * every due job in ONE process, and WordPress takes a job off the queue just
+ * before running it - so a backlog of resizes killed the process and the jobs
+ * it had taken went with it, with no error anywhere. A one-off job per photo
+ * cannot be made safe against that; looking for what is still missing can.
+ * A killed sweep loses nothing: the next one finds the same photos.
+ *
+ * Skipped: WebP photos still waiting for the WebP repair (it makes their
+ * sizes itself), and anything already tried that came out with no sizes -
+ * an image too small to need any - so it cannot block the queue forever.
+ */
+define( 'GASF_CRM_SIZES_TRIED', '_gasf_sizes_tried' );
+
+/** Club photos with no thumbnails, newest first. */
+function gasf_crm_photo_sizes_missing( $limit = 25, array $only = array() ) {
+	global $wpdb;
+	$only_sql = $only ? ' AND p.ID IN (' . implode( ',', array_map( 'intval', $only ) ) . ')' : '';
+	return array_map( 'intval', (array) $wpdb->get_col( $wpdb->prepare(
+		"SELECT p.ID FROM {$wpdb->posts} p
+		   LEFT JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_wp_attachment_metadata'
+		   LEFT JOIN {$wpdb->postmeta} f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
+		  WHERE p.post_type = 'attachment' AND p.post_mime_type LIKE %s
+		    AND EXISTS ( SELECT 1 FROM {$wpdb->postmeta} g WHERE g.post_id = p.ID AND g.meta_key LIKE %s )
+		    AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} t WHERE t.post_id = p.ID AND t.meta_key = %s )
+		    AND ( m.meta_value IS NULL OR m.meta_value NOT LIKE %s OR m.meta_value LIKE %s )
+		    AND NOT ( p.post_mime_type = 'image/webp' AND f.meta_value LIKE %s
+		              AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} s WHERE s.post_id = p.ID AND s.meta_key = %s ) )
+		    {$only_sql}
+		  ORDER BY p.ID DESC LIMIT %d",
+		'image/%',
+		$wpdb->esc_like( '_gasf_photo' ) . '%',
+		GASF_CRM_SIZES_TRIED,
+		'%' . $wpdb->esc_like( '"sizes";a:' ) . '%',
+		'%' . $wpdb->esc_like( '"sizes";a:0:' ) . '%',
+		'%' . $wpdb->esc_like( '-compressed.webp' ),
+		'_gasf_webp_repair_skip',
+		max( 1, (int) $limit )
+	) ) );
+}
+
+/**
+ * Make thumbnails for up to $limit photos that have none, within a CPU budget.
+ *
+ * The budget is checked both ways: this sweep's own use, and the whole
+ * process's, because it shares one process with every other scheduled job
+ * and it is the process's total that the host counts.
+ *
+ * @return int Photos it worked on.
+ */
+function gasf_crm_photo_sizes_sweep( $limit = 25, $own_cpu = 40, $process_cpu = 75, array $only = array() ) {
+	$cpu = static function () {
+		$u = getrusage();
+		return (float) $u['ru_utime.tv_sec'] + (float) $u['ru_stime.tv_sec']
+			+ ( (float) $u['ru_utime.tv_usec'] + (float) $u['ru_stime.tv_usec'] ) / 1e6;
+	};
+	$start = $cpu();
+	$n     = 0;
+	foreach ( gasf_crm_photo_sizes_missing( $limit, $only ) as $id ) {
+		$now = $cpu();
+		if ( $now - $start >= $own_cpu || $now >= $process_cpu ) { break; }
+		if ( false === gasf_crm_photo_upload_build_derivatives( $id, 5 ) ) { break; } // resizer busy: next time
+		$meta = wp_get_attachment_metadata( $id );
+		if ( empty( $meta['sizes'] ) ) { update_post_meta( $id, GASF_CRM_SIZES_TRIED, time() ); }
+		$n++;
+	}
+	if ( $n ) { gasf_crm_log( sprintf( 'CRM photos: thumbnail sweep worked on %d photo(s)', $n ) ); }
+	return $n;
+}
+add_action( 'gasf_crm_photo_sizes_event', function () { gasf_crm_photo_sizes_sweep(); } );
+add_action( 'init', function () {
+	if ( function_exists( 'gasf_crm_cron_ensure' ) ) { gasf_crm_cron_ensure( 'gasf_crm_photo_sizes_event', 120 ); }
+} );
+
+/*
  * A minute of phone video, near enough.
  *
  * 1080p runs about 130 MB a minute and 4K about three times that, so this is a

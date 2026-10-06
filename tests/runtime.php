@@ -1219,6 +1219,35 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The thumbnail sweeper finds photos with no sizes and makes them.
+	 *
+	 * One-off resize jobs were lost whenever the host killed the scheduler at
+	 * 120 s of CPU - 947 photos had no thumbnails before anyone noticed. The
+	 * sweep looks for what is missing instead. Fixtures only (via $only), so
+	 * no real photo is ever resized by the suite; and a tiny image that can
+	 * have no sizes must be marked, or it would sit at the head of the queue
+	 * forever.
+	 */
+	public function test_photo_sizes_sweep() {
+		$big  = $this->library_photo( 'selftest-sweep-big' );
+		file_put_contents( (string) get_attached_file( $big ), $this->jpeg_bytes( 1200, 800 ) );
+		$tiny = $this->library_photo( 'selftest-sweep-tiny' );   // 120x90: smaller than every size
+		$got  = gasf_crm_photo_sizes_missing( 10, array( $big, $tiny ) );
+		sort( $got );
+		$both = array( $big, $tiny );
+		sort( $both );
+		$this->ok( $both === $got, 'sweep: photos with no thumbnails are found' );
+
+		$n = gasf_crm_photo_sizes_sweep( 10, 30, 1000, array( $big, $tiny ) );
+		$this->ok( 2 === $n, 'sweep: it works on each of them' );
+		$sizes = array_keys( (array) ( wp_get_attachment_metadata( $big )['sizes'] ?? array() ) );
+		$this->ok( $sizes && ! array_diff( $sizes, gasf_crm_photo_library_sizes() ), 'sweep: a photo gets the library\'s sizes' );
+		$this->ok( array() === gasf_crm_photo_sizes_missing( 10, array( $big, $tiny ) ),
+			'sweep: and neither is found again - the tiny one is marked rather than retried forever' );
+		$this->ok( (bool) wp_next_scheduled( 'gasf_crm_photo_sizes_event' ), 'sweep: it is on the schedule' );
+	}
+
+	/**
 	 * Putting a photo the host's optimiser replaced back on its JPEG original.
 	 *
 	 * The repair deletes files, so the half of this that matters most is the
