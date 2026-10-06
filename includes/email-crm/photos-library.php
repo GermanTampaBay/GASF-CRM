@@ -640,6 +640,11 @@ if ( ! defined( 'GASF_CRM_PHOTO_BULK_DELETE_MAX' ) ) {
 	define( 'GASF_CRM_PHOTO_BULK_DELETE_MAX', 100 );
 }
 
+/** The most photos one bulk tag may take. Refused above this, never trimmed. */
+if ( ! defined( 'GASF_CRM_PHOTO_BULK_TAG_MAX' ) ) {
+	define( 'GASF_CRM_PHOTO_BULK_TAG_MAX', 100 );
+}
+
 /* =====================================================================
  * Bulk download
  * ================================================================== */
@@ -1042,9 +1047,22 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $lib_guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$in  = (array) $req->get_json_params();
-			$ids = array_slice( array_filter( array_map( 'intval', (array) ( $in['ids'] ?? array() ) ) ), 0, 100 );
+			$ids = array_values( array_unique( array_filter( array_map( 'intval', (array) ( $in['ids'] ?? array() ) ) ) ) );
 			if ( ! $ids ) {
 				return new WP_Error( 'gasf_crm_none', 'No photos selected.', array( 'status' => 400 ) );
+			}
+			/*
+			 * A hard limit, refused out loud - never trimmed. This used to keep
+			 * the first hundred and drop the rest without a word, then report
+			 * "100 photo(s) tagged" as if that were all of them (2026-10-05: a
+			 * Schuhplattlers pass came back as exactly 100). Bulk delete has
+			 * always refused; bulk tag now does the same.
+			 */
+			if ( count( $ids ) > GASF_CRM_PHOTO_BULK_TAG_MAX ) {
+				return new WP_Error( 'gasf_crm_too_many', sprintf(
+					'%d photos are selected. Tag at most %d at a time; nothing was changed.',
+					count( $ids ), GASF_CRM_PHOTO_BULK_TAG_MAX
+				), array( 'status' => 400 ) );
 			}
 
 			$adds = array();

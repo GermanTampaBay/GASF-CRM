@@ -3932,6 +3932,17 @@ final class GASF_CRM_Selftest {
 			$this->ok( ! term_exists( $stray, 'gasf_photo_group' ), 'bulk tag: and a group not on the club\'s list is not invented' );
 			$this->ok( in_array( $person, gasf_crm_photo_term_names( $id, 'gasf_photo_person' ), true ), 'bulk tag: a groups-only pass leaves the people alone' );
 
+			// A hard limit: 101 is refused whole, and 100 is not.
+			$many = array( $id );
+			for ( $i = 1; $i <= GASF_CRM_PHOTO_BULK_TAG_MAX; $i++ ) { $many[] = PHP_INT_MAX - $i; } // ids no photo has
+			$before = gasf_crm_photo_term_names( $id, 'gasf_photo_group' );
+			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => $many, 'remove_groups' => array( $group2 ) ) );
+			$this->ok( is_wp_error( $r ) && 'gasf_crm_too_many' === $r->get_error_code()
+				&& $before === gasf_crm_photo_term_names( $id, 'gasf_photo_group' ),
+				'bulk tag: one over the limit is refused outright, and nothing is changed - not the first hundred' );
+			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array_slice( $many, 0, GASF_CRM_PHOTO_BULK_TAG_MAX ), 'taken' => '2019' ) );
+			$this->ok( is_array( $r ) && 1 === (int) ( $r['updated'] ?? 0 ), 'bulk tag: exactly the limit goes through' );
+
 			// And a group can be taken off by name, leaving the others.
 			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array( $id ), 'remove_groups' => array( $group2 ) ) );
 			$this->ok( is_array( $r ) && 1 === (int) ( $r['updated'] ?? 0 )

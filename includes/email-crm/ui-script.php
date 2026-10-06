@@ -3479,6 +3479,14 @@ function gasf_crm_render_inbox_script() {
 	}());
 
 	/* ===================== bulk tagging ===================== */
+	/* At most this many at once. The server refuses more rather than quietly
+	   tagging the first hundred, which it used to do while reporting success. */
+	var BULK_TAG_MAX = <?php echo (int) ( defined( 'GASF_CRM_PHOTO_BULK_TAG_MAX' ) ? GASF_CRM_PHOTO_BULK_TAG_MAX : 100 ); ?>;
+	function bulkTagTooMany(){
+		var n = lselCount(), over = n - BULK_TAG_MAX;
+		return n + ' photos are selected. Tag at most ' + BULK_TAG_MAX + ' at a time; untick ' +
+			over + (over === 1 ? ' photo' : ' photos') + ' first. Nothing has been tagged.';
+	}
 	(function(){
 		var btn = document.getElementById('lbulk');
 		if (!btn) { return; }
@@ -3487,6 +3495,14 @@ function gasf_crm_render_inbox_script() {
 		btn.onclick = function(){
 			if (!lselCount()) {
 				document.getElementById('lzipmsg').textContent = 'Tick some photos first.';
+				return;
+			}
+			// Over the limit, the tagger does not open: better told now than
+			// after filling the form in.
+			if (lselCount() > BULK_TAG_MAX) {
+				panel.hidden = true;
+				document.getElementById('lzipmsg').textContent = bulkTagTooMany();
+				window.alert(bulkTagTooMany());
 				return;
 			}
 			// Places, from the list the page already holds.
@@ -3561,6 +3577,12 @@ function gasf_crm_render_inbox_script() {
 				if (i.value.trim()) { people.push(i.value.trim()); }
 			});
 			var msg = document.getElementById('btmsg');
+			// Ticking more with the panel already open is still caught here.
+			if (ids.length > BULK_TAG_MAX) {
+				msg.textContent = bulkTagTooMany();
+				window.alert(bulkTagTooMany());
+				return;
+			}
 			this.disabled = true;
 			msg.textContent = 'Tagging ' + ids.length + ' photo(s)…';
 			api('/photos/bulk-tag', { method: 'POST', body: JSON.stringify({
