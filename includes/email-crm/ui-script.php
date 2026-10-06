@@ -3993,6 +3993,61 @@ function gasf_crm_render_inbox_script() {
 		});
 	}
 
+	/* Hover preview. Rest the mouse on a photo for a moment and a larger copy
+	   appears beside it - the 'large' size the editor already uses, so nothing
+	   new is made or fetched beyond that one image. Mouse and trackpad only:
+	   on a touch screen a "hover" is a tap, and a tap already means open or
+	   select. It never takes a click - pointer-events are off - so it cannot
+	   get in the way of the photo underneath. */
+	(function(){
+		if (!lgrid || !window.matchMedia || !window.matchMedia('(hover: hover) and (pointer: fine)').matches) { return; }
+		var DELAY = 600;
+		var pop = document.createElement('div');
+		pop.className = 'lhover';
+		pop.hidden = true;
+		pop.innerHTML = '<img alt="">';
+		document.body.appendChild(pop);
+		var pimg = pop.firstChild, timer = 0, over = null;
+
+		function hide(){
+			clearTimeout(timer); timer = 0; over = null;
+			pop.hidden = true; pimg.onload = null; pimg.removeAttribute('src');
+		}
+		function place(card){
+			var r = card.getBoundingClientRect(), gap = 12;
+			var vw = window.innerWidth, vh = window.innerHeight;
+			pop.style.visibility = 'hidden'; pop.hidden = false;
+			var pw = pop.offsetWidth, ph = pop.offsetHeight;
+			// Beside the tile, on whichever side has room; over it if neither does.
+			var left = (r.right + gap + pw <= vw) ? r.right + gap
+				: (r.left - gap - pw >= 0 ? r.left - gap - pw : Math.max(gap, (vw - pw) / 2));
+			var top = Math.min(Math.max(gap, r.top + r.height / 2 - ph / 2), Math.max(gap, vh - ph - gap));
+			pop.style.left = left + 'px'; pop.style.top = top + 'px';
+			pop.style.visibility = '';
+		}
+		function show(card){
+			var p = lgrid._photos && lgrid._photos[parseInt(card.dataset.id, 10)];
+			if (!p || p.kind === 'video') { return; }
+			var src = p.full || p.thumb;
+			if (!src) { return; }
+			pimg.onload = function(){ if (over === card) { place(card); } };
+			pimg.alt = p.title || '';
+			pimg.src = src;
+		}
+		lgrid.addEventListener('mouseover', function(ev){
+			var card = ev.target.closest ? ev.target.closest('.lcard') : null;
+			if (card === over) { return; }
+			hide();
+			if (!card || !card.querySelector('img.lthumb')) { return; }
+			over = card;
+			timer = setTimeout(function(){ if (over === card) { show(card); } }, DELAY);
+		});
+		lgrid.addEventListener('mouseleave', hide);
+		lgrid.addEventListener('mousedown', hide);
+		window.addEventListener('scroll', hide, true);
+		document.addEventListener('keydown', hide);
+	}());
+
 	var lall = document.getElementById('lall');
 	if (lall) {
 		lall.onclick = function(){

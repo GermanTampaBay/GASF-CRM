@@ -423,6 +423,8 @@ header.bar .hbtn.nav.on{background:#fff;color:var(--gasf-ink,#1d1d1b);border-col
 .lcard .lopen{display:block;width:100%;padding:0;border:0;background:none;cursor:zoom-in}
 .lcard .lopen:focus-visible{outline:3px solid var(--s-accent);outline-offset:-3px}
 .lcard .lthumb{display:block;width:100%;aspect-ratio:4/3;object-fit:cover;background:var(--s-wash)}
+.lhover{position:fixed;z-index:9999;pointer-events:none;padding:4px;border-radius:6px;background:var(--gasf-surface);box-shadow:0 10px 32px rgba(0,0,0,.38)}
+.lhover img{display:block;width:auto;height:auto;max-width:min(640px,50vw);max-height:calc(100vh - 40px);border-radius:3px}
 .lcard .lmeta{padding:6px 8px;font-size:12px;line-height:1.35}
 .lcard .lmeta .lt{font-weight:600;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .lcard .lmeta .lsub{color:var(--gasf-muted);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
