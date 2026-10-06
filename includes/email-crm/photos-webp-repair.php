@@ -161,7 +161,11 @@ function gasf_crm_webp_repair_apply( array $plan ) {
 	// Empty, so the builder sees a photo with no sizes and makes the library's
 	// four - under its lock, past the optimiser, scrubbing them if public.
 	wp_update_attachment_metadata( $id, array() );
-	gasf_crm_photo_upload_build_derivatives( $id );
+	// Queues for the lock rather than being deferred: during an upload batch
+	// it is nearly always held, and deferring left a photo with no sizes.
+	if ( false === gasf_crm_photo_upload_build_derivatives( $id, 5 * MINUTE_IN_SECONDS ) ) {
+		return new WP_Error( 'gasf_webp_busy', 'now on its JPEG, but the resizer stayed busy; its copies will be made on the next scheduled pass' );
+	}
 
 	$meta = (array) wp_get_attachment_metadata( $id );
 	if ( 'image/jpeg' !== get_post_mime_type( $id ) || ! is_file( (string) get_attached_file( $id ) ) || empty( $meta['sizes'] ) ) {

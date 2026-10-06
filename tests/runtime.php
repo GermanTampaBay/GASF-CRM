@@ -3698,7 +3698,7 @@ final class GASF_CRM_Selftest {
 		$small = function () { return 50; };
 		add_filter( 'big_image_size_threshold', $small, 999 );
 		try {
-			gasf_crm_photo_upload_build_derivatives( $id );
+			gasf_crm_photo_upload_build_derivatives( $id, 120 ); // queue behind a live upload batch, do not be deferred
 		} finally {
 			remove_filter( 'big_image_size_threshold', $small, 999 );
 		}

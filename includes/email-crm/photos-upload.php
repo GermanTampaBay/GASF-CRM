@@ -111,8 +111,14 @@ function gasf_crm_photo_host_optimiser_off() {
  *
  * The upload call now stores the original quickly, and this worker generates
  * WordPress's resized derivatives afterwards.
+ *
+ * @param int $wait Seconds to queue for the lock. 0, as the scheduler calls it,
+ *                  means "busy? try again in a minute". A caller that needs
+ *                  the sizes before it carries on - the WebP repair, the tests
+ *                  - passes a wait instead, and is told false if it timed out.
+ * @return bool|null False only when a wait ran out; otherwise nothing useful.
  */
-function gasf_crm_photo_upload_build_derivatives( $attachment_id ) {
+function gasf_crm_photo_upload_build_derivatives( $attachment_id, $wait = 0 ) {
 	$id = (int) $attachment_id;
 	if ( ! $id || 'attachment' !== get_post_type( $id ) ) { return; }
 
@@ -131,11 +137,18 @@ function gasf_crm_photo_upload_build_derivatives( $attachment_id ) {
 	 * uploads at once, and the host answered 503 and then rate-limited the
 	 * whole site for over an hour. A second worker that finds this lock held
 	 * puts its photo back a minute later rather than piling on.
+	 *
+	 * Found the hard way that a caller which needs the result cannot take that
+	 * answer: during a volunteer's upload batch the lock is nearly always held,
+	 * so the WebP repair was handed back a photo with no sizes at all.
 	 */
 	global $wpdb;
-	if ( 1 !== (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', 'gasf_crm_derivatives', 0 ) ) ) {
+	$wait = max( 0, (int) $wait );
+	if ( 1 !== (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', 'gasf_crm_derivatives', $wait ) ) ) {
+		// Either way the photo is queued, so a timed-out wait still ends with
+		// sizes on the next scheduled pass rather than none ever.
 		wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'gasf_crm_photo_upload_derivatives_event', array( $id ) );
-		return;
+		return $wait > 0 ? false : null;
 	}
 	$optimiser_back = gasf_crm_photo_host_optimiser_off();
 	try {
