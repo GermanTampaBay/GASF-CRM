@@ -1218,6 +1218,81 @@ final class GASF_CRM_Selftest {
 		);
 	}
 
+	/**
+	 * Putting a photo the host's optimiser replaced back on its JPEG original.
+	 *
+	 * The repair deletes files, so the half of this that matters most is the
+	 * refusal: one stray file on its list that another record still uses must
+	 * stop the whole photo, with nothing deleted and nothing re-pointed. The
+	 * other half checks the repair itself keeps the SAME post - the tags and
+	 * consent on it are the reason not to just upload the JPEG again.
+	 */
+	public function test_webp_repair() {
+		$dir  = trailingslashit( wp_upload_dir()['path'] );
+		$sub  = trim( (string) wp_upload_dir()['subdir'], '/' );
+		$fake = "RIFF\x24\x00\x00\x00WEBPVP8 "; // a name is all the repair reads
+
+		// A: the ordinary case.
+		$a     = $this->library_photo( 'selftest-webp-a' );
+		$a_jpg = (string) get_attached_file( $a );
+		$stem  = substr( basename( $a_jpg ), 0, -4 );
+		file_put_contents( $a_jpg, $this->jpeg_bytes( 1200, 800 ) );
+		file_put_contents( $dir . $stem . '-compressed.webp', $fake );
+		file_put_contents( $dir . $stem . '-compressed-100x67.webp', $fake );
+		file_put_contents( $dir . $stem . '-150x150.jpg', $this->jpeg_bytes( 150, 150 ) );
+		update_post_meta( $a, '_wp_attached_file', $sub . '/' . $stem . '-compressed.webp' );
+		wp_update_post( array( 'ID' => $a, 'post_mime_type' => 'image/webp' ) );
+		update_post_meta( $a, '_nfd_performance_image_optimized', 1 );
+
+		// B: the same, except one of its stray files is still another record's.
+		$b     = $this->library_photo( 'selftest-webp-b' );
+		$b_jpg = (string) get_attached_file( $b );
+		$bstem = substr( basename( $b_jpg ), 0, -4 );
+		file_put_contents( $dir . $bstem . '-compressed.webp', $fake );
+		file_put_contents( $dir . $bstem . '-300x200.jpg', $this->jpeg_bytes( 300, 200 ) );
+		update_post_meta( $b, '_wp_attached_file', $sub . '/' . $bstem . '-compressed.webp' );
+		wp_update_post( array( 'ID' => $b, 'post_mime_type' => 'image/webp' ) );
+		$c = $this->library_photo( 'selftest-webp-c' );
+		wp_update_attachment_metadata( $c, array( 'sizes' => array( 'medium' => array( 'file' => $bstem . '-300x200.jpg' ) ) ) );
+
+		try {
+			$this->ok(
+				array( $a, $b ) === gasf_crm_webp_repair_candidates( array( $a, $b, $c ) ),
+				'webp repair: finds library photos filed as a compressed WebP, and not one filed as a JPEG'
+			);
+
+			$pb = gasf_crm_webp_repair_plan( $b );
+			$this->ok( is_wp_error( $pb ) && 'gasf_webp_shared' === $pb->get_error_code(), 'webp repair: a photo with a stray file another record still uses is refused whole' );
+			$this->ok( is_file( $dir . $bstem . '-300x200.jpg' ) && is_file( $dir . $bstem . '-compressed.webp' ), 'webp repair: and nothing of it is deleted' );
+
+			$pa = gasf_crm_webp_repair_plan( $a );
+			$this->ok( is_array( $pa ) && ! in_array( $a_jpg, $pa['delete'], true ), 'webp repair: the JPEG being put back is never on the delete list' );
+			$names = is_array( $pa ) ? array_map( 'basename', $pa['delete'] ) : array();
+			sort( $names );
+			$this->ok(
+				array( $stem . '-150x150.jpg', $stem . '-compressed-100x67.webp', $stem . '-compressed.webp' ) === $names,
+				'webp repair: the list is exactly that photo\'s WebP and stranded copies'
+			);
+
+			$r = is_array( $pa ) ? gasf_crm_webp_repair_apply( $pa ) : new WP_Error( 'x', 'no plan' );
+			$this->ok( ! is_wp_error( $r ), 'webp repair: applying it succeeds' . ( is_wp_error( $r ) ? ' - ' . $r->get_error_message() : '' ) );
+			$this->ok(
+				'image/jpeg' === get_post_mime_type( $a ) && basename( (string) get_attached_file( $a ) ) === basename( $a_jpg ),
+				'webp repair: the SAME record now points at its JPEG, so its tags and consent stay with it'
+			);
+			$this->ok( ! file_exists( $dir . $stem . '-compressed.webp' ) && ! file_exists( $dir . $stem . '-150x150.jpg' ), 'webp repair: the WebP and the stranded copy are gone' );
+			$this->ok( '' === (string) get_post_meta( $a, '_nfd_performance_image_optimized', true ), 'webp repair: the optimiser\'s mark is taken off' );
+			$sizes = array_keys( (array) ( wp_get_attachment_metadata( $a )['sizes'] ?? array() ) );
+			$this->ok( $sizes && ! array_diff( $sizes, gasf_crm_photo_library_sizes() ), 'webp repair: fresh copies made from the JPEG, library sizes only' );
+		} finally {
+			// B's JPEG and stray file are on nobody's list once its record is reaped.
+			foreach ( array( $b_jpg, $dir . $bstem . '-300x200.jpg', $dir . $stem . '-compressed.webp', $dir . $stem . '-compressed-100x67.webp', $dir . $stem . '-150x150.jpg' ) as $f ) {
+				if ( is_file( $f ) ) { @unlink( $f ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			}
+			wp_update_attachment_metadata( $c, array() );
+		}
+	}
+
 	public function test_google_photos_scope() {
 		$this->ok(
 			'https://www.googleapis.com/auth/photospicker.mediaitems.readonly' === GASF_CRM_GPHOTOS_SCOPE,

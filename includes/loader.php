@@ -89,6 +89,7 @@ if ( true ) {
 	// After photos-library.php: an upload publishes through photos.php and is
 	// then tagged through gasf_crm_photo_library_save().
 	require_once GASF_CRM_DIR . '/photos-upload.php';
+	require_once GASF_CRM_DIR . '/photos-webp-repair.php';
 	// After photos-library.php: editing gates on in_library, bumps the same
 	// revision, and answers with the same card.
 	require_once GASF_CRM_DIR . '/photos-edit.php';
