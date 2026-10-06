@@ -1277,6 +1277,13 @@ final class GASF_CRM_Selftest {
 			$rm   = strpos( $body, '@unlink(' );
 			$this->ok( false !== $mv && false !== $q && false !== $rm && $mv < $q && $q < $rm,
 				'webp repair: the record moves to the JPEG and its resize is queued before any file is deleted' );
+			// The host kills a process at 120s of CPU, mid-photo and with no
+			// signal. The batch command must watch its own CPU and stop between
+			// photos first, and say by exit code whether there is more to do.
+			$this->ok( false !== strpos( $src, 'getrusage()' ) && false !== strpos( $src, '$cpu_used() >= $cpu_budget' ) && false !== strpos( $src, 'WP_CLI::halt( 10 )' ),
+				'webp repair: stops itself before the host\'s CPU limit, and exits 10 while there is more to do' );
+			$u = getrusage();
+			$this->ok( isset( $u['ru_utime.tv_sec'], $u['ru_stime.tv_sec'] ), 'webp repair: and this PHP reports the CPU time that guard reads' );
 
 			$pb = gasf_crm_webp_repair_plan( $b );
 			$this->ok( is_wp_error( $pb ) && 'gasf_webp_shared' === $pb->get_error_code(), 'webp repair: a photo with a stray file another record still uses is refused whole' );

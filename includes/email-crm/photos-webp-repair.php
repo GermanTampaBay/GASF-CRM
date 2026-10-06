@@ -235,11 +235,28 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		}
 		$interactive = $apply && $batch > 0 && defined( 'STDIN' ) && function_exists( 'posix_isatty' ) && @posix_isatty( STDIN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 
+		/*
+		 * The host gives a process 120 seconds of CPU (ulimit -t), and then
+		 * kills it outright - mid-photo, with no signal to catch, taking the
+		 * SSH session with it. Resizing is nearly all of that CPU, about 0.6s a
+		 * photo, so the first version died after almost exactly two batches.
+		 * Stop cleanly between photos before the host does it for us; the next
+		 * run is a fresh process with a fresh allowance.
+		 */
+		$cpu_budget = max( 10, (int) ( $assoc['cpu-budget'] ?? 90 ) );
+		$cpu_used   = static function () {
+			$u = getrusage();
+			return (float) $u['ru_utime.tv_sec'] + (float) $u['ru_stime.tv_sec']
+				+ ( (float) $u['ru_utime.tv_usec'] + (float) $u['ru_stime.tv_usec'] ) / 1e6;
+		};
+		$cpu_out = false;
+
 		$fixed = 0; $skipped = 0; $files = 0; $last = 0;
 		while ( true ) {
 			$in_batch = 0; $b_fixed = 0; $b_skipped = 0;
 			foreach ( gasf_crm_webp_repair_candidates( $ids, $since, $recheck ) as $id ) {
 				if ( $stop || ( $batch && $in_batch >= $batch ) ) { break; }
+				if ( $apply && $cpu_used() >= $cpu_budget ) { $cpu_out = true; break; }
 				$in_batch++;
 				$plan = gasf_crm_webp_repair_plan( $id );
 				if ( is_wp_error( $plan ) ) {
@@ -279,6 +296,13 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 				WP_CLI::log( sprintf( 'Stopped%s. Nothing is half-done. Run the same command again to carry on.', $last ? ' after finishing #' . $last : '' ) );
 				break;
 			}
+			if ( $cpu_out ) {
+				WP_CLI::log( sprintf(
+					'Stopped cleanly after %.0fs of CPU: the host ends any process at 120s. Run it again to carry on with a fresh allowance.',
+					$cpu_used()
+				) );
+				break;
+			}
 			if ( ! $left || ! $interactive ) { break; }
 			WP_CLI::log( sprintf( 'Press Enter for the next %d, or Ctrl-C to stop for now. It is safe to leave this waiting.', min( $batch, $left ) ) );
 			$line = fgets( STDIN );
@@ -288,5 +312,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 		}
 		WP_CLI::success( sprintf( '%d photo(s) put back on their JPEG this run, %d skipped.', $fixed, $skipped ) );
+		// Exit 10 while there is more to do, 0 when there is not, so a loop on
+		// the volunteer's own machine can run one batch per connection - each
+		// a fresh process under the host's CPU limit - and stop by itself.
+		if ( ! empty( $left ) ) { WP_CLI::halt( 10 ); }
 	} );
 }
