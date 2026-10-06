@@ -4079,6 +4079,10 @@ function gasf_crm_render_inbox_script() {
 						var client = window.google.accounts.oauth2.initTokenClient({
 							client_id: r.client_id,
 							scope: r.scope,
+							/* Only the picker, never the sign-in scopes as well:
+							   Google's default of true would merge them, and the
+							   merged grant is what leaked the picker into sign-in. */
+							include_granted_scopes: false,
 							callback: function(resp){
 								if (!resp || !resp.access_token) {
 									gphBusy(false);

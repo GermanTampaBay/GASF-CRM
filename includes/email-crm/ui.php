@@ -239,6 +239,11 @@ function gasf_crm_render_google_popup( array $p ) {
 			var client = google.accounts.oauth2.initCodeClient({
 				client_id: btn.getAttribute('data-client'),
 				scope: 'openid email profile',
+				// Google defaults this to true, which folds every scope the
+				// volunteer ever granted into this request - so one Google
+				// Photos import put the sensitive picker scope, and Google's
+				// "unverified app" screen, in front of every later sign-in.
+				include_granted_scopes: false,
 				ux_mode: 'popup',
 				select_account: true,
 				state: nonce,

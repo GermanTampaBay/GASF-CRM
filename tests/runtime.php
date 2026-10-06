@@ -1136,6 +1136,12 @@ final class GASF_CRM_Selftest {
 			false !== strpos( $src, 'tokeninfo' ) && false !== strpos( $src, 'hash_equals' ),
 			'google photos: a browser-supplied token is verified with Google before it is trusted'
 		);
+		$js = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$at = strpos( $js, 'initTokenClient' );
+		$this->ok(
+			false !== $at && false !== strpos( substr( $js, $at, 1200 ), 'include_granted_scopes: false' ),
+			'google photos: the import asks for the picker alone, not merged with the sign-in grant'
+		);
 
 		// A stored grant must expire on its own, whoever forgets to tidy up.
 		$key = gasf_crm_gphotos_token_key( 0 );
@@ -3190,6 +3196,13 @@ final class GASF_CRM_Selftest {
 		$this->ok(
 			false !== strpos( $html, 'accounts.google.com/gsi/client' ) && false !== strpos( $html, 'initCodeClient' ),
 			'sign-in: the Google button opens Google\'s own popup'
+		);
+		// Google's default merges every scope ever granted into this request,
+		// so without this one Photos import put the sensitive picker scope -
+		// and the "unverified app" screen - in front of every later sign-in.
+		$this->ok(
+			false !== strpos( $html, 'include_granted_scopes: false' ),
+			'sign-in: asks for the sign-in scopes alone, never folding in the photo picker a volunteer granted earlier'
 		);
 		$this->ok(
 			false === strpos( $html, 'action="' . esc_url( home_url( '/email/auth/google' ) ) . '"' ),
