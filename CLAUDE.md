@@ -112,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 634 assertions in 81 tests, run on the server against live
+- **`tests/runtime.php`** — 637 assertions in 81 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -289,6 +289,13 @@ architecture keeps that answer cheap to reverse. Board call.
 10. **No near-duplicate detection** — dedup is exact-bytes only, so the same
     photo re-encoded by WhatsApp arrives as new. And **no trash/undo**: every
     delete is a force-delete.
+11. **Half the library is still the host's compressed WebP** (2,746 of 5,205 on
+    2026-10-05). Until v2.73.0 Bluehost's optimiser *replaced* each upload with
+    `<name>-compressed.webp` and left the JPEG original unlinked beside it. New
+    uploads skip it now; the old ones are being put back with
+    `wp gasf-crm webp-repair --all --apply` (batches of 100, safe to interrupt,
+    resumes by itself). Photos it cannot do carry `_gasf_webp_repair_skip` with
+    the reason. The zip's "Convert WebP to PNG" option stays until this is done.
 
 **Closed since this list was written** (v2.20.0–2.26.1): HEIC on every intake
 route plus the EXIF-date loss during conversion; door counters made atomic under
@@ -388,7 +395,7 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.77.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.78.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
