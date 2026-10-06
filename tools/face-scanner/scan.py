@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.5"
+SCANNER_VERSION = "1.6.6"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -797,7 +797,31 @@ def caption_scan_key(cfg):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
-def _ollama_caption_call(image_b64, cfg, prompt, schema, temperature):
+# Room for one answer. 220 fits nearly every photo; a busy one's draft (a
+# caption plus three evidence lists) can run past it and come back cut off
+# mid-JSON -- done_reason 'length', nothing parseable. Six old photos failed
+# that way on 2026-10-05, two-thirds of the way to being given up on for good.
+# A cut-off answer is retried ONCE with the larger budget. Not part of the
+# caption key: the pipeline is unchanged, only how much room an answer gets
+# when it needs it, so the captions already stored stay current.
+CAPTION_NUM_PREDICT = 220
+CAPTION_NUM_PREDICT_RETRY = 768
+
+
+def _ollama_caption_call(image_b64, cfg, prompt, schema, temperature, num_predict=CAPTION_NUM_PREDICT):
+    try:
+        return _ollama_caption_once(image_b64, cfg, prompt, schema, temperature, num_predict)
+    except CaptionCutOff:
+        if num_predict >= CAPTION_NUM_PREDICT_RETRY:
+            raise
+        return _ollama_caption_once(image_b64, cfg, prompt, schema, temperature, CAPTION_NUM_PREDICT_RETRY)
+
+
+class CaptionCutOff(ValueError):
+    """The model ran out of room before finishing its answer."""
+
+
+def _ollama_caption_once(image_b64, cfg, prompt, schema, temperature, num_predict):
     payload = {
         "model": cfg_caption_model(cfg),
         "system": CAPTION_SYSTEM,
@@ -813,7 +837,7 @@ def _ollama_caption_call(image_b64, cfg, prompt, schema, temperature):
             "top_k": 20,
             "seed": 42,
             "num_ctx": cfg_caption_num_ctx(cfg),
-            "num_predict": 220,
+            "num_predict": int(num_predict),
         },
     }
     r = requests.post(cfg_caption_url(cfg), json=payload, timeout=cfg_caption_timeout(cfg))
@@ -833,12 +857,20 @@ def _ollama_caption_call(image_b64, cfg, prompt, schema, temperature):
             except json.JSONDecodeError:
                 pass
     if not raw:
-        raise ValueError(
+        cls = CaptionCutOff if out.get("done_reason") == "length" else ValueError
+        raise cls(
             "Ollama returned no caption text "
             f"(done_reason={out.get('done_reason')!r}, "
             f"thinking_chars={len(out.get('thinking') or '')})"
         )
-    parsed = json.loads(raw)
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        # Text that stops mid-object because the budget ran out is the same
+        # cut-off as no text at all, and gets the same one retry.
+        if out.get("done_reason") == "length":
+            raise CaptionCutOff("Ollama's caption was cut off at the length limit")
+        raise
     if not isinstance(parsed, dict):
         raise ValueError("Ollama caption response was not a JSON object")
     return parsed
@@ -2040,6 +2072,26 @@ def identify(vector, references, backend, tolerance):
     if best_name is None or best_dist > tolerance:
         return None, 0.0
     return best_name, confidence(best_dist, tolerance)
+
+
+def one_face_per_name(faces):
+    """A person appears once in a photo: keep each name's most confident face.
+
+    Every face is matched on its own, so two faces could both come back as the
+    same person -- the 2026-10-05 run suggested "Sarah Smith, Sarah Smith" on
+    one photo. At most one of those is right, and with auto-accept on, the
+    other would put her name on a stranger's face. The weaker match is dropped
+    rather than guessed at: a missed name costs one typed name.
+    """
+    best = {}
+    for f in faces:
+        key = str(f.get("name") or "").strip().lower()
+        if not key:
+            continue
+        if key not in best or f.get("confidence", 0) > best[key].get("confidence", 0):
+            best[key] = f
+    keep = set(id(f) for f in best.values())
+    return [f for f in faces if id(f) in keep]
 
 
 def nearest_reference(vector, references, backend):
@@ -5043,6 +5095,7 @@ def scan(
                                 "box": box,
                             }
                         )
+                    faces = one_face_per_name(faces)
                     face_item.update({
                         "found": len(boxes),
                         "faces": faces,
@@ -5502,6 +5555,57 @@ def selftest():
     check_that(name == "Hans" and conf > 0.5, "identify: picks the nearer person")
     name, _ = identify(np.array([5.0, 5.0, 5.0], dtype=np.float32), refs, backend, 0.5)
     check_that(name is None, "identify: refuses when nobody is within tolerance")
+    dup = one_face_per_name([
+        {"name": "Sarah Smith", "confidence": 71, "box": [0, 0, 1, 1]},
+        {"name": "Hans", "confidence": 80, "box": [2, 2, 1, 1]},
+        {"name": "sarah smith", "confidence": 93, "box": [4, 4, 1, 1]},
+    ])
+    check_that(
+        [(f["name"], f["confidence"]) for f in dup] == [("Hans", 80), ("sarah smith", 93)],
+        "one face per name: the same person twice in a photo keeps only the surer face",
+    )
+
+    # A caption cut off at the length limit gets one retry with more room;
+    # any other failure does not, and a second cut-off is reported as such.
+    saved_once = globals()["_ollama_caption_once"]
+    budgets = []
+    try:
+        def fake_once(image_b64, cfg, prompt, schema, temperature, num_predict):
+            budgets.append(num_predict)
+            if num_predict < CAPTION_NUM_PREDICT_RETRY:
+                raise CaptionCutOff("cut off")
+            return {"caption": "ok"}
+        globals()["_ollama_caption_once"] = fake_once
+        got = _ollama_caption_call("", {}, "", {}, 0.2)
+        check_that(
+            got == {"caption": "ok"} and budgets == [CAPTION_NUM_PREDICT, CAPTION_NUM_PREDICT_RETRY],
+            "caption: a cut-off answer is retried once with a larger budget",
+        )
+        budgets.clear()
+
+        def always_cut(image_b64, cfg, prompt, schema, temperature, num_predict):
+            budgets.append(num_predict)
+            raise CaptionCutOff("cut off")
+        globals()["_ollama_caption_once"] = always_cut
+        try:
+            _ollama_caption_call("", {}, "", {}, 0.2)
+            raised = False
+        except CaptionCutOff:
+            raised = True
+        check_that(raised and len(budgets) == 2, "caption: and only once - a second cut-off is a failure")
+        budgets.clear()
+
+        def other_error(image_b64, cfg, prompt, schema, temperature, num_predict):
+            budgets.append(num_predict)
+            raise ValueError("not a cut-off")
+        globals()["_ollama_caption_once"] = other_error
+        try:
+            _ollama_caption_call("", {}, "", {}, 0.2)
+        except ValueError:
+            pass
+        check_that(budgets == [CAPTION_NUM_PREDICT], "caption: other failures are not retried")
+    finally:
+        globals()["_ollama_caption_once"] = saved_once
     known_hints = [
         {"index": 0, "name": "Hans", "confidence": 98},
         {"index": 1, "name": "Greta", "confidence": 97},
