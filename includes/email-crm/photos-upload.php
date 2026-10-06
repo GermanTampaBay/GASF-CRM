@@ -126,7 +126,7 @@ function gasf_crm_photo_upload_build_derivatives( $attachment_id ) {
 	/*
 	 * One photo at a time, site-wide.
 	 *
-	 * Each build is sixteen Imagick resizes of a camera-sized original. On
+	 * Each build is four Imagick resizes (sixteen before 2.73.1) of a camera-sized original. On
 	 * 2026-10-05 a batch of large DSC JPEGs had builds running beside two
 	 * uploads at once, and the host answered 503 and then rate-limited the
 	 * whole site for over an hour. A second worker that finds this lock held

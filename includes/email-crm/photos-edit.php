@@ -299,7 +299,7 @@ function gasf_crm_photo_edit_resizes( $id, $path ) {
 	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
 
-	// Sixteen sizes, ~2s on this host for a typical photo — measured, not guessed.
+	// Four sizes since 2.73.1; sixteen took ~2s on this host for a typical photo — measured, not guessed.
 	// Through the helper, so editing a private photo keeps its marker.
 	wp_update_attachment_metadata( $id, gasf_crm_photo_generate_metadata( $id, $path ) );
 }

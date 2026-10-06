@@ -1189,6 +1189,35 @@ final class GASF_CRM_Selftest {
 		$this->ok( false === strpos( $up, 'spawn_cron(' ), 'derivatives: the upload no longer spawns the cron, which ran every due job inside the web server' );
 	}
 
+	/**
+	 * A library photo is resized to the four sizes the library uses, not the
+	 * site's sixteen - and 'large' is among them, because the face scanner's
+	 * boxes are measured in it.
+	 *
+	 * Checked by doing it: a photo big enough to qualify for every registered
+	 * size, put through the one helper every library route uses. The image is
+	 * 2400 wide so the theme's crops would all be made if the filter failed.
+	 */
+	public function test_photo_library_sizes() {
+		$want = array( '2048x2048', 'large', 'medium', 'thumbnail' );
+		$got  = gasf_crm_photo_library_sizes();
+		sort( $got );
+		$this->ok( $want === $got, 'sizes: the library asks for thumbnail, medium, large, and 2048 - nothing else' );
+
+		$id   = $this->library_photo( 'selftest-sizes' );
+		$path = (string) get_attached_file( $id );
+		file_put_contents( $path, $this->jpeg_bytes( 2400, 1600 ) );
+		$meta = gasf_crm_photo_generate_metadata( $id, $path );
+		wp_update_attachment_metadata( $id, $meta ); // so the reaper deletes the copies too
+		$made = array_keys( (array) ( $meta['sizes'] ?? array() ) );
+		sort( $made );
+		$this->ok( $want === $made, 'sizes: a large library photo comes out with exactly those four copies (got: ' . implode( ', ', $made ) . ')' );
+		$this->ok(
+			false === has_filter( 'intermediate_image_sizes_advanced', 'gasf_crm_photo_only_library_sizes' ),
+			'sizes: and the limit is lifted afterwards, so blog images still get every size'
+		);
+	}
+
 	public function test_google_photos_scope() {
 		$this->ok(
 			'https://www.googleapis.com/auth/photospicker.mediaitems.readonly' === GASF_CRM_GPHOTOS_SCOPE,

@@ -852,11 +852,41 @@ function gasf_crm_photo_generate_metadata( $attachment_id, $path ) {
 	require_once ABSPATH . 'wp-admin/includes/image.php';
 	$private = gasf_crm_photo_is_private( $attachment_id );
 	if ( $private ) { add_filter( 'upload_dir', 'gasf_crm_photo_review_upload_dir', 99 ); }
+	add_filter( 'intermediate_image_sizes_advanced', 'gasf_crm_photo_only_library_sizes', 99 );
 	try {
 		return wp_generate_attachment_metadata( $attachment_id, $path );
 	} finally {
+		remove_filter( 'intermediate_image_sizes_advanced', 'gasf_crm_photo_only_library_sizes', 99 );
 		if ( $private ) { remove_filter( 'upload_dir', 'gasf_crm_photo_review_upload_dir', 99 ); }
 	}
+}
+
+/**
+ * The image sizes a library photo is resized to - four, not the site's sixteen.
+ *
+ * WordPress makes one copy per size that ANYTHING registered: the theme's seven
+ * hoot-* crops, RoboGallery's two, a SiteOrigin carousel's one, and core's six.
+ * Those suit a blog post's header image. The library is an archive, and asks
+ * for only these:
+ *
+ *   thumbnail  - email intake previews
+ *   medium     - grid thumbnails, the public photo page, the doors
+ *   large      - the editor's full view, AND the face scanner's coordinate
+ *                space: its boxes are measured against 'large', so changing
+ *                this size would misplace every face on every photo
+ *   2048x2048  - the kiosk's top size
+ *
+ * Anything asking for a size a photo lacks is served the nearest one that
+ * exists, so nothing breaks; it just stops costing twelve resizes per photo.
+ * On 2026-10-05 those resizes, two uploads at a time, took the site down.
+ */
+function gasf_crm_photo_library_sizes() {
+	return array( 'thumbnail', 'medium', 'large', '2048x2048' );
+}
+
+/** intermediate_image_sizes_advanced filter: keep only the library's sizes. */
+function gasf_crm_photo_only_library_sizes( $sizes ) {
+	return array_intersect_key( (array) $sizes, array_flip( gasf_crm_photo_library_sizes() ) );
 }
 
 add_filter( 'wp_get_attachment_url', function ( $url, $id ) {
@@ -1974,12 +2004,14 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 	add_filter( 'upload_dir', $to_review, 99 );
 	add_filter( 'wp_insert_attachment_data', $hide, 99 );
 	add_action( 'add_attachment', $claim, 1 );
-	gasf_crm_photo_trace( sprintf( 'sideload begins for %s (%dx%d) — the sixteen sizes are next, this is where a death would land', $name, (int) $dim[0], (int) $dim[1] ) );
+	gasf_crm_photo_trace( sprintf( 'sideload begins for %s (%dx%d) — the four library sizes are next, this is where a death would land', $name, (int) $dim[0], (int) $dim[1] ) );
 	$sl0 = microtime( true );
 	$optimiser_back = gasf_crm_photo_host_optimiser_off();
+	add_filter( 'intermediate_image_sizes_advanced', 'gasf_crm_photo_only_library_sizes', 99 );
 	try {
 		$id = media_handle_sideload( array( 'name' => $name, 'tmp_name' => $tmp ), 0 );
 	} finally {
+		remove_filter( 'intermediate_image_sizes_advanced', 'gasf_crm_photo_only_library_sizes', 99 );
 		$optimiser_back();
 	}
 	gasf_crm_photo_trace( sprintf( 'sideload done for %s in %.1fs%s', $name, microtime( true ) - $sl0,
