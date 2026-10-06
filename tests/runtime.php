@@ -1261,6 +1261,23 @@ final class GASF_CRM_Selftest {
 				'webp repair: finds library photos filed as a compressed WebP, and not one filed as a JPEG'
 			);
 
+			// A photo an earlier batch could not do is passed over next time,
+			// unless asked to look again.
+			update_post_meta( $b, GASF_CRM_WEBP_REPAIR_SKIP, 'selftest' );
+			$this->ok( array( $a ) === gasf_crm_webp_repair_candidates( array( $a, $b, $c ) ), 'webp repair: a photo marked as not repairable is passed over by the next batch' );
+			$this->ok( array( $a, $b ) === gasf_crm_webp_repair_candidates( array( $a, $b, $c ), '', true ), 'webp repair: and --recheck looks at it again' );
+			delete_post_meta( $b, GASF_CRM_WEBP_REPAIR_SKIP );
+
+			// The order that makes a killed batch harmless: the record moves to
+			// the JPEG before anything is deleted, never the other way round.
+			$src  = (string) file_get_contents( GASF_CRM_DIR . '/photos-webp-repair.php' );
+			$body = substr( $src, (int) strpos( $src, 'function gasf_crm_webp_repair_apply' ) );
+			$mv   = strpos( $body, "update_post_meta( \$id, '_wp_attached_file'" );
+			$q    = strpos( $body, "wp_schedule_single_event(" );
+			$rm   = strpos( $body, '@unlink(' );
+			$this->ok( false !== $mv && false !== $q && false !== $rm && $mv < $q && $q < $rm,
+				'webp repair: the record moves to the JPEG and its resize is queued before any file is deleted' );
+
 			$pb = gasf_crm_webp_repair_plan( $b );
 			$this->ok( is_wp_error( $pb ) && 'gasf_webp_shared' === $pb->get_error_code(), 'webp repair: a photo with a stray file another record still uses is refused whole' );
 			$this->ok( is_file( $dir . $bstem . '-300x200.jpg' ) && is_file( $dir . $bstem . '-compressed.webp' ), 'webp repair: and nothing of it is deleted' );

@@ -31,13 +31,21 @@
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
 /**
+ * Marks a photo the repair looked at and could not do - WebP the only copy,
+ * edited, shared file - so the next batch does not plan it all over again.
+ * The reason is the value; --recheck ignores the mark.
+ */
+define( 'GASF_CRM_WEBP_REPAIR_SKIP', '_gasf_webp_repair_skip' );
+
+/**
  * Library photos currently filed as the host's compressed WebP.
  *
- * @param array $ids   Restrict to these attachment ids (optional).
- * @param string $since Only those created on or after this date (optional).
+ * @param array  $ids     Restrict to these attachment ids (optional).
+ * @param string $since   Only those created on or after this date (optional).
+ * @param bool   $recheck Include photos an earlier run marked as not repairable.
  * @return int[]
  */
-function gasf_crm_webp_repair_candidates( array $ids = array(), $since = '' ) {
+function gasf_crm_webp_repair_candidates( array $ids = array(), $since = '', $recheck = false ) {
 	global $wpdb;
 	$rows = $wpdb->get_col( $wpdb->prepare(
 		"SELECT p.ID FROM {$wpdb->posts} p
@@ -45,11 +53,14 @@ function gasf_crm_webp_repair_candidates( array $ids = array(), $since = '' ) {
 		  WHERE p.post_type = 'attachment' AND p.post_mime_type = %s
 		    AND f.meta_value LIKE %s AND p.post_date >= %s
 		    AND EXISTS ( SELECT 1 FROM {$wpdb->postmeta} g WHERE g.post_id = p.ID AND g.meta_key LIKE %s )
+		    AND ( %d = 1 OR NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} s WHERE s.post_id = p.ID AND s.meta_key = %s ) )
 		  ORDER BY p.ID",
 		'image/webp',
 		'%' . $wpdb->esc_like( '-compressed.webp' ),
 		'' !== $since ? $since : '1970-01-01',
-		$wpdb->esc_like( '_gasf_photo' ) . '%'
+		$wpdb->esc_like( '_gasf_photo' ) . '%',
+		$recheck ? 1 : 0,
+		GASF_CRM_WEBP_REPAIR_SKIP
 	) );
 	$rows = array_map( 'intval', (array) $rows );
 	return $ids ? array_values( array_intersect( $rows, array_map( 'intval', $ids ) ) ) : $rows;
@@ -148,19 +159,36 @@ function gasf_crm_webp_repair_apply( array $plan, $wait = 300 ) {
 	$clean = gasf_crm_photo_scrub( $plan['jpeg'] );
 	if ( is_wp_error( $clean ) ) { return $clean; }
 
+	/*
+	 * Ordered so that being killed between ANY two steps leaves a working
+	 * photo. It runs in batches over a connection that is expected to drop:
+	 *
+	 *   1. the record moves to the JPEG, which is already there and clean -
+	 *      from here the photo shows its original, sizes or not;
+	 *   2. its resize is queued with the scheduler, so a kill before step 4
+	 *      still ends with sizes on the next pass;
+	 *   3. only now are the WebP and the stranded copies deleted - a kill
+	 *      before or during this leaves spare files, never a missing one;
+	 *   4. the sizes are made now, if the resizer is free.
+	 *
+	 * The first version deleted first, which is the one order where a kill
+	 * leaves a record pointing at a file that no longer exists.
+	 */
+	update_post_meta( $id, '_wp_attached_file', $plan['rel_new'] );
+	$wpdb->update( $wpdb->posts, array( 'post_mime_type' => 'image/jpeg' ), array( 'ID' => $id ) );
+	clean_post_cache( $id );
+	delete_post_meta( $id, '_nfd_performance_image_optimized' );
+	delete_post_meta( $id, GASF_CRM_WEBP_REPAIR_SKIP );
+	// Empty, so the builder sees a photo with no sizes and makes the library's
+	// four - under its lock, past the optimiser, scrubbing them if public.
+	wp_update_attachment_metadata( $id, array() );
+	wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'gasf_crm_photo_upload_derivatives_event', array( $id ) );
+
 	$deleted = 0;
 	foreach ( $plan['delete'] as $f ) {
 		if ( is_file( $f ) && @unlink( $f ) ) { $deleted++; } // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
 
-	update_post_meta( $id, '_wp_attached_file', $plan['rel_new'] );
-	$wpdb->update( $wpdb->posts, array( 'post_mime_type' => 'image/jpeg' ), array( 'ID' => $id ) );
-	clean_post_cache( $id );
-	delete_post_meta( $id, '_nfd_performance_image_optimized' );
-
-	// Empty, so the builder sees a photo with no sizes and makes the library's
-	// four - under its lock, past the optimiser, scrubbing them if public.
-	wp_update_attachment_metadata( $id, array() );
 	// Queues for the lock rather than being deferred: during an upload batch
 	// it is nearly always held, and deferring left a photo with no sizes.
 	if ( false === gasf_crm_photo_upload_build_derivatives( $id, max( 1, (int) $wait ) ) ) {
@@ -177,41 +205,88 @@ function gasf_crm_webp_repair_apply( array $plan, $wait = 300 ) {
 }
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	/*
+	 * Batches, for the whole library: --all --apply --batch=100 does a hundred,
+	 * then waits for Enter. Built to be walked away from. A dropped connection
+	 * or Ctrl-C lets the photo in hand finish and then stops - see the order in
+	 * gasf_crm_webp_repair_apply() for why even a hard kill leaves nothing
+	 * broken - and the next run carries on by itself: a repaired photo is no
+	 * longer a WebP, and one that cannot be repaired is marked and passed over.
+	 */
 	WP_CLI::add_command( 'gasf-crm webp-repair', function ( $args, $assoc ) {
-		$ids   = ! empty( $assoc['ids'] ) ? array_filter( array_map( 'intval', explode( ',', (string) $assoc['ids'] ) ) ) : array();
-		$since = (string) ( $assoc['since'] ?? '' );
-		$apply = ! empty( $assoc['apply'] );
-		if ( ! $ids && '' === $since ) {
-			WP_CLI::error( 'Say which photos: --ids=1,2,3 or --since=YYYY-MM-DD.' );
+		$ids     = ! empty( $assoc['ids'] ) ? array_filter( array_map( 'intval', explode( ',', (string) $assoc['ids'] ) ) ) : array();
+		$since   = (string) ( $assoc['since'] ?? '' );
+		$all     = ! empty( $assoc['all'] );
+		$apply   = ! empty( $assoc['apply'] );
+		$recheck = ! empty( $assoc['recheck'] );
+		$verbose = ! empty( $assoc['verbose'] ) || ! $apply;
+		$batch   = max( 0, (int) ( $assoc['batch'] ?? ( $all ? 100 : 0 ) ) );
+		$pause   = max( 0, (float) ( $assoc['pause'] ?? 1 ) );
+		if ( ! $ids && '' === $since && ! $all ) {
+			WP_CLI::error( 'Say which photos: --ids=1,2,3, --since=YYYY-MM-DD, or --all.' );
 		}
 
-		$fixed = 0; $skipped = 0; $files = 0;
-		foreach ( gasf_crm_webp_repair_candidates( $ids, $since ) as $id ) {
-			$plan = gasf_crm_webp_repair_plan( $id );
-			if ( is_wp_error( $plan ) ) {
-				WP_CLI::log( sprintf( '#%d SKIP - %s', $id, $plan->get_error_message() ) );
-				$skipped++;
-				continue;
+		$stop = false;
+		if ( $apply && function_exists( 'pcntl_async_signals' ) ) {
+			pcntl_async_signals( true );
+			foreach ( array( SIGHUP, SIGINT, SIGTERM ) as $sig ) {
+				pcntl_signal( $sig, function () use ( &$stop ) { $stop = true; } );
 			}
-			WP_CLI::log( sprintf( '#%d %s -> %s, removing %d file(s):', $id, basename( $plan['rel_old'] ), basename( $plan['rel_new'] ), count( $plan['delete'] ) ) );
-			foreach ( $plan['delete'] as $f ) { WP_CLI::log( '      ' . basename( $f ) ); }
-			$files += count( $plan['delete'] );
-			if ( ! $apply ) { continue; }
+		}
+		$interactive = $apply && $batch > 0 && defined( 'STDIN' ) && function_exists( 'posix_isatty' ) && @posix_isatty( STDIN ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 
-			$r = gasf_crm_webp_repair_apply( $plan );
-			if ( is_wp_error( $r ) ) {
-				WP_CLI::warning( sprintf( '#%d %s', $id, $r->get_error_message() ) );
-				$skipped++;
-				continue;
+		$fixed = 0; $skipped = 0; $files = 0; $last = 0;
+		while ( true ) {
+			$in_batch = 0; $b_fixed = 0; $b_skipped = 0;
+			foreach ( gasf_crm_webp_repair_candidates( $ids, $since, $recheck ) as $id ) {
+				if ( $stop || ( $batch && $in_batch >= $batch ) ) { break; }
+				$in_batch++;
+				$plan = gasf_crm_webp_repair_plan( $id );
+				if ( is_wp_error( $plan ) ) {
+					WP_CLI::log( sprintf( '#%d skipped - %s', $id, $plan->get_error_message() ) );
+					if ( $apply ) { update_post_meta( $id, GASF_CRM_WEBP_REPAIR_SKIP, $plan->get_error_message() ); }
+					$skipped++; $b_skipped++;
+					continue;
+				}
+				$files += count( $plan['delete'] );
+				if ( $verbose ) {
+					WP_CLI::log( sprintf( '#%d %s -> %s, removing %d file(s):', $id, basename( $plan['rel_old'] ), basename( $plan['rel_new'] ), count( $plan['delete'] ) ) );
+					foreach ( $plan['delete'] as $f ) { WP_CLI::log( '      ' . basename( $f ) ); }
+				}
+				if ( ! $apply ) { continue; }
+
+				$r = gasf_crm_webp_repair_apply( $plan );
+				if ( is_wp_error( $r ) && 'gasf_webp_busy' !== $r->get_error_code() ) {
+					WP_CLI::warning( sprintf( '#%d %s', $id, $r->get_error_message() ) );
+					update_post_meta( $id, GASF_CRM_WEBP_REPAIR_SKIP, $r->get_error_message() );
+					$skipped++; $b_skipped++;
+					continue;
+				}
+				WP_CLI::log( is_wp_error( $r )
+					? sprintf( '#%d %s: on its JPEG; copies follow on the next scheduled pass', $id, basename( $plan['rel_new'] ) )
+					: sprintf( '#%d %s: done, %d old file(s) removed, %d size(s) made', $id, basename( $plan['rel_new'] ), $r['deleted'], $r['sizes'] ) );
+				$fixed++; $b_fixed++; $last = $id;
+				if ( $pause > 0 && ! $stop ) { usleep( (int) ( $pause * 1000000 ) ); }
 			}
-			WP_CLI::log( sprintf( '      done: %d removed, %d size(s) made', $r['deleted'], $r['sizes'] ) );
-			$fixed++;
-		}
 
-		if ( $apply ) {
-			WP_CLI::success( sprintf( '%d photo(s) put back on their JPEG, %d skipped.', $fixed, $skipped ) );
-		} else {
-			WP_CLI::success( sprintf( 'Report only: %d file(s) would be removed, %d photo(s) skipped. Add --apply to do it.', $files, $skipped ) );
+			if ( ! $apply ) {
+				WP_CLI::success( sprintf( 'Report only: %d file(s) would be removed, %d photo(s) skipped. Add --apply to do it.', $files, $skipped ) );
+				return;
+			}
+			$left = count( gasf_crm_webp_repair_candidates( $ids, $since, $recheck ) );
+			WP_CLI::log( sprintf( '-- This batch: %d put back on their JPEG, %d skipped. Left to do: %d.', $b_fixed, $b_skipped, $left ) );
+			if ( $stop ) {
+				WP_CLI::log( sprintf( 'Stopped%s. Nothing is half-done. Run the same command again to carry on.', $last ? ' after finishing #' . $last : '' ) );
+				break;
+			}
+			if ( ! $left || ! $interactive ) { break; }
+			WP_CLI::log( sprintf( 'Press Enter for the next %d, or Ctrl-C to stop for now. It is safe to leave this waiting.', min( $batch, $left ) ) );
+			$line = fgets( STDIN );
+			if ( false === $line || $stop ) {
+				WP_CLI::log( 'Stopped between batches. Run the same command again to carry on.' );
+				break;
+			}
 		}
+		WP_CLI::success( sprintf( '%d photo(s) put back on their JPEG this run, %d skipped.', $fixed, $skipped ) );
 	} );
 }
