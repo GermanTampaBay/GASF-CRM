@@ -1274,7 +1274,7 @@ final class GASF_CRM_Selftest {
 				'webp repair: the list is exactly that photo\'s WebP and stranded copies'
 			);
 
-			$r = is_array( $pa ) ? gasf_crm_webp_repair_apply( $pa ) : new WP_Error( 'x', 'no plan' );
+			$r = is_array( $pa ) ? gasf_crm_webp_repair_apply( $pa, 20 ) : new WP_Error( 'x', 'no plan' );
 			$this->ok( ! is_wp_error( $r ), 'webp repair: applying it succeeds' . ( is_wp_error( $r ) ? ' - ' . $r->get_error_message() : '' ) );
 			$this->ok(
 				'image/jpeg' === get_post_mime_type( $a ) && basename( (string) get_attached_file( $a ) ) === basename( $a_jpg ),
@@ -3698,7 +3698,7 @@ final class GASF_CRM_Selftest {
 		$small = function () { return 50; };
 		add_filter( 'big_image_size_threshold', $small, 999 );
 		try {
-			gasf_crm_photo_upload_build_derivatives( $id, 120 ); // queue behind a live upload batch, do not be deferred
+			gasf_crm_photo_upload_build_derivatives( $id, 20 ); // queue behind a live upload batch, do not be deferred
 		} finally {
 			remove_filter( 'big_image_size_threshold', $small, 999 );
 		}

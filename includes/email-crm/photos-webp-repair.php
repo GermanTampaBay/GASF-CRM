@@ -140,7 +140,7 @@ function gasf_crm_webp_repair_plan( $id ) {
  *
  * @return array|WP_Error {deleted, sizes}
  */
-function gasf_crm_webp_repair_apply( array $plan ) {
+function gasf_crm_webp_repair_apply( array $plan, $wait = 300 ) {
 	global $wpdb;
 	$id = (int) $plan['id'];
 
@@ -163,7 +163,7 @@ function gasf_crm_webp_repair_apply( array $plan ) {
 	wp_update_attachment_metadata( $id, array() );
 	// Queues for the lock rather than being deferred: during an upload batch
 	// it is nearly always held, and deferring left a photo with no sizes.
-	if ( false === gasf_crm_photo_upload_build_derivatives( $id, 5 * MINUTE_IN_SECONDS ) ) {
+	if ( false === gasf_crm_photo_upload_build_derivatives( $id, max( 1, (int) $wait ) ) ) {
 		return new WP_Error( 'gasf_webp_busy', 'now on its JPEG, but the resizer stayed busy; its copies will be made on the next scheduled pass' );
 	}
 
