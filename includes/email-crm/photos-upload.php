@@ -66,6 +66,47 @@ function gasf_crm_upload_convert_ok() {
 }
 
 /**
+ * Bluehost's image optimiser, stepped aside for the club's own photos.
+ *
+ * The host's performance module hooks wp_handle_upload and, for every image,
+ * POSTs it to an outside service (hiive.cloud) and WAITS up to thirty seconds
+ * for a WebP twin to be filed beside it. That is right for a blog post's
+ * header image and wrong for this collection, three ways over: the library is
+ * an archive of originals, not page furniture; the conversion throws away the
+ * EXIF the catalogue reads; and a photo held for review, or one whose owner
+ * refused consent, should not leave this server at all. It also kept every
+ * upload request open while it waited - on 2026-10-05, two at a time beside
+ * the resizing, until the host answered 503 for the whole site.
+ *
+ * Removed only for the length of one intake, by class rather than by a stored
+ * reference, and put back exactly as found: the rest of the site keeps it.
+ *
+ * @return callable Restores what was removed.
+ */
+function gasf_crm_photo_host_optimiser_off() {
+	global $wp_filter;
+	$removed = array();
+	foreach ( array( 'wp_handle_upload', 'wp_handle_sideload', 'add_attachment', 'wp_generate_attachment_metadata' ) as $hook ) {
+		if ( empty( $wp_filter[ $hook ] ) ) { continue; }
+		foreach ( $wp_filter[ $hook ]->callbacks as $prio => $cbs ) {
+			foreach ( $cbs as $cb ) {
+				$fn = $cb['function'];
+				if ( is_array( $fn ) && is_object( $fn[0] )
+					&& 0 === strpos( get_class( $fn[0] ), 'NewfoldLabs\\WP\\Module\\Performance\\Images\\' ) ) {
+					remove_filter( $hook, $fn, $prio );
+					$removed[] = array( $hook, $fn, $prio, (int) $cb['accepted_args'] );
+				}
+			}
+		}
+	}
+	return static function () use ( $removed ) {
+		foreach ( $removed as $r ) {
+			add_filter( $r[0], $r[1], $r[2], $r[3] );
+		}
+	};
+}
+
+/**
  * Finish heavy derivative generation outside the upload request.
  *
  * The upload call now stores the original quickly, and this worker generates
@@ -82,6 +123,31 @@ function gasf_crm_photo_upload_build_derivatives( $attachment_id ) {
 	$have = (array) wp_get_attachment_metadata( $id );
 	if ( ! empty( $have['sizes'] ) ) { return; }
 
+	/*
+	 * One photo at a time, site-wide.
+	 *
+	 * Each build is sixteen Imagick resizes of a camera-sized original. On
+	 * 2026-10-05 a batch of large DSC JPEGs had builds running beside two
+	 * uploads at once, and the host answered 503 and then rate-limited the
+	 * whole site for over an hour. A second worker that finds this lock held
+	 * puts its photo back a minute later rather than piling on.
+	 */
+	global $wpdb;
+	if ( 1 !== (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', 'gasf_crm_derivatives', 0 ) ) ) {
+		wp_schedule_single_event( time() + MINUTE_IN_SECONDS, 'gasf_crm_photo_upload_derivatives_event', array( $id ) );
+		return;
+	}
+	$optimiser_back = gasf_crm_photo_host_optimiser_off();
+	try {
+		gasf_crm_photo_upload_build_derivatives_locked( $id, $path );
+	} finally {
+		$optimiser_back();
+		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', 'gasf_crm_derivatives' ) );
+	}
+}
+
+/** The build itself; only ever called holding the gasf_crm_derivatives lock. */
+function gasf_crm_photo_upload_build_derivatives_locked( $id, $path ) {
 	// Through the helper, never WordPress directly: the upload deferred
 	// scaling to here, so this is where WordPress re-saves the path of a large
 	// or sideways photo - and for a private one it must happen inside the
@@ -120,8 +186,14 @@ add_action( 'gasf_crm_photo_upload_derivatives_event', 'gasf_crm_photo_upload_bu
 function gasf_crm_photo_upload_schedule_derivatives( $attachment_id ) {
 	$id = (int) $attachment_id;
 	if ( ! $id ) { return; }
+	/*
+	 * Queued for the server's own scheduler, which runs `wp cron` from the
+	 * command line - outside the web server, so it uses none of the requests
+	 * the host rate-limits. Deliberately no call to spawn the cron here: with
+	 * DISABLE_WP_CRON set, there are nearly always jobs due, so every upload
+	 * fired a loopback request that ran ALL of them inside the web server.
+	 */
 	wp_schedule_single_event( time() + 2, 'gasf_crm_photo_upload_derivatives_event', array( $id ) );
-	if ( function_exists( 'spawn_cron' ) ) { spawn_cron(); }
 }
 
 /*
@@ -468,15 +540,20 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * conversion, the duplicate fingerprint, consent, the private review
 	 * folder - instead of a parallel path that drifts away from them.
 	 */
-	if ( ! empty( $in['sideload'] ) ) {
-		$id = media_handle_sideload(
-			array( 'name' => $f['name'], 'tmp_name' => $f['tmp_name'] ),
-			0,
-			null,
-			array( 'test_form' => false )
-		);
-	} else {
-		$id = media_handle_upload( 'file', 0, array(), array( 'test_form' => false ) );
+	$optimiser_back = gasf_crm_photo_host_optimiser_off();
+	try {
+		if ( ! empty( $in['sideload'] ) ) {
+			$id = media_handle_sideload(
+				array( 'name' => $f['name'], 'tmp_name' => $f['tmp_name'] ),
+				0,
+				null,
+				array( 'test_form' => false )
+			);
+		} else {
+			$id = media_handle_upload( 'file', 0, array(), array( 'test_form' => false ) );
+		}
+	} finally {
+		$optimiser_back();
 	}
 	if ( ! $isVideo ) {
 		remove_filter( 'intermediate_image_sizes_advanced', $no_sizes, 99 );

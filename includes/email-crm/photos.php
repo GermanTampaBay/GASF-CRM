@@ -1976,7 +1976,12 @@ function gasf_crm_photo_approve( array $thread, $graph_message_id, $graph_attach
 	add_action( 'add_attachment', $claim, 1 );
 	gasf_crm_photo_trace( sprintf( 'sideload begins for %s (%dx%d) — the sixteen sizes are next, this is where a death would land', $name, (int) $dim[0], (int) $dim[1] ) );
 	$sl0 = microtime( true );
-	$id  = media_handle_sideload( array( 'name' => $name, 'tmp_name' => $tmp ), 0 );
+	$optimiser_back = gasf_crm_photo_host_optimiser_off();
+	try {
+		$id = media_handle_sideload( array( 'name' => $name, 'tmp_name' => $tmp ), 0 );
+	} finally {
+		$optimiser_back();
+	}
 	gasf_crm_photo_trace( sprintf( 'sideload done for %s in %.1fs%s', $name, microtime( true ) - $sl0,
 		is_wp_error( $id ) ? ' — FAILED: ' . $id->get_error_message() : ' — attachment #' . (int) $id ) );
 	remove_action( 'add_attachment', $claim, 1 );

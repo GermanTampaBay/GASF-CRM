@@ -1143,6 +1143,52 @@ final class GASF_CRM_Selftest {
 		$this->ok( false === wp_next_scheduled( $hook ), 'cron: the selftest event is gone afterwards' );
 	}
 
+	/**
+	 * The club's photos skip the host's image optimiser, and only the club's.
+	 *
+	 * Bluehost's module POSTs every upload to an outside service and holds the
+	 * request up to thirty seconds for a WebP twin. For this archive that is
+	 * wasted load, lost EXIF, and a held or consent-refused photo leaving the
+	 * server. The check that matters is the restore: a helper that removed the
+	 * optimiser and forgot to put it back would pass the first half and quietly
+	 * change every blog upload on the site.
+	 */
+	public function test_photo_host_optimiser_off() {
+		$count = function () {
+			global $wp_filter;
+			$n = 0;
+			foreach ( array( 'wp_handle_upload', 'wp_handle_sideload', 'add_attachment', 'wp_generate_attachment_metadata' ) as $hook ) {
+				foreach ( (array) ( isset( $wp_filter[ $hook ] ) ? $wp_filter[ $hook ]->callbacks : array() ) as $cbs ) {
+					foreach ( $cbs as $cb ) {
+						$fn = $cb['function'];
+						if ( is_array( $fn ) && is_object( $fn[0] )
+							&& 0 === strpos( get_class( $fn[0] ), 'NewfoldLabs\\WP\\Module\\Performance\\Images\\' ) ) {
+							$n++;
+						}
+					}
+				}
+			}
+			return $n;
+		};
+		$before = $count();
+		$this->ok( $before > 0, 'optimiser: the host\'s image module is hooked on this site, so the rest of this test means something' );
+		$back = gasf_crm_photo_host_optimiser_off();
+		$this->ok( 0 === $count(), 'optimiser: none of its hooks remain while a club photo is taken in' );
+		$back();
+		$this->ok( $before === $count(), 'optimiser: and every one is back afterwards, so blog uploads keep it' );
+
+		$up = (string) file_get_contents( GASF_CRM_DIR . '/photos-upload.php' );
+		$ph = (string) file_get_contents( GASF_CRM_DIR . '/photos.php' );
+		$this->ok(
+			3 <= substr_count( $up, 'gasf_crm_photo_host_optimiser_off()' ) && false !== strpos( $ph, 'gasf_crm_photo_host_optimiser_off()' ),
+			'optimiser: stepped aside on every intake route - upload, sideload, derivatives, and email'
+		);
+
+		// The derivative builds: one at a time, and never from a web request.
+		$this->ok( false !== strpos( $up, "'gasf_crm_derivatives'" ) && false !== strpos( $up, 'GET_LOCK' ), 'derivatives: built one photo at a time, site-wide, under a lock' );
+		$this->ok( false === strpos( $up, 'spawn_cron(' ), 'derivatives: the upload no longer spawns the cron, which ran every due job inside the web server' );
+	}
+
 	public function test_google_photos_scope() {
 		$this->ok(
 			'https://www.googleapis.com/auth/photospicker.mediaitems.readonly' === GASF_CRM_GPHOTOS_SCOPE,
