@@ -1052,17 +1052,25 @@ add_action( 'rest_api_init', function () {
 				$p = trim( sanitize_text_field( $p ) );
 				if ( '' !== $p ) { $adds[] = $p; }
 			}
+			// Groups are ADDED like names, and only ones that already exist:
+			// the group list is the club's, and the editor picks from it too.
+			$gadds = array();
+			foreach ( (array) ( $in['groups'] ?? array() ) as $g ) {
+				$g = trim( sanitize_text_field( $g ) );
+				if ( '' !== $g && term_exists( $g, 'gasf_photo_group' ) && ! in_array( $g, $gadds, true ) ) { $gadds[] = $g; }
+			}
 			$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
 			$event = trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) );
 			$eid   = (int) ( $in['event_id'] ?? 0 );
 			$taken = trim( sanitize_text_field( (string) ( $in['taken'] ?? '' ) ) );
 
-			if ( ! $adds && '' === $place && '' === $event && '' === $taken ) {
-				return new WP_Error( 'gasf_crm_noop', 'Nothing to apply — add a name, a place, an event or a date.', array( 'status' => 400 ) );
+			if ( ! $adds && ! $gadds && '' === $place && '' === $event && '' === $taken ) {
+				return new WP_Error( 'gasf_crm_noop', 'Nothing to apply — add a name, a group, a place, an event, or a date.', array( 'status' => 400 ) );
 			}
 			$op = gasf_crm_op_start( 'photo-bulk-tag:' . md5( wp_json_encode( array(
 				'ids'   => array_map( 'intval', $ids ),
 				'adds'  => array_values( $adds ),
+				'groups' => $gadds,
 				'place' => (string) $place,
 				'event' => (string) $event,
 				'eid'   => (int) $eid,
@@ -1101,7 +1109,9 @@ add_action( 'rest_api_init', function () {
 					// Groups and the flyer flag arrived after bulk tag did and
 					// were never added here: adding one name to thirty photos
 					// stripped every group off them and un-flyered the flyers.
-					'groups'   => array_map( 'strval', (array) ( $saved['groups'] ?? array() ) ),
+					'groups'   => array_values( array_unique( array_merge(
+						array_map( 'strval', (array) ( $saved['groups'] ?? array() ) ), $gadds
+					) ) ),
 					'flyer'    => ! empty( $saved['flyer'] ),
 					'revision' => $card['revision'],
 				) );
@@ -1112,9 +1122,10 @@ add_action( 'rest_api_init', function () {
 				$updated++;
 			}
 
-			gasf_crm_log( sprintf( 'CRM library: bulk tag by %s — %d photo(s) updated, %d skipped (%s%s%s)',
+			gasf_crm_log( sprintf( 'CRM library: bulk tag by %s — %d photo(s) updated, %d skipped (%s%s%s%s)',
 				gasf_crm_display_name( get_current_user_id() ), $updated, count( $skipped ),
 				$adds ? 'people: ' . implode( ', ', $adds ) : 'no people',
+				$gadds ? '; groups: ' . implode( ', ', $gadds ) : '',
 				'' !== $place ? '; place: ' . $place : '',
 				'' !== $event ? '; event: ' . $event : '' ) );
 

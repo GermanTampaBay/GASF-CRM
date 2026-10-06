@@ -3878,6 +3878,21 @@ final class GASF_CRM_Selftest {
 				'library save: groups and the flyer flag left out of a save are left as they are'
 			);
 
+			// Bulk tag can ADD a group too: on top of the one there, never instead
+			// of it, and only one from the club's list.
+			$group2 = 'Selftest Bulk Group2 ' . wp_rand();
+			$stray  = 'Selftest No Such Group ' . wp_rand();
+			wp_insert_term( $group2, 'gasf_photo_group' );
+			$r   = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array( $id ), 'groups' => array( $group2, $stray ) ) );
+			$now = gasf_crm_photo_term_names( $id, 'gasf_photo_group' );
+			sort( $now );
+			$both = array( $group, $group2 );
+			sort( $both );
+			$this->ok( is_array( $r ) && 1 === (int) ( $r['updated'] ?? 0 ) && $both === array_values( $now ),
+				'bulk tag: a group is added beside the one already there' );
+			$this->ok( ! term_exists( $stray, 'gasf_photo_group' ), 'bulk tag: and a group not on the club\'s list is not invented' );
+			$this->ok( in_array( $person, gasf_crm_photo_term_names( $id, 'gasf_photo_person' ), true ), 'bulk tag: a groups-only pass leaves the people alone' );
+
 			// And the editor, which does mention them, can still clear them.
 			$card = gasf_crm_photo_library_card( $id );
 			$res  = gasf_crm_photo_library_save( $id, array(

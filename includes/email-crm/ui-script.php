@@ -3500,10 +3500,36 @@ function gasf_crm_render_inbox_script() {
 					sel.appendChild(o);
 				});
 			}
+			// Groups, picked from the club's list exactly as the editor does.
+			var gwrap = document.getElementById('btgroups');
+			if (!gwrap.firstChild) { gwrap.innerHTML = groupsField([]); }
 			panel.hidden = false;
 			panel.scrollIntoView({ block: 'nearest' });
 		};
 		document.getElementById('btcancel').onclick = function(){ panel.hidden = true; };
+
+		// "+ Add another group" and the x beside each. Handled here, not by
+		// wirePeople(), which would also double up the person button above.
+		document.getElementById('btgroups').addEventListener('click', function(ev){
+			var t = ev.target;
+			if (t.closest && t.closest('.addg')) {
+				ev.preventDefault();
+				ev.stopPropagation();   // a wider pane's own handler would add a second row
+				var gbox = this.querySelector('.p-groups');
+				gbox.insertAdjacentHTML('beforeend', groupRow(''));
+				var gp = gbox.lastElementChild.querySelector('.p-group');
+				if (gp) { gp.focus(); }
+				return;
+			}
+			var del = t.closest ? t.closest('.pdelgroup') : null;
+			if (!del) { return; }
+			ev.preventDefault();
+			ev.stopPropagation();
+			var rows = this.querySelectorAll('.p-groups .pwrap');
+			var wrap = del.closest('.pwrap');
+			if (rows.length <= 1) { wrap.querySelector('.p-group').value = ''; return; }
+			wrap.remove();
+		});
 
 		// "+ Add another person" — the global .p-person delegation supplies the
 		// typo-tolerant picker to every box this clones.
@@ -3536,6 +3562,7 @@ function gasf_crm_render_inbox_script() {
 			api('/photos/bulk-tag', { method: 'POST', body: JSON.stringify({
 				ids: ids,
 				people: people,
+				groups: groupValues(document.getElementById('btgroups')),
 				place: document.getElementById('btplace').value,
 				event: ev.value.trim(),
 				event_id: parseInt(document.getElementById('bteventid').value, 10) || 0,

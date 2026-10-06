@@ -646,10 +646,13 @@ function gasf_crm_render_inbox() {
 	?>
 	<div class="card pad" id="lbulkpanel" hidden>
 		<h3 style="margin:0 0 4px">Tag the selected photos</h3>
-		<p class="muted" style="margin:0 0 10px">Applies to every ticked photo. Names are <strong>added</strong> to whoever is already tagged; place, event and date are only changed if you fill them in.</p>
+		<p class="muted" style="margin:0 0 10px">Applies to every ticked photo. Names and groups are <strong>added</strong> to whatever is already tagged; place, event, and date are only changed if you fill them in.</p>
 		<div class="f"><span>Add people</span>
 			<div class="p-people" id="btpeople"><span class="pwrap"><input type="text" class="p-person" placeholder="Name" autocomplete="off" spellcheck="false"></span></div>
 			<button type="button" class="addp" id="btaddp">+ Add another person</button>
+		</div>
+		<div class="f" style="margin-top:10px"><span>Add groups</span>
+			<div id="btgroups"></div>
 		</div>
 		<div class="lfrow" style="margin-top:10px">
 			<label class="lf"><span>Set place</span><select id="btplace"><option value="">&mdash; leave as is &mdash;</option></select></label>
