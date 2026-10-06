@@ -3847,6 +3847,12 @@ final class GASF_CRM_Selftest {
 		$h  = false !== $at ? substr( $js, $at, (int) strpos( $js, 'lsyncBar();', $at ) - $at ) : '';
 		$this->ok( '' !== $h && false !== strpos( $h, "lgrid.querySelectorAll('.lcard')" ), 'select all: ticks the cards on screen' );
 		$this->ok( '' !== $h && false === strpos( $h, 'lids' ), 'select all: and never the full list of matching photos' );
+
+		// Once something is ticked, a click on a photo selects rather than
+		// opens - and that check sits BEFORE the open, or it would never run.
+		$sel  = strpos( $js, 'if (lselCount()) {', (int) strpos( $js, "lgrid.addEventListener('click'" ) );
+		$open = strpos( $js, "if (ev.target.closest('.lopen')) { lbOpen(", (int) strpos( $js, "lgrid.addEventListener('click'" ) );
+		$this->ok( false !== $sel && false !== $open && $sel < $open, 'select: with photos ticked, clicking a photo ticks it instead of opening it' );
 	}
 
 	/**
@@ -3908,6 +3914,15 @@ final class GASF_CRM_Selftest {
 				'bulk tag: a group is added beside the one already there' );
 			$this->ok( ! term_exists( $stray, 'gasf_photo_group' ), 'bulk tag: and a group not on the club\'s list is not invented' );
 			$this->ok( in_array( $person, gasf_crm_photo_term_names( $id, 'gasf_photo_person' ), true ), 'bulk tag: a groups-only pass leaves the people alone' );
+
+			// And a group can be taken off by name, leaving the others.
+			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array( $id ), 'remove_groups' => array( $group2 ) ) );
+			$this->ok( is_array( $r ) && 1 === (int) ( $r['updated'] ?? 0 )
+				&& array( $group ) === array_values( gasf_crm_photo_term_names( $id, 'gasf_photo_group' ) ),
+				'bulk tag: removing a group takes off that one and leaves the rest' );
+			$r = $this->rest_post( '/gasf/v1/crm/photos/bulk-tag', array( 'ids' => array( $id ), 'groups' => array( $group ), 'remove_groups' => array( $group ) ) );
+			$this->ok( is_wp_error( $r ) && array( $group ) === array_values( gasf_crm_photo_term_names( $id, 'gasf_photo_group' ) ),
+				'bulk tag: adding and removing the same group at once is refused, and changes nothing' );
 
 			// And the editor, which does mention them, can still clear them.
 			$card = gasf_crm_photo_library_card( $id );

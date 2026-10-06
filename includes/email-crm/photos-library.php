@@ -1059,18 +1059,30 @@ add_action( 'rest_api_init', function () {
 				$g = trim( sanitize_text_field( $g ) );
 				if ( '' !== $g && term_exists( $g, 'gasf_photo_group' ) && ! in_array( $g, $gadds, true ) ) { $gadds[] = $g; }
 			}
+			// And taken off - named explicitly, one group at a time, never "clear
+			// all": the only way bulk tag removes anything is being asked to by
+			// name. A group both added and removed is a contradiction; refused.
+			$gdrops = array();
+			foreach ( (array) ( $in['remove_groups'] ?? array() ) as $g ) {
+				$g = trim( sanitize_text_field( $g ) );
+				if ( '' !== $g && ! in_array( $g, $gdrops, true ) ) { $gdrops[] = $g; }
+			}
+			if ( array_intersect( $gadds, $gdrops ) ) {
+				return new WP_Error( 'gasf_crm_both', 'A group cannot be added and removed in the same pass.', array( 'status' => 400 ) );
+			}
 			$place = trim( sanitize_text_field( (string) ( $in['place'] ?? '' ) ) );
 			$event = trim( sanitize_text_field( (string) ( $in['event'] ?? '' ) ) );
 			$eid   = (int) ( $in['event_id'] ?? 0 );
 			$taken = trim( sanitize_text_field( (string) ( $in['taken'] ?? '' ) ) );
 
-			if ( ! $adds && ! $gadds && '' === $place && '' === $event && '' === $taken ) {
-				return new WP_Error( 'gasf_crm_noop', 'Nothing to apply — add a name, a group, a place, an event, or a date.', array( 'status' => 400 ) );
+			if ( ! $adds && ! $gadds && ! $gdrops && '' === $place && '' === $event && '' === $taken ) {
+				return new WP_Error( 'gasf_crm_noop', 'Nothing to apply — add a name or a group, remove a group, or set a place, an event, or a date.', array( 'status' => 400 ) );
 			}
 			$op = gasf_crm_op_start( 'photo-bulk-tag:' . md5( wp_json_encode( array(
 				'ids'   => array_map( 'intval', $ids ),
 				'adds'  => array_values( $adds ),
 				'groups' => $gadds,
+				'gdrops' => $gdrops,
 				'place' => (string) $place,
 				'event' => (string) $event,
 				'eid'   => (int) $eid,
@@ -1109,9 +1121,9 @@ add_action( 'rest_api_init', function () {
 					// Groups and the flyer flag arrived after bulk tag did and
 					// were never added here: adding one name to thirty photos
 					// stripped every group off them and un-flyered the flyers.
-					'groups'   => array_values( array_unique( array_merge(
+					'groups'   => array_values( array_diff( array_unique( array_merge(
 						array_map( 'strval', (array) ( $saved['groups'] ?? array() ) ), $gadds
-					) ) ),
+					) ), $gdrops ) ),
 					'flyer'    => ! empty( $saved['flyer'] ),
 					'revision' => $card['revision'],
 				) );
@@ -1122,10 +1134,11 @@ add_action( 'rest_api_init', function () {
 				$updated++;
 			}
 
-			gasf_crm_log( sprintf( 'CRM library: bulk tag by %s — %d photo(s) updated, %d skipped (%s%s%s%s)',
+			gasf_crm_log( sprintf( 'CRM library: bulk tag by %s — %d photo(s) updated, %d skipped (%s%s%s%s%s)',
 				gasf_crm_display_name( get_current_user_id() ), $updated, count( $skipped ),
 				$adds ? 'people: ' . implode( ', ', $adds ) : 'no people',
 				$gadds ? '; groups: ' . implode( ', ', $gadds ) : '',
+				$gdrops ? '; groups removed: ' . implode( ', ', $gdrops ) : '',
 				'' !== $place ? '; place: ' . $place : '',
 				'' !== $event ? '; event: ' . $event : '' ) );
 

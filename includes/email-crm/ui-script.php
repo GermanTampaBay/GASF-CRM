@@ -3500,17 +3500,21 @@ function gasf_crm_render_inbox_script() {
 					sel.appendChild(o);
 				});
 			}
-			// Groups, picked from the club's list exactly as the editor does.
-			var gwrap = document.getElementById('btgroups');
-			if (!gwrap.firstChild) { gwrap.innerHTML = groupsField([]); }
+			// Groups to add and to remove, both picked from the club's list
+			// exactly as the editor does.
+			['btgroups', 'btgroupsoff'].forEach(function(gid){
+				var gwrap = document.getElementById(gid);
+				if (!gwrap.firstChild) { gwrap.innerHTML = groupsField([]); }
+			});
 			panel.hidden = false;
 			panel.scrollIntoView({ block: 'nearest' });
 		};
 		document.getElementById('btcancel').onclick = function(){ panel.hidden = true; };
 
-		// "+ Add another group" and the x beside each. Handled here, not by
-		// wirePeople(), which would also double up the person button above.
-		document.getElementById('btgroups').addEventListener('click', function(ev){
+		// "+ Add another group" and the x beside each, in both boxes. Handled
+		// here, not by wirePeople(), which would also double up the person
+		// button above.
+		Array.prototype.forEach.call(panel.querySelectorAll('.btgroupbox'), function(gb){ gb.addEventListener('click', function(ev){
 			var t = ev.target;
 			if (t.closest && t.closest('.addg')) {
 				ev.preventDefault();
@@ -3529,7 +3533,7 @@ function gasf_crm_render_inbox_script() {
 			var wrap = del.closest('.pwrap');
 			if (rows.length <= 1) { wrap.querySelector('.p-group').value = ''; return; }
 			wrap.remove();
-		});
+		}); });
 
 		// "+ Add another person" — the global .p-person delegation supplies the
 		// typo-tolerant picker to every box this clones.
@@ -3563,6 +3567,7 @@ function gasf_crm_render_inbox_script() {
 				ids: ids,
 				people: people,
 				groups: groupValues(document.getElementById('btgroups')),
+				remove_groups: groupValues(document.getElementById('btgroupsoff')),
 				place: document.getElementById('btplace').value,
 				event: ev.value.trim(),
 				event_id: parseInt(document.getElementById('bteventid').value, 10) || 0,
@@ -3970,6 +3975,18 @@ function gasf_crm_render_inbox_script() {
 			}
 			// The download link is a real anchor; let the browser have it.
 			if (ev.target.classList.contains('ldl')) { return; }
+			// Selecting mode: once anything is ticked, a click anywhere on a
+			// photo ticks or unticks it, the way every phone gallery works.
+			// Hunting for the little box forty times was the alternative.
+			// Untick everything and a click opens the photo again.
+			if (lselCount()) {
+				ev.preventDefault();
+				if (lsel[id]) { delete lsel[id]; } else { lsel[id] = true; }
+				card.classList.toggle('sel', !!lsel[id]);
+				var tk = card.querySelector('.ltick'); if (tk) { tk.checked = !!lsel[id]; }
+				lsyncBar();
+				return;
+			}
 			// closest, not the target itself: the click lands on the img inside
 			// the button, and a keyboard Enter lands on the button.
 			if (ev.target.closest('.lopen')) { lbOpen(id, ev.target.closest('.lcard')); }
