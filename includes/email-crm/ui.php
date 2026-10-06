@@ -740,7 +740,7 @@ function gasf_crm_render_inbox() {
 			         hides the moment its photos are gone and would take the
 			         result with it. */ ?>
 			<span id="lnote" class="muted" role="status"></span>
-			<button class="btn sec" id="lall" type="button" hidden>Select all</button>
+			<button class="btn sec" id="lall" type="button" hidden>Select all shown</button>
 		</div>
 		<div class="lgrid" id="lgrid"></div>
 		<div class="pad" id="lpager" hidden>

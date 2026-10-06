@@ -3979,11 +3979,14 @@ function gasf_crm_render_inbox_script() {
 	var lall = document.getElementById('lall');
 	if (lall) {
 		lall.onclick = function(){
-			// Every MATCHING photo, not just the page on screen — otherwise
-			// "select all" after a search means something different depending on
-			// how far you happened to scroll.
-			lids.forEach(function(id){ lsel[id] = true; });
+			// The photos on screen, and only those. It used to tick every
+			// MATCHING photo - 5,000+ with no filter - so a volunteer who
+			// pressed it and then "Tag selected…" tagged photos they had never
+			// seen. What you can see is what you are agreeing to act on.
 			Array.prototype.forEach.call(lgrid.querySelectorAll('.lcard'), function(c){
+				var id = parseInt(c.dataset.id, 10);
+				if (!id) { return; }
+				lsel[id] = true;
 				c.classList.add('sel');
 				var t = c.querySelector('.ltick'); if (t) { t.checked = true; }
 			});

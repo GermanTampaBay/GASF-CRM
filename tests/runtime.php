@@ -3834,6 +3834,22 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * "Select all shown" ticks the photos on screen, never the whole result.
+	 *
+	 * It used to tick every matching id - 5,000+ unfiltered - so "Tag
+	 * selected…" could act on photos nobody had looked at. Browser code the
+	 * suite cannot run, so this pins the handler's source: it must read the
+	 * grid's cards and must not walk the full id list.
+	 */
+	public function test_library_select_all_is_visible_only() {
+		$js = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$at = strpos( $js, 'lall.onclick' );
+		$h  = false !== $at ? substr( $js, $at, (int) strpos( $js, 'lsyncBar();', $at ) - $at ) : '';
+		$this->ok( '' !== $h && false !== strpos( $h, "lgrid.querySelectorAll('.lcard')" ), 'select all: ticks the cards on screen' );
+		$this->ok( '' !== $h && false === strpos( $h, 'lids' ), 'select all: and never the full list of matching photos' );
+	}
+
+	/**
 	 * Bulk tagging adds what was asked and leaves the rest of the photo alone.
 	 *
 	 * A library save replaces a photo's tags, and bulk tag was written before
