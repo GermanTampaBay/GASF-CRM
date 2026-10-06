@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.6"
+SCANNER_VERSION = "1.6.7"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -2074,6 +2074,22 @@ def identify(vector, references, backend, tolerance):
     return best_name, confidence(best_dist, tolerance)
 
 
+class QuietLocalServer(ThreadingHTTPServer):
+    """The local labelling and discovery pages' server, minus one false alarm.
+
+    A browser drops requests it no longer wants all the time - an image
+    scrolled past, a page refreshed mid-load - and the standard server prints
+    each one as a full traceback ("ConnectionAbortedError: [WinError 10053]")
+    in the middle of a run that is working perfectly. Those are not errors.
+    Everything else still is, and is still printed.
+    """
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def one_face_per_name(faces):
     """A person appears once in a photo: keep each name's most confident face.
 
@@ -2814,7 +2830,7 @@ def local_discovery_board(api, conn, backend, threshold, people, observation_ids
         def log_message(self, format, *args):
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), DiscoveryHandler)
+    server = QuietLocalServer(("127.0.0.1", 0), DiscoveryHandler)
     server.daemon_threads = True
     server.block_on_close = False
     port = server.server_address[1]
@@ -4567,7 +4583,7 @@ def local_label(
         def log_message(self, format, *args):
             return
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), LabelHandler)
+    server = QuietLocalServer(("127.0.0.1", 0), LabelHandler)
     # A cancelled browser navigation may leave an upstream image request alive.
     # Those stale request threads must never keep Finish from closing the UI.
     server.daemon_threads = True
@@ -5564,6 +5580,28 @@ def selftest():
         [(f["name"], f["confidence"]) for f in dup] == [("Hans", 80), ("sarah smith", 93)],
         "one face per name: the same person twice in a photo keeps only the surer face",
     )
+
+    # The local pages' server: a browser dropping a request is not an error,
+    # anything else still prints.
+    quiet = QuietLocalServer.__new__(QuietLocalServer)
+    saved_err = sys.stderr
+    try:
+        sys.stderr = io.StringIO()
+        try:
+            raise ConnectionAbortedError(10053, "aborted by the software in your host machine")
+        except ConnectionAbortedError:
+            quiet.handle_error(None, ("127.0.0.1", 1))
+        dropped = sys.stderr.getvalue()
+        sys.stderr = io.StringIO()
+        try:
+            raise KeyError("a real bug")
+        except KeyError:
+            quiet.handle_error(None, ("127.0.0.1", 1))
+        real = sys.stderr.getvalue()
+    finally:
+        sys.stderr = saved_err
+    check_that(dropped == "" and "KeyError" in real,
+               "local pages: a browser dropping a request prints nothing; a real error still prints")
 
     # A caption cut off at the length limit gets one retry with more room;
     # any other failure does not, and a second cut-off is reported as such.
