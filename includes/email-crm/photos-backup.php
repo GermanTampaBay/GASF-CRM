@@ -836,9 +836,7 @@ add_action( 'admin_notices', function () {
  * -------------------------------------------------------------------------- */
 
 add_action( 'init', function () {
-	if ( ! wp_next_scheduled( 'gasf_crm_backup_event' ) ) {
-		wp_schedule_event( time() + 300, 'gasf_crm_10min', 'gasf_crm_backup_event' );
-	}
+	gasf_crm_cron_ensure( 'gasf_crm_backup_event', 300 );
 } );
 add_action( 'gasf_crm_backup_event', 'gasf_crm_backup_run' );
 

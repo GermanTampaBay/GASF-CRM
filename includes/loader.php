@@ -533,18 +533,32 @@ if ( true ) {
 	 * for an hour, which is exactly what sending automatically was meant to
 	 * stop. This is a catch-up: it costs one indexed query when there is
 	 * nothing to do, and the lock stops it colliding with the sync's copy.
+	 *
+	 * Every 15 minutes, not 10 (2.72.2): the host rate-limits the whole site,
+	 * and the photo jobs were two of the most frequent things asking.
 	 */
+
+	/**
+	 * Keep a hook on the 15-minute schedule, moving it there if an older
+	 * version left it on another one. wp_next_scheduled() alone would see the
+	 * old 10-minute event as "already scheduled" and keep it forever.
+	 */
+	function gasf_crm_cron_ensure( $hook, $delay ) {
+		if ( 'gasf_crm_15min' === wp_get_schedule( $hook ) ) {
+			return;
+		}
+		wp_clear_scheduled_hook( $hook );
+		wp_schedule_event( time() + (int) $delay, 'gasf_crm_15min', $hook );
+	}
 	add_filter( 'cron_schedules', function ( $s ) {
-		if ( ! isset( $s['gasf_crm_10min'] ) ) {
-			$s['gasf_crm_10min'] = array( 'interval' => 10 * MINUTE_IN_SECONDS, 'display' => 'Every 10 minutes (GASF CRM)' );
+		if ( ! isset( $s['gasf_crm_15min'] ) ) {
+			$s['gasf_crm_15min'] = array( 'interval' => 15 * MINUTE_IN_SECONDS, 'display' => 'Every 15 minutes (GASF CRM)' );
 		}
 		return $s;
 	} );
 
 	add_action( 'init', function () {
-		if ( ! wp_next_scheduled( 'gasf_crm_photo_event' ) ) {
-			wp_schedule_event( time() + 60, 'gasf_crm_10min', 'gasf_crm_photo_event' );
-		}
+		gasf_crm_cron_ensure( 'gasf_crm_photo_event', 60 );
 	} );
 	add_action( 'gasf_crm_photo_event', 'gasf_crm_photo_autoprocess' );
 

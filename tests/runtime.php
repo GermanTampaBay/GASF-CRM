@@ -1111,6 +1111,38 @@ final class GASF_CRM_Selftest {
 	 * a grant that expires rather than a refresh token, and a token that is
 	 * dropped the moment Google stops honouring it.
 	 */
+	/**
+	 * The photo jobs run every 15 minutes, and an older 10-minute event is
+	 * moved rather than kept.
+	 *
+	 * The host rate-limits the whole site, so how often the club's own jobs ask
+	 * is a budget. The trap is the migration: `wp_next_scheduled()` treats an
+	 * event left on the old schedule as already scheduled, so a version that
+	 * only changed the schedule name would change nothing on a live site.
+	 */
+	public function test_photo_cron_cadence() {
+		$this->ok(
+			900 === (int) ( wp_get_schedules()['gasf_crm_15min']['interval'] ?? 0 ),
+			'cron: the CRM\'s own schedule is every 15 minutes'
+		);
+		foreach ( array( 'gasf_crm_photo_event', 'gasf_crm_backup_event' ) as $hook ) {
+			$this->ok( 'gasf_crm_15min' === wp_get_schedule( $hook ), "cron: {$hook} runs on it" );
+		}
+
+		$hook = 'gasf_crm_selftest_cadence';
+		try {
+			wp_schedule_event( time() + 600, 'hourly', $hook );
+			gasf_crm_cron_ensure( $hook, 60 );
+			$this->ok( 'gasf_crm_15min' === wp_get_schedule( $hook ), 'cron: an event left on another schedule is moved to 15 minutes' );
+			$first = wp_next_scheduled( $hook );
+			gasf_crm_cron_ensure( $hook, 60 );
+			$this->ok( $first === wp_next_scheduled( $hook ), 'cron: and one already on it is left alone, not pushed back on every page load' );
+		} finally {
+			wp_clear_scheduled_hook( $hook );
+		}
+		$this->ok( false === wp_next_scheduled( $hook ), 'cron: the selftest event is gone afterwards' );
+	}
+
 	public function test_google_photos_scope() {
 		$this->ok(
 			'https://www.googleapis.com/auth/photospicker.mediaitems.readonly' === GASF_CRM_GPHOTOS_SCOPE,
