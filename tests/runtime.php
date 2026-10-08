@@ -1219,6 +1219,60 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The library list is fast, and its filter menus are cached.
+	 *
+	 * The list of library photos came from a meta_query of two EXISTS joined
+	 * by OR - 6.6 of 7.4 seconds on every page load. Its replacement must find
+	 * exactly the same photos: confirmed ones, autotagged ones, and not a photo
+	 * that is neither. The menus are cached against a generation that every
+	 * tag or library change moves, and served stale-then-rebuilt rather than
+	 * making anybody wait.
+	 */
+	public function test_library_ids_and_menu_cache() {
+		$conf = $this->library_photo( 'selftest-lib-confirmed' );
+		$auto = $this->library_photo( 'selftest-lib-autotag' );
+		delete_post_meta( $auto, '_gasf_photo_confirmed' );
+		update_post_meta( $auto, '_gasf_photo_autotag', 'selftest' );
+		$none = $this->library_photo( 'selftest-lib-neither' );
+		delete_post_meta( $none, '_gasf_photo_confirmed' );
+
+		$t   = microtime( true );
+		$ids = gasf_crm_photo_library_ids();
+		$sec = microtime( true ) - $t;
+		$this->ok( in_array( $conf, $ids, true ) && in_array( $auto, $ids, true ) && ! in_array( $none, $ids, true ),
+			'library: a confirmed photo and an autotagged one are listed; a photo that is neither is not' );
+		$this->ok( $sec < 4.0, sprintf( 'library: the list of library photos builds in %.2fs, not the 7s it took', $sec ) );
+
+		// The generation moves on a library change, and not on anything else.
+		$g0 = gasf_crm_photo_library_gen();
+		update_post_meta( $conf, '_some_other_plugin_key', 1 );
+		$this->ok( $g0 === gasf_crm_photo_library_gen(), 'menus: an unrelated change leaves the cache alone' );
+		delete_post_meta( $conf, '_some_other_plugin_key' );
+		wp_set_object_terms( $conf, array( 'Selftest Menu Place ' . wp_rand() ), 'gasf_photo_place', false );
+		$g1 = gasf_crm_photo_library_gen();
+		$this->ok( $g0 !== $g1, 'menus: tagging a photo marks the cached menus out of date' );
+
+		// Built once, then served from the cache while nothing has changed.
+		$filters = array( 'person' => '', 'group' => '', 'place' => '', 'event' => '', 'year' => '', 'desc' => '', 'review' => '', 'q' => 'selftest-menu-' . wp_rand(), 'sort' => '' );
+		$key     = 'gasf_crm_lib_menus_' . md5( wp_json_encode( ( function ( $f ) { unset( $f['sort'] ); ksort( $f ); return $f; } )( $filters ) ) );
+		$builds  = 0;
+		$source  = function () use ( &$builds, $conf ) { $builds++; return array( $conf ); };
+		try {
+			gasf_crm_photo_library_menus( $source, $filters );
+			gasf_crm_photo_library_menus( $source, $filters );
+			$this->ok( 1 === $builds, 'menus: built once, then served from the cache' );
+
+			// Out of date: the old menus are served at once, not rebuilt first.
+			set_transient( $key, array( 'gen' => 'selftest-old', 'menus' => array( 'people' => array( 'selftest-stale' ) ) ), MINUTE_IN_SECONDS );
+			$got = gasf_crm_photo_library_menus( $source, $filters );
+			$this->ok( array( 'selftest-stale' ) === ( $got['people'] ?? null ) && 1 === $builds,
+				'menus: out-of-date menus are served straight away and rebuilt after the response, not before it' );
+		} finally {
+			delete_transient( $key );
+		}
+	}
+
+	/**
 	 * The thumbnail sweeper finds photos with no sizes and makes them.
 	 *
 	 * One-off resize jobs were lost whenever the host killed the scheduler at

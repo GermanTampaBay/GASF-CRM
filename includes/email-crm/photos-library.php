@@ -78,12 +78,19 @@ function gasf_crm_photo_library_ids( array $f = array() ) {
 		'no_found_rows'  => true,
 	);
 
-	$ids = get_posts( $common + array(
-		'meta_query' => array(
-			'relation' => 'OR',
-			array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
-			array( 'key' => '_gasf_photo_autotag',   'compare' => 'EXISTS' ),
-		),
+	/*
+	 * Written by hand, on purpose. The same thing as a meta_query (two EXISTS
+	 * clauses joined by OR) makes WordPress build a double LEFT JOIN that MySQL
+	 * cannot use an index for: 6.6 of the library's 7.4 seconds on every page,
+	 * filter click and refresh, measured 2026-10-07. meta_key IN (...) is an
+	 * index lookup and takes a few milliseconds for the same rows.
+	 */
+	global $wpdb;
+	$ids = $wpdb->get_col( $wpdb->prepare(
+		"SELECT DISTINCT p.ID FROM {$wpdb->posts} p
+		   JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key IN ( %s, %s )
+		  WHERE p.post_type = 'attachment' AND p.post_status IN ( 'inherit', 'private' )",
+		'_gasf_photo_confirmed', '_gasf_photo_autotag'
 	) );
 
 	$tagged = get_posts( $common + array(
@@ -948,6 +955,92 @@ function gasf_crm_photo_person_move( $post_id, $from_term_id, $to_term_id ) {
 }
 
 /* =====================================================================
+ * The filter menus, cached and refreshed lazily
+ *
+ * Building the people, group, place, event, and year menus walks the whole
+ * library five times, once per menu (each menu leaves out its own filter so
+ * it can offer the alternatives). It is the same answer on nearly every load,
+ * so it is cached per filter combination and stamped with a generation that
+ * every tag, membership, or term change moves. A load that finds the stamp
+ * out of date gets the cached menus at once and the rebuild happens AFTER
+ * the response has gone - a stale count for one load, never a wait. The
+ * photos themselves are always live.
+ * ================================================================== */
+
+/** The library's current generation; moves on any change the menus show. */
+function gasf_crm_photo_library_gen() {
+	return (string) get_option( 'gasf_crm_lib_gen', '0' );
+}
+
+/**
+ * Move the generation. Every time, not once per request: a long-running
+ * command (the WebP repair, a bulk tag) can have menus rebuilt by somebody
+ * else's page load halfway through, and its later changes must still count.
+ */
+function gasf_crm_photo_library_touch() {
+	update_option( 'gasf_crm_lib_gen', (string) microtime( true ), false );
+}
+
+add_action( 'set_object_terms', function ( $object_id, $terms, $tt_ids, $taxonomy ) {
+	if ( 0 === strpos( (string) $taxonomy, 'gasf_photo_' ) ) { gasf_crm_photo_library_touch(); }
+}, 10, 4 );
+foreach ( array( 'added_post_meta', 'updated_post_meta', 'deleted_post_meta' ) as $gasf_hook ) {
+	add_action( $gasf_hook, function ( $meta_id, $object_id, $meta_key ) {
+		if ( 0 === strpos( (string) $meta_key, '_gasf_photo_' ) ) { gasf_crm_photo_library_touch(); }
+	}, 10, 3 );
+}
+unset( $gasf_hook );
+add_action( 'delete_attachment', 'gasf_crm_photo_library_touch' );
+foreach ( array( 'edited_term', 'delete_term' ) as $gasf_hook ) {
+	add_action( $gasf_hook, function ( $term_id, $tt_id, $taxonomy ) {
+		if ( 0 === strpos( (string) $taxonomy, 'gasf_photo_' ) ) { gasf_crm_photo_library_touch(); }
+	}, 10, 3 );
+}
+unset( $gasf_hook );
+
+/** The five menus for this filter combination, built fresh. */
+function gasf_crm_photo_library_menus_build( array $all, array $filters ) {
+	$menus = array();
+	foreach ( array( 'person' => 'people', 'group' => 'groups', 'place' => 'places', 'event' => 'events', 'year' => 'years' ) as $own => $key ) {
+		$f          = $filters;
+		$f[ $own ]  = '';   // a menu offers alternatives to its own choice
+		$facets     = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $f ) );
+		$menus[ $key ] = $facets[ $key ];
+	}
+	return $menus;
+}
+
+/**
+ * The menus, from the cache when it has them.
+ *
+ * @param callable $all_ids Gives the library's ids; only called when building.
+ */
+function gasf_crm_photo_library_menus( callable $all_ids, array $filters ) {
+	unset( $filters['sort'] );   // order does not change what is on offer
+	ksort( $filters );
+	$key    = 'gasf_crm_lib_menus_' . md5( wp_json_encode( $filters ) );
+	$gen    = gasf_crm_photo_library_gen();
+	$cached = get_transient( $key );
+
+	if ( is_array( $cached ) && isset( $cached['menus'], $cached['gen'] ) ) {
+		if ( $cached['gen'] !== $gen ) {
+			// Stale: serve it, rebuild once the visitor has their answer.
+			register_shutdown_function( function () use ( $key, $all_ids, $filters ) {
+				if ( function_exists( 'litespeed_finish_request' ) ) { litespeed_finish_request(); }
+				elseif ( function_exists( 'fastcgi_finish_request' ) ) { fastcgi_finish_request(); }
+				$gen_now = gasf_crm_photo_library_gen();
+				set_transient( $key, array( 'gen' => $gen_now, 'menus' => gasf_crm_photo_library_menus_build( $all_ids(), $filters ) ), DAY_IN_SECONDS );
+			} );
+		}
+		return $cached['menus'];
+	}
+
+	$menus = gasf_crm_photo_library_menus_build( $all_ids(), $filters );
+	set_transient( $key, array( 'gen' => $gen, 'menus' => $menus ), DAY_IN_SECONDS );
+	return $menus;
+}
+
+/* =====================================================================
  * REST
  * ================================================================== */
 
@@ -976,20 +1069,9 @@ add_action( 'rest_api_init', function () {
 				'sort'   => (string) $req->get_param( 'sort' ),
 			);
 
-			$all      = gasf_crm_photo_library_ids();
 			$ordered  = gasf_crm_photo_library_ids( array( 'sort' => $filters['sort'] ) );
 			$matching = gasf_crm_photo_library_filter( $ordered, $filters );
-			$for_who  = $filters; $for_who['person'] = '';
-			$for_group = $filters; $for_group['group'] = '';
-			$for_where = $filters; $for_where['place'] = '';
-			$for_event = $filters; $for_event['event'] = '';
-			$for_year = $filters; $for_year['year'] = '';
-
-			$f_who   = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_who ) );
-			$f_group = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_group ) );
-			$f_where = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_where ) );
-			$f_event = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_event ) );
-			$f_year  = gasf_crm_photo_library_facets( gasf_crm_photo_library_filter( $all, $for_year ) );
+			$menus    = gasf_crm_photo_library_menus( function () use ( $ordered ) { return $ordered; }, $filters );
 
 			$page  = max( 1, (int) $req->get_param( 'page' ) );
 			$slice = array_slice( $matching, ( $page - 1 ) * GASF_CRM_LIB_PER_PAGE, GASF_CRM_LIB_PER_PAGE );
@@ -1003,16 +1085,10 @@ add_action( 'rest_api_init', function () {
 			return array(
 				'photos'  => $photos,
 				'total'   => count( $matching ),
-				'all'     => count( $all ),
+				'all'     => count( $ordered ),
 				'page'    => $page,
 				'pages'   => max( 1, (int) ceil( count( $matching ) / GASF_CRM_LIB_PER_PAGE ) ),
-				'facets'  => array(
-					'people' => $f_who['people'],
-					'groups' => $f_group['groups'],
-					'places' => $f_where['places'],
-					'events' => $f_event['events'],
-					'years'  => $f_year['years'],
-				),
+				'facets'  => $menus,
 				// Every matching id, so "select all" can act on the whole result
 				// rather than only the page in front of you.
 				'ids'     => array_map( 'intval', $matching ),
