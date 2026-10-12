@@ -1089,7 +1089,17 @@ function gasf_crm_door_script( $party ) {
 	// Names to suggest as the guest types: the same list and the same matcher
 	// as the tagging page - only names already printed on public photos, so
 	// nothing here is news to anybody who can open the library.
-	$people = function_exists( 'gasf_photo_public_people' ) ? gasf_photo_public_people() : array();
+	//
+	// Cached, keyed on the library generation (which every tag change bumps):
+	// building it walks every person and every tagged photo, and this page
+	// is public. An anonymous reload loop must not cost the host that.
+	$gen    = function_exists( 'gasf_crm_photo_library_gen' ) ? gasf_crm_photo_library_gen() : '0';
+	$pkey   = 'gasf_door_people_' . md5( $gen );
+	$people = get_transient( $pkey );
+	if ( ! is_array( $people ) ) {
+		$people = function_exists( 'gasf_photo_public_people' ) ? gasf_photo_public_people() : array();
+		set_transient( $pkey, $people, 6 * HOUR_IN_SECONDS );
+	}
 	if ( function_exists( 'gasf_photo_matcher_js' ) ) {
 		echo '<script>' . gasf_photo_matcher_js() . '</script>'; // phpcs:ignore WordPress.Security.EscapeOutput
 	}

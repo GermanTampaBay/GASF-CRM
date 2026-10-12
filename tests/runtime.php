@@ -3711,6 +3711,9 @@ final class GASF_CRM_Selftest {
 			'door: and "somewhere else" is still there for everywhere it leaves out' );
 		$this->ok( false !== strpos( $door, 'gasf_photo_public_people()' ) && false !== strpos( $door, 'gasfPeopleMatch(q, PEOPLE, taken)' ),
 			'door: names are suggested from the public-names list, with the shared matcher' );
+		$this->ok( false !== strpos( $door, "set_transient( $pkey, $people, 6 * HOUR_IN_SECONDS )" )
+				&& false !== strpos( $door, "'gasf_door_people_' . md5( $gen )" ),
+			'door: that list is cached per library generation, so an anonymous reload does not walk every person' );
 		$this->ok( false !== strpos( $door, "if (evId.value) {\n\t\t\t// Picked: the filled-in box is the answer, so the list goes." ),
 			'door: picking an occasion closes the list instead of searching on its title' );
 		// Place and occasion carry no "(optional)", so they read as expected
