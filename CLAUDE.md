@@ -112,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 678 assertions in 85 tests, run on the server against live
+- **`tests/runtime.php`** — 695 assertions in 87 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -327,9 +327,9 @@ being filed under a thread id that belonged to another table**.
 
 ---
 
-## Six traps worth remembering
+## Seven traps worth remembering
 
-The first five are the same shape: **state that is correct when you read it and wrong
+The first five and the seventh are the same shape: **state that is correct when you read it and wrong
 by the time you use it**, failing silently, looking exactly like the normal
 failure everyone already knows about. None produced an error a reader could
 trust. Four reached production, and the fifth was caused by the suite that is
@@ -390,6 +390,23 @@ permanent. "Wrong person" and "not a person to tag" are different answers and
 need different verbs: `_gasf_face_ignored` is the second one. Watch for this
 shape generally — a negative signal wired into a positive test can invert it.
 
+**A face box is a number with no ruler unless it says which picture it was
+measured on.** The scanner measured every face rectangle against whatever
+file `/faces/image` streamed it: the `large` copy when one existed, the full
+photo when it did not. Then the thumbnail sweeper (2.79.0) made `large` copies
+for 1,959 already-scanned photos, and from that moment every box on them was
+read against the wrong picture - reference faces cropped off the face or past
+the edge (and cached as "no thumbnail"), labels paired with the wrong detected
+face on the scanning PC, editor overlays drawn past the photo. The numbers
+never changed; the thing they referred to did. Since 2.91.0 every box carries
+`iw`/`ih`, the size it was measured on (the ignore list already did this), and
+is converted by `gasf_crm_face_rows_in()` to whatever a reader needs; a box
+recorded without one is placed on the smallest size on record that contains
+it, falling back to the camera JPEG the host's optimiser left beside a
+`-compressed.webp`. After any server-side change to labels, the scanning PC
+needs one `scan.py --relearn`. **Anything that stores a coordinate must store
+what it is a coordinate on.**
+
 **A killed test run left selftest values in the club's live settings.** The
 suite snapshotted each option it changed and restored them all at the END. On
 2026-10-02 it was launched through the SSH connector, which gives up on a
@@ -410,12 +427,12 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.90.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.91.2** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
 The face scanner has its own: `SCANNER_VERSION` near the top of
-`tools/face-scanner/scan.py` (1.6.7 as of quiet local pages on a dropped browser request), shown at the
+`tools/face-scanner/scan.py` (1.7.0 as of boxes carrying the size they were measured on), shown at the
 top of the launcher's *Advanced settings* and by `scan.py --version`. Bump it
 with every change to that folder; it is the only way to tell from the scanning
 PC which copy is running. The `1.3` in its `USER_AGENT` is a fixed string
