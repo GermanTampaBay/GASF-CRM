@@ -510,7 +510,9 @@ final class GASF_CRM_Selftest {
 		$this->ok( gasf_crm_photo_has_metadata( $tmp ), 'scrub at intake: the fixture carries metadata before upload' );
 		$r  = gasf_crm_photo_upload_one(
 			array( 'name' => 'st-gps-in.jpg', 'type' => 'image/jpeg', 'tmp_name' => $tmp, 'error' => 0, 'size' => strlen( $bytes ) ),
-			array( 'note' => 'selftest', 'consent_scope' => 'limited' ) );
+			// Sideload: a browser upload needs a real $_FILES entry that passed
+			// is_uploaded_file(), which no test can forge; the Google path cannot.
+			array( 'note' => 'selftest', 'consent_scope' => 'limited', 'sideload' => 1 ) );
 		$id = is_array( $r ) ? (int) ( $r['id'] ?? 0 ) : 0;
 		if ( $id ) { $this->made[] = $id; }
 		$this->ok( $id > 0, 'scrub at intake: the limited upload landed' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
@@ -567,7 +569,7 @@ final class GASF_CRM_Selftest {
 		$this->made[] = $other;
 		$r = gasf_crm_photo_consent_record( $other, 'refuse', 'selftest' );
 		$this->ok( is_wp_error( $r ) && 'gasf_crm_notlib' === $r->get_error_code(), 'consent gate: an attachment that is not a club photo is refused' );
-		$this->ok( ! gasf_crm_photo_is_private( $other ) && 'inherit' === get_post_status( $other ), 'consent gate: and nothing was moved or hidden' );
+		$this->ok( ! gasf_crm_photo_is_private( $other ) && 'inherit' === get_post( $other )->post_status, 'consent gate: and nothing was moved or hidden' );
 	}
 
 	/** An unchanged scan result still counts as "looked at" after a rescan cleared the stamp. */
