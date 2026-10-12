@@ -548,6 +548,7 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	// knows about them: for those two, a key that is ABSENT means "not my
 	// field, leave it", and only a key that is present and empty clears. The
 	// next field somebody adds should follow these two, not the others.
+	$people_before = array_key_exists( 'people', $in ) ? gasf_crm_photo_term_names( $id, 'gasf_photo_person' ) : null;
 	gasf_crm_photo_apply_metadata( $id, $in, array(
 		'clear_people_when_empty'  => true,
 		'clear_groups_when_empty'  => array_key_exists( 'groups', $in ),
@@ -566,6 +567,10 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	) );
 	if ( ! empty( $in['face_map'] ) && function_exists( 'gasf_crm_face_labels_record' ) ) {
 		gasf_crm_face_labels_record( $id, (array) $in['face_map'] );
+	}
+	// A person taken off by hand is a rejection of any face label for them.
+	if ( null !== $people_before && function_exists( 'gasf_crm_face_people_removed' ) ) {
+		gasf_crm_face_people_removed( $id, $people_before );
 	}
 
 	/*

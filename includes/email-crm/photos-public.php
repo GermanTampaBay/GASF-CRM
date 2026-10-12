@@ -499,9 +499,13 @@ add_action( 'template_redirect', function () {
 function gasf_crm_door_receive( array $door ) {
 	header( 'Content-Type: application/json; charset=utf-8' );
 
-	$fail = function ( $msg, $code = 400 ) {
+	// The pass travels with REFUSALS too. A duplicate as photo 1 of 20 used to
+	// spend the Turnstile token and answer without the pass, so photos 2..20
+	// each resent the spent token and were refused with "reload the page".
+	$pass = '';
+	$fail = function ( $msg, $code = 400 ) use ( &$pass ) {
 		status_header( $code );
-		echo wp_json_encode( array( 'ok' => false, 'message' => $msg ) );
+		echo wp_json_encode( array( 'ok' => false, 'message' => $msg, 'pass' => (string) $pass ) );
 	};
 
 	if ( ! function_exists( 'gasf_crm_photo_upload_one' ) ) {
@@ -958,7 +962,7 @@ function gasf_crm_door_page( $door, $notice ) {
 			// Rendered explicitly so the token lands in a place the uploader
 			// can reach, and reset after each spend.
 			echo '<div id="pturnstile" style="margin:10px 0"></div>';
-			printf( '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=gasfTsReady" async defer></script><script>var GASF_TS_SITE=%s,gasfTsToken="",gasfTsWidget=null;function gasfTsReady(){gasfTsWidget=turnstile.render("#pturnstile",{sitekey:GASF_TS_SITE,callback:function(t){gasfTsToken=t;}});}</script>',
+			printf( '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?onload=gasfTsReady" async defer></script><script>var GASF_TS_SITE=%s,gasfTsToken="",gasfTsWidget=null;function gasfTsReady(){gasfTsWidget=turnstile.render("#pturnstile",{sitekey:GASF_TS_SITE,callback:function(t){gasfTsToken=t;if(window.gasfDoorPaint){window.gasfDoorPaint();}}});}</script>',
 				wp_json_encode( $ts_keys['site'] ) );
 		}
 	}
@@ -1127,8 +1131,13 @@ function gasf_crm_door_script( $party ) {
 				'<span class="st' + (p.state === 'done' ? ' done' : (p.state === 'err' ? ' err' : '')) + '">' + s + '</span></figure>';
 		}).join('');
 		document.getElementById('pform').hidden = !picked.length;
-		var waiting = picked.filter(function(p){ return p.state === 'new'; }).length;
-		send.disabled = busy || !waiting;
+		var waiting = picked.filter(function(p){ return p.state === 'new' || p.state === 'err'; }).length;
+		// With Turnstile on the page, Submit waits for its token (or a pass from
+		// an earlier batch); submitting without one was a guaranteed refusal.
+		var gate = (typeof GASF_TS_SITE !== 'undefined') && !window.gasfDoorPass && !(typeof gasfTsToken !== 'undefined' && gasfTsToken);
+		send.disabled = busy || !waiting || gate;
+		if (gate && waiting && !busy) { msg.textContent = 'Waiting for the security check…'; }
+		else if (msg.textContent === 'Waiting for the security check…') { msg.textContent = ''; }
 	}
 
 	grid.addEventListener('click', function(e){
@@ -1138,6 +1147,26 @@ function gasf_crm_door_script( $party ) {
 		if (p) { URL.revokeObjectURL(p.url); }
 		paint();
 	});
+
+	window.gasfDoorPaint = paint;
+
+	// A fresh Turnstile token, for a retry: the old one was spent or had
+	// expired (they last about five minutes, and picking twenty photos and
+	// typing names takes longer). Resolves '' if none arrives in time.
+	function freshToken(){
+		return new Promise(function(resolve){
+			if (typeof turnstile === 'undefined' || gasfTsWidget === null) { resolve(''); return; }
+			gasfTsToken = '';
+			try { turnstile.reset(gasfTsWidget); } catch (e) { resolve(''); return; }
+			var waited = 0;
+			var tick = function(){
+				if (gasfTsToken) { resolve(gasfTsToken); return; }
+				if ((waited += 250) > 15000) { resolve(''); return; }
+				setTimeout(tick, 250);
+			};
+			tick();
+		});
+	}
 
 	document.getElementById('ppick').onclick = function(){ document.getElementById('pfile').click(); };
 	document.getElementById('pfile').onchange = function(e){
@@ -1602,7 +1631,11 @@ function gasf_crm_door_script( $party ) {
 		};
 		if (lastSent) { REMEMBER.forEach(function(id){ lastSent[id] = val(id); }); }
 
-		var queue = picked.filter(function(p){ return p.state === 'new'; });
+		// Failed photos go again. They used to stay in the grid with Submit
+		// disabled for them, so one wifi blip meant tapping × and finding
+		// them in the camera roll a second time.
+		var queue = picked.filter(function(p){ return p.state === 'new' || p.state === 'err'; });
+		queue.forEach(function(p){ p.state = 'new'; });
 		var ok = 0, bad = 0, held = false, why = '';
 		var total = queue.length;
 		wurstOn(total);
@@ -1634,19 +1667,41 @@ function gasf_crm_door_script( $party ) {
 			if (extra) { Object.keys(extra).forEach(function(k){ fd.append(k, extra[k]); }); }
 
 			// Text first, then JSON: a phone on club wifi meets gateway error
-			// pages, and "unexpected token <" tells a guest nothing.
-			fetch(window.location.href, { method: 'POST', body: fd })
-				.then(function(r){ return r.text(); })
-				.then(function(t){
-					var b = null;
-					try { b = JSON.parse(t); } catch (e) {}
-					if (!b || !b.ok) { throw new Error((b && b.message) || 'The club could not take that one.'); }
-					if (b.held) { held = true; }
-					// The Turnstile token is spent; the pass covers the rest of
-					// the batch and the next half hour.
-					if (b.pass) { window.gasfDoorPass = b.pass; }
-					p.state = 'done'; ok++;
-				})
+			// pages, and "unexpected token <" tells a guest nothing. A stalled
+			// upload is abandoned after three minutes rather than left dancing.
+			var attempt = function(retried){
+				var ctl = ('AbortController' in window) ? new AbortController() : null;
+				var timer = ctl ? setTimeout(function(){ ctl.abort(); }, 180000) : null;
+				return fetch(window.location.href, { method: 'POST', body: fd, signal: ctl ? ctl.signal : undefined })
+					.then(function(r){ return r.text().then(function(t){ return { status: r.status, text: t }; }); })
+					.then(function(res){
+						if (timer) { clearTimeout(timer); }
+						var b = null;
+						try { b = JSON.parse(res.text); } catch (e) {}
+						// The Turnstile token is spent; the pass covers the rest of
+						// the batch and the next half hour - on a refusal too.
+						if (b && b.pass) { window.gasfDoorPass = b.pass; }
+						if (!b || !b.ok) {
+							// The security check: a spent or expired token. Fetch a
+							// fresh one and try this photo once more.
+							if (res.status === 403 && !retried) {
+								window.gasfDoorPass = '';
+								return freshToken().then(function(tok){
+									if (!tok) { throw new Error((b && b.message) || 'The security check did not pass.'); }
+									fd.delete('pass'); fd.delete('cf_token'); fd.append('cf_token', tok);
+									return attempt(true);
+								});
+							}
+							throw new Error((b && b.message) || 'The club could not take that one.');
+						}
+						if (b.held) { held = true; }
+						p.state = 'done'; ok++;
+					}, function(e){
+						if (timer) { clearTimeout(timer); }
+						throw (e && e.name === 'AbortError') ? new Error('That one took too long to send. Check the connection and try again.') : e;
+					});
+			};
+			attempt(false)
 				.catch(function(e){ p.state = 'err'; bad++; if (!why) { why = e.message; } })
 				.then(function(){ paint(); next(); });
 		};

@@ -1137,6 +1137,58 @@ function gasf_crm_face_photos_unskip_all() {
  * The negative decision is deliberately photo + person, not photo + box. If a
  * later detector moves the rectangle, it must not resurrect the same person.
  */
+/** Is this name already one of the club's people? Exact, as the scanner learned it. */
+function gasf_crm_face_person_exists( $name ) {
+	$name = trim( (string) $name );
+	if ( '' === $name ) { return false; }
+	$t = function_exists( 'gasf_photo_person_term_by_exact_name' )
+		? gasf_photo_person_term_by_exact_name( $name )
+		: get_term_by( 'name', $name, 'gasf_photo_person' );
+	return (bool) $t && ! is_wp_error( $t );
+}
+
+/** Take a person off a photo, and off its public title, by name. */
+function gasf_crm_face_untag_person( $attachment_id, $name ) {
+	$id   = (int) $attachment_id;
+	$gone = 0;
+	foreach ( (array) wp_get_object_terms( $id, 'gasf_photo_person' ) as $t ) {
+		if ( is_object( $t ) && gasf_crm_face_name_same( $name, (string) $t->name ) ) {
+			$r = wp_remove_object_terms( $id, array( (int) $t->term_id ), 'gasf_photo_person' );
+			if ( true === $r ) { $gone++; }
+		}
+	}
+	if ( $gone ) {
+		if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $id, true ); }
+		if ( function_exists( 'gasf_crm_photo_library_touch' ) ) { gasf_crm_photo_library_touch(); }
+	}
+	return $gone;
+}
+
+/**
+ * People a volunteer has just taken off a photo by hand.
+ *
+ * Removing a name is a rejection of any face label for it: otherwise the
+ * wrong face stayed in the training set, and an auto-accepted name came
+ * straight back on the next scan. Names with no face label are left alone -
+ * untagging is not always a verdict on a face.
+ */
+function gasf_crm_face_people_removed( $attachment_id, array $before ) {
+	$id    = (int) $attachment_id;
+	$after = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+	$n     = 0;
+	foreach ( $before as $was ) {
+		$still = false;
+		foreach ( $after as $now ) { if ( gasf_crm_face_name_same( $was, $now ) ) { $still = true; break; } }
+		if ( $still ) { continue; }
+		$labelled = false;
+		foreach ( gasf_crm_face_labels_for( $id ) as $l ) { if ( gasf_crm_face_name_same( $was, (string) $l['name'] ) ) { $labelled = true; break; } }
+		if ( ! $labelled ) { continue; }
+		$r = gasf_crm_face_reject( $id, $was );
+		if ( ! is_wp_error( $r ) ) { $n++; }
+	}
+	return $n;
+}
+
 function gasf_crm_face_reject( $attachment_id, $name ) {
 	$id   = (int) $attachment_id;
 	$name = trim( sanitize_text_field( (string) $name ) );
@@ -1177,6 +1229,9 @@ function gasf_crm_face_reject( $attachment_id, $name ) {
 			return new WP_Error( 'gasf_crm_store', 'The incorrect training label could not be removed.', array( 'status' => 500 ) );
 		}
 	}
+	// And off the photo: a match a volunteer has called wrong must leave the
+	// public title, not only the training set.
+	gasf_crm_face_untag_person( $id, $name );
 	return $changed;
 }
 
@@ -1259,19 +1314,30 @@ function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
 		$box  = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
 		if ( $pct < $min || '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
-		$labels[] = array( 'name' => $name, 'box' => array_values( $box ), 'iw' => (int) ( $s['iw'] ?? 0 ), 'ih' => (int) ( $s['ih'] ?? 0 ) );
+		// Only a person the club already knows. The scanner matches against
+		// references learned from existing names, so a name with no term is
+		// not a match - it is whoever holds the key writing text into public
+		// titles. Until 2.93.0 this created the term.
+		if ( ! gasf_crm_face_person_exists( $name ) ) { continue; }
+		$labels[] = array( 'name' => $name, 'box' => array_values( $box ), 'iw' => (int) ( $s['iw'] ?? 0 ), 'ih' => (int) ( $s['ih'] ?? 0 ),
+			'source' => 'auto', 'confidence' => $pct );
 	}
 	if ( ! $labels ) { return $out; }
-
-	if ( function_exists( 'gasf_crm_face_person_terms_ensure' ) ) {
-		gasf_crm_face_person_terms_ensure( wp_list_pluck( $labels, 'name' ) );
-	}
 
 	$out['names'] = gasf_crm_face_tag_people( $id, wp_list_pluck( $labels, 'name' ) );
 
 	if ( function_exists( 'gasf_crm_face_labels_store' ) ) {
 		$out['labels'] = (int) gasf_crm_face_labels_store( $id, $labels );
 	}
+
+	// What the matcher wrote, kept apart so it can be found - and one day
+	// undone in bulk - without guessing which names nobody chose.
+	$auto = get_post_meta( $id, '_gasf_face_auto', true );
+	$auto = is_array( $auto ) ? $auto : array();
+	foreach ( $labels as $l ) {
+		$auto[] = array( 'name' => $l['name'], 'box' => $l['box'], 'confidence' => (int) $l['confidence'], 'at' => current_time( 'mysql', true ) );
+	}
+	update_post_meta( $id, '_gasf_face_auto', array_slice( $auto, -50 ) );
 	return $out;
 }
 
@@ -1436,6 +1502,8 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 			'box'  => array_values( $box ),
 			'iw'   => max( 0, (int) ( $l['iw'] ?? 0 ) ),
 			'ih'   => max( 0, (int) ( $l['ih'] ?? 0 ) ),
+			// 'auto' when the matcher wrote it; '' when a person did.
+			'source' => sanitize_key( (string) ( $l['source'] ?? '' ) ),
 		);
 	}
 	if ( ! $next && ! $replace ) { return 0; }
@@ -1452,7 +1520,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 			$b = array_map( 'intval', (array) ( $h['box'] ?? array() ) );
 			$n = trim( sanitize_text_field( (string) ( $h['name'] ?? '' ) ) );
 			if ( 4 !== count( $b ) || '' === $n ) { continue; }
-			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ), 'iw' => max( 0, (int) ( $h['iw'] ?? 0 ) ), 'ih' => max( 0, (int) ( $h['ih'] ?? 0 ) ) );
+			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ), 'iw' => max( 0, (int) ( $h['iw'] ?? 0 ) ), 'ih' => max( 0, (int) ( $h['ih'] ?? 0 ) ), 'source' => sanitize_key( (string) ( $h['source'] ?? '' ) ) );
 		}
 	}
 	$same_name = static function ( $a, $b ) {
@@ -1485,11 +1553,20 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 				}
 				$all[ $k ] = $v;
 				$changed++;
-			} elseif ( $v['iw'] > 0 && empty( $all[ $k ]['iw'] ) ) {
+			} else {
+				$upd = false;
 				// The same label, now saying which picture it was measured on.
-				$all[ $k ]['iw'] = $v['iw'];
-				$all[ $k ]['ih'] = $v['ih'];
-				$changed++;
+				if ( $v['iw'] > 0 && empty( $all[ $k ]['iw'] ) ) {
+					$all[ $k ]['iw'] = $v['iw'];
+					$all[ $k ]['ih'] = $v['ih'];
+					$upd = true;
+				}
+				// A person confirming what the matcher wrote makes it theirs.
+				if ( $human_verified && '' === $v['source'] && 'auto' === (string) ( $all[ $k ]['source'] ?? '' ) ) {
+					$all[ $k ]['source'] = '';
+					$upd = true;
+				}
+				if ( $upd ) { $changed++; }
 			}
 		}
 	}
@@ -1717,7 +1794,7 @@ function gasf_crm_face_labels_for( $attachment_id ) {
 		$box = array_map( 'intval', (array) ( $r['box'] ?? array() ) );
 		$name = trim( sanitize_text_field( (string) ( $r['name'] ?? '' ) ) );
 		if ( 4 !== count( $box ) || '' === $name ) { continue; }
-		$out[] = array( 'name' => $name, 'box' => array_values( $box ), 'iw' => max( 0, (int) ( $r['iw'] ?? 0 ) ), 'ih' => max( 0, (int) ( $r['ih'] ?? 0 ) ) );
+		$out[] = array( 'name' => $name, 'box' => array_values( $box ), 'iw' => max( 0, (int) ( $r['iw'] ?? 0 ) ), 'ih' => max( 0, (int) ( $r['ih'] ?? 0 ) ), 'source' => sanitize_key( (string) ( $r['source'] ?? '' ) ) );
 	}
 	return $out;
 }
@@ -2628,7 +2705,13 @@ add_action( 'rest_api_init', function () {
 						break;
 					}
 				}
-				if ( ! $already && ! $pending ) {
+				// A name already ON the photo with a face label for it can be rejected
+				// too: that is how an auto-accepted wrong name is undone.
+				$labelled = false;
+				foreach ( gasf_crm_face_labels_for( $id ) as $l ) {
+					if ( gasf_crm_face_name_same( $name, (string) $l['name'] ) ) { $labelled = true; break; }
+				}
+				if ( ! $already && ! $pending && ! $labelled ) {
 					return new WP_Error( 'gasf_crm_conflict', 'That face suggestion is no longer pending.', array( 'status' => 409 ) );
 				}
 				$changed = gasf_crm_face_reject( $id, $name );

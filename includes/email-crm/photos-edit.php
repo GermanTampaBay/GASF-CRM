@@ -113,6 +113,11 @@ add_action( 'delete_attachment', function ( $id ) {
 	if ( '' === $path ) { return; }
 	$now = gasf_crm_photo_edit_original_path( $id, $path );
 	if ( is_file( $now ) ) { @unlink( $now ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	$cam = (string) get_post_meta( $id, '_gasf_photo_camera_original', true );
+	if ( '' !== $cam ) {
+		$c = gasf_crm_photo_private_root() . '/originals/' . basename( $cam );
+		if ( is_file( $c ) ) { @unlink( $c ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
 	if ( get_post_meta( $id, '_gasf_photo_edit', true ) ) {
 		$old = gasf_crm_photo_edit_sidecar( $path );
 		if ( is_file( $old ) ) { @unlink( $old ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
@@ -277,6 +282,44 @@ function gasf_crm_photo_edit_render( $id, array $p ) {
  * forever as orphans that still show the uncropped picture to anything
  * holding their URL.
  */
+/** Where an edited photo's camera original lives: the private store, beside its untouched copy. */
+function gasf_crm_photo_edit_camera_path( $id, $name ) {
+	$ext = strtolower( (string) pathinfo( $name, PATHINFO_EXTENSION ) );
+	return gasf_crm_photo_private_root() . '/originals/' . (int) $id . '-camera' . ( '' !== $ext ? '.' . $ext : '' );
+}
+
+/**
+ * The camera original WordPress keeps beside a "-scaled" file, moved out of
+ * public uploads on the first edit.
+ *
+ * Regenerating the metadata from the scaled file drops its pointer, so until
+ * 2.93.0 the full-frame, UNCROPPED original stayed public at a guessable
+ * name - crop a child out, and the whole frame was one filename away - and
+ * was orphaned: never deleted with its photo, never withdrawn with it. It now
+ * goes into the private originals store and is remembered, so it goes when
+ * the photo goes. If it cannot be moved, its pointer is carried over, so it
+ * is at least still the photo's.
+ *
+ * @return string The original_image name to keep in the metadata; '' once moved.
+ */
+function gasf_crm_photo_edit_camera_original_keep( $id, $meta, $dir ) {
+	$name = (string) ( is_array( $meta ) ? ( $meta['original_image'] ?? '' ) : '' );
+	if ( '' === $name ) { return ''; }
+	$src = trailingslashit( $dir ) . $name;
+	if ( ! is_file( $src ) ) { return ''; }
+	if ( ! gasf_crm_photo_edit_original_ready() ) { return $name; }
+	$dst = gasf_crm_photo_edit_camera_path( $id, $name );
+	$mv  = gasf_crm_photo_move_file( $src, $dst );
+	if ( is_wp_error( $mv ) ) {
+		gasf_crm_log( 'CRM photos: media #' . (int) $id . ' - could not move its camera original into the private store: ' . $mv->get_error_message() );
+		return $name;
+	}
+	@chmod( $dst, 0600 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	update_post_meta( $id, '_gasf_photo_camera_original', basename( $dst ) );
+	gasf_crm_log( 'CRM photos: media #' . (int) $id . ' - camera original moved out of ' . basename( $dir ) . ' into the private store' );
+	return '';
+}
+
 function gasf_crm_photo_edit_resizes( $id, $path ) {
 	$meta = wp_get_attachment_metadata( $id );
 	$dir  = trailingslashit( dirname( $path ) );
@@ -299,9 +342,13 @@ function gasf_crm_photo_edit_resizes( $id, $path ) {
 	if ( function_exists( 'set_time_limit' ) ) { @set_time_limit( 300 ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
 
+	$camera = gasf_crm_photo_edit_camera_original_keep( $id, $meta, $dir );
+
 	// Four sizes since 2.73.1; sixteen took ~2s on this host for a typical photo — measured, not guessed.
 	// Through the helper, so editing a private photo keeps its marker.
-	wp_update_attachment_metadata( $id, gasf_crm_photo_generate_metadata( $id, $path ) );
+	$new = gasf_crm_photo_generate_metadata( $id, $path );
+	if ( '' !== $camera && is_array( $new ) ) { $new['original_image'] = $camera; }
+	wp_update_attachment_metadata( $id, $new );
 }
 
 add_action( 'rest_api_init', function () {

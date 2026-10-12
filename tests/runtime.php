@@ -587,6 +587,98 @@ final class GASF_CRM_Selftest {
 			'rescan: "Rescan everything" clears the digest as well as the stamp' );
 	}
 
+	/** The first edit moves the camera original out of public uploads, and it goes with the photo. */
+	public function test_edit_moves_camera_original() {
+		$id   = $this->library_photo( 'st-camorig' );
+		$path = get_attached_file( $id );
+		$cam  = dirname( $path ) . '/st-camorig-cam-' . wp_rand() . '.jpg';
+		file_put_contents( $cam, $this->jpeg_bytes( 240, 180 ) );
+		$rel  = (string) get_post_meta( $id, '_wp_attached_file', true );
+		update_post_meta( $id, '_wp_attachment_metadata', array( 'width' => 120, 'height' => 90, 'file' => $rel, 'original_image' => basename( $cam ), 'sizes' => array() ) );
+		try {
+			gasf_crm_photo_edit_resizes( $id, $path );
+			$priv = gasf_crm_photo_edit_camera_path( $id, basename( $cam ) );
+			$meta = wp_get_attachment_metadata( $id );
+			$this->ok( ! is_file( $cam ), 'camera original: no longer in public uploads after the first edit' );
+			$this->ok( is_file( $priv ), 'camera original: now in the private originals store' );
+			$this->ok( empty( $meta['original_image'] ), 'camera original: the metadata no longer points into public uploads' );
+			$this->ok( basename( $priv ) === (string) get_post_meta( $id, '_gasf_photo_camera_original', true ), 'camera original: and the photo remembers where it went' );
+			wp_delete_attachment( $id, true );
+			$this->ok( ! is_file( $priv ), 'camera original: deleted with its photo' );
+		} finally {
+			@unlink( $cam ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		}
+	}
+
+	/** The door survives a refused photo, a spent token, and a wifi blip. */
+	public function test_door_batch_survives_refusal() {
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false !== strpos( $door, '\'pass\' => (string) $pass ) );' ) && false !== strpos( $door, 'use ( &$pass )' ),
+			'door: a refusal still carries the Turnstile pass, so the rest of the batch is not refused' );
+		$this->ok( false !== strpos( $door, 'turnstile.reset(gasfTsWidget)' ) && false !== strpos( $door, 'return attempt(true);' ),
+			'door: a 403 fetches a fresh token and retries the photo once' );
+		$this->ok( false !== strpos( $door, "return p.state === 'new' || p.state === 'err'; });\n\t\tqueue.forEach(function(p){ p.state = 'new'; });" ),
+			'door: failed photos go again on the next Submit' );
+		$this->ok( false !== strpos( $door, 'new AbortController()' ) && false !== strpos( $door, '180000' ),
+			'door: a stalled upload is abandoned after three minutes' );
+		$this->ok( gasf_crm_door_pass_ok( gasf_crm_door_pass() ), 'door pass: a pass issued now is accepted' );
+		$this->ok( ! gasf_crm_door_pass_ok( '1000000000.' . hash_hmac( 'sha256', gasf_crm_client_ip() . '|1000000000', wp_salt( 'auth' ) ) ),
+			'door pass: an expired pass is not, even correctly signed' );
+	}
+
+	/** The matcher names only people the club knows, marks what it wrote, and can be told it was wrong. */
+	public function test_auto_accept_is_bounded() {
+		$this->snapshot_option( 'gasf_crm_faces_auto_accept_threshold' );
+		update_option( 'gasf_crm_faces_auto_accept_threshold', 95, false );
+
+		$p = $this->library_photo( 'st-auto-bound' );
+		$nobody = 'Selftest Nobody ' . wp_rand( 1000, 9999 );
+		gasf_crm_faces_store( $p, array( array( 'box' => array( 8, 8, 32, 32 ), 'name' => $nobody, 'confidence' => 0.99 ) ), 1 );
+		$this->ok( ! get_term_by( 'name', $nobody, 'gasf_photo_person' ), 'auto-accept: a name nobody has created is not created by the key' );
+		$this->ok( ! gasf_crm_photo_term_names( $p, 'gasf_photo_person' ), 'auto-accept: and is not put on the photo' );
+		$t = get_term_by( 'name', $nobody, 'gasf_photo_person' );
+		if ( $t ) { wp_delete_term( (int) $t->term_id, 'gasf_photo_person' ); }
+
+		$this->person_term( 'Selftest Known' );
+		gasf_crm_faces_store( $p, array( array( 'box' => array( 8, 8, 32, 32 ), 'name' => 'Selftest Known', 'confidence' => 0.99 ) ), 1 );
+		$this->ok( in_array( 'Selftest Known', (array) gasf_crm_photo_term_names( $p, 'gasf_photo_person' ), true ), 'auto-accept: a known person is tagged' );
+		$labels = gasf_crm_face_labels_for( $p );
+		$this->ok( 1 === count( $labels ) && 'auto' === $labels[0]['source'], 'auto-accept: the label it wrote is marked as the machine\'s' );
+		$this->ok( 1 === count( (array) get_post_meta( $p, '_gasf_face_auto', true ) ), 'auto-accept: and recorded apart, so it can be found later' );
+
+		$r = gasf_crm_face_reject( $p, 'Selftest Known' );
+		$this->ok( ! is_wp_error( $r ) && gasf_crm_face_is_rejected( $p, 'Selftest Known' ), 'auto-accept undo: a tagged name can be rejected' );
+		$this->ok( ! gasf_crm_face_labels_for( $p ), 'auto-accept undo: its training label is gone' );
+		$this->ok( ! in_array( 'Selftest Known', (array) gasf_crm_photo_term_names( $p, 'gasf_photo_person' ), true ), 'auto-accept undo: and the person is off the photo' );
+
+		// Taking a labelled name off in the editor is the same verdict.
+		$q = $this->library_photo( 'st-auto-untag' );
+		$this->person_term( 'Selftest Gone' );
+		wp_set_object_terms( $q, array( 'Selftest Gone' ), 'gasf_photo_person', false );
+		update_post_meta( $q, '_gasf_face_labels', array( array( 'name' => 'Selftest Gone', 'box' => array( 8, 8, 32, 32 ), 'source' => 'auto' ) ) );
+		wp_set_object_terms( $q, array(), 'gasf_photo_person', false );
+		$this->ok( 1 === gasf_crm_face_people_removed( $q, array( 'Selftest Gone' ) ) && gasf_crm_face_is_rejected( $q, 'Selftest Gone' ),
+			'auto-accept undo: a name removed by hand records a rejection' );
+
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-faces.php' );
+		$this->ok( false !== strpos( $src, 'if ( ! $already && ! $pending && ! $labelled ) {' ), 'auto-accept undo: the reject route accepts a tagged, labelled name' );
+	}
+
+	/** The archive's permission block follows consent, names, and titles, not only the revision. */
+	public function test_backup_sidecar_refreshes() {
+		$id   = $this->library_photo( 'st-fp' );
+		$file = get_attached_file( $id );
+		clearstatcache( true, $file );
+		update_post_meta( $id, '_gasf_photo_backup', array(
+			'at' => gmdate( 'c' ), 'rev' => (int) get_post_meta( $id, '_gasf_photo_rev', true ), 'md5' => md5_file( $file ),
+			'size' => (int) filesize( $file ), 'mtime' => (int) filemtime( $file ), 'name' => gasf_crm_backup_name( $id, $file ),
+			'fp' => gasf_crm_backup_fingerprint( $id ), 'items' => array( 'img' => 'x', 'json' => 'y' ),
+		) );
+		$this->ok( '' === gasf_crm_backup_needed( $id ), 'sidecar: a photo whose record is current is left alone' );
+		update_post_meta( $id, '_gasf_photo_consent', array( 'granted' => false, 'scope' => 'refused', 'at' => current_time( 'mysql', true ) ) );
+		$this->ok( 'permission, names, or title changed' === gasf_crm_backup_needed( $id ), 'sidecar: a consent decision with no revision bump still re-mirrors it' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
@@ -2185,6 +2277,8 @@ final class GASF_CRM_Selftest {
 		if ( $t ) { wp_delete_term( (int) $t->term_id, 'gasf_photo_person' ); }
 
 		// High-confidence suggestions can be auto-accepted when enabled.
+		// The person must already exist: auto-accept no longer creates names.
+		$this->person_term( 'Selftest Auto' );
 		$auto = $this->library_photo( 'st-faces-auto' );
 		gasf_crm_faces_store( $auto, array(
 			array( 'box' => array( 8, 8, 32, 32 ), 'name' => 'Selftest Auto', 'confidence' => 0.99 ),

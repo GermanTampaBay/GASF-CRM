@@ -366,12 +366,34 @@ function gasf_crm_backup_path_owner( $folder, $name, $id, $index = null ) {
 	return 0;
 }
 
+/**
+ * Everything the sidecar says about a photo that can change WITHOUT a
+ * revision bump: its permission record, who is in it, who may be named,
+ * its title, place, and event. A consent decision, a rename or merge, or a
+ * public-name opt-out used to leave the archive's permission block stale
+ * indefinitely, because only decisions through the editor bump the revision.
+ */
+function gasf_crm_backup_fingerprint( $id ) {
+	$id     = (int) $id;
+	$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+	$named  = function_exists( 'gasf_photo_public_people_names' ) ? array_values( (array) gasf_photo_public_people_names( $id ) ) : $people;
+	return md5( wp_json_encode( array(
+		'consent' => get_post_meta( $id, '_gasf_photo_consent', true ),
+		'people'  => $people,
+		'named'   => $named,
+		'title'   => (string) get_post_field( 'post_title', $id ),
+		'place'   => gasf_crm_photo_term_names( $id, 'gasf_photo_place' ),
+		'event'   => gasf_crm_photo_term_names( $id, 'gasf_photo_event' ),
+	) ) );
+}
+
 function gasf_crm_backup_needed( $id ) {
 	$state = (array) get_post_meta( $id, '_gasf_photo_backup', true );
 	if ( empty( $state['at'] ) ) { return 'never backed up'; }
 
 	$rev = (int) get_post_meta( $id, '_gasf_photo_rev', true );
 	if ( (int) ( $state['rev'] ?? -1 ) !== $rev ) { return 'tags or pixels changed (revision)'; }
+	if ( isset( $state['fp'] ) && (string) $state['fp'] !== gasf_crm_backup_fingerprint( $id ) ) { return 'permission, names, or title changed'; }
 
 	$file = get_attached_file( $id );
 	if ( $file && is_file( $file ) ) {
@@ -490,6 +512,7 @@ function gasf_crm_backup_one( $id ) {
 		'md5'    => md5_file( $file ),
 		'size'   => (int) filesize( $file ),
 		'mtime'  => (int) filemtime( $file ),
+		'fp'     => gasf_crm_backup_fingerprint( $id ),
 		'name'   => $name,
 		'folder' => $folder,
 		'items'  => array_filter( array(
