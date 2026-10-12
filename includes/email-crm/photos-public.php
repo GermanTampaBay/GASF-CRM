@@ -1495,7 +1495,6 @@ function gasf_crm_door_script( $party ) {
 			'<g class="w-arm-r"><path d="M92 70 L110 56 L114 46" stroke="#f3e3c8" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
 			'<rect x="26" y="8" width="68" height="126" rx="34" fill="#b8642c" stroke="#7a3d17" stroke-width="3"/>' +
 			'<path d="M38 96 L82 84 M38 112 L82 100 M40 80 L80 68" stroke="#7a3d17" stroke-width="3" stroke-linecap="round" opacity=".55"/>' +
-			'<path d="M44 20 Q52 28 46 36 Q40 44 50 52 Q60 60 52 68" stroke="#f2c230" stroke-width="5" fill="none" stroke-linecap="round"/>' +
 			'<circle cx="48" cy="42" r="7" fill="#fff"/><circle cx="72" cy="42" r="7" fill="#fff"/>' +
 			'<circle cx="50" cy="43" r="3.5" fill="#1d1d1d"/><circle cx="74" cy="43" r="3.5" fill="#1d1d1d"/>' +
 			'<path d="M48 58 Q60 70 72 58" stroke="#3a2416" stroke-width="3.5" fill="none" stroke-linecap="round"/>' +

@@ -3630,6 +3630,7 @@ final class GASF_CRM_Selftest {
 			'door: the bratwurst dances from Submit until the batch finishes, then goes before the result is shown' );
 		$this->ok( false !== strpos( $door, '@media (prefers-reduced-motion:reduce){.gasf-wurst *{animation:none!important}}' ),
 			'door: and stands still for anyone who has asked for less motion' );
+		$this->ok( false === strpos( $door, '#f2c230' ), 'door: the bratwurst has no mustard' );
 		$this->ok( false === strpos( $door, 'id="pdone"' ) && false !== strpos( $door, 'resultPop(text, ok && !bad);' )
 				&& false !== strpos( $door, 'setTimeout(close, 5000)' ),
 			'door: the result is a pop-up with OK, closing itself after 5 s only when everything was sent' );
