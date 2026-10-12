@@ -112,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 679 assertions in 85 tests, run on the server against live
+- **`tests/runtime.php`** — 678 assertions in 85 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -154,8 +154,16 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 **Email CRM** — Microsoft Graph app-only against a shared mailbox, volunteers
 sign in at `/email` with Google or Microsoft, Claude-drafted replies.
 
-**Photo catalogue** — email intake → volunteer review → EXIF/GPS scrub →
-publish → library with people/place/event tagging, bulk tag, crop editor.
+**Photo catalogue** — photo door or volunteer upload → volunteer review →
+EXIF/GPS scrub → publish → library with people/place/event tagging, bulk tag,
+crop editor.
+
+**Emailed photos are not taken in** (since 2.90.0). An email with a photo
+attached is an ordinary email; the automatic intake, the tagging link it
+mailed the sender, and the reminders were removed in favour of the door. Their
+four tables (`photo_submissions`, `photo_items`, `photo_invites`,
+`photo_invite_items`) are left in place, unused, and
+`test_email_photos_are_ordinary_email` pins every way back in.
 
 **Public photo doors** (`photos-public.php`) — one URL, two postures:
 - *Year-round* — always open, full tagging, **held for volunteer approval**.
@@ -402,7 +410,7 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.89.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.90.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
