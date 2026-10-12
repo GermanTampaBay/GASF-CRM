@@ -47,8 +47,14 @@ $log = Join-Path $here "scan.log"
 # `*>>` file redirect: under Windows PowerShell 5.1 that redirect writes UTF-16
 # and mangles the log. $LASTEXITCODE still reflects the native command.
 $extra = $ScanArgs.Split(" ", [StringSplitOptions]::RemoveEmptyEntries)
+# Continue, not Stop, around the native call: Windows PowerShell 5.1 turns a
+# redirected stderr line (an onnxruntime warning, a Python deprecation notice)
+# into an error record, and with Stop the first such line ended this script
+# before the scan had finished, with no exit line in the log.
+$ErrorActionPreference = "Continue"
 & $py @pyArgs @extra 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
 $code = $LASTEXITCODE
+$ErrorActionPreference = "Stop"
 
 "[$stamp] exit $code" | Out-File -FilePath $log -Append -Encoding utf8
 exit $code

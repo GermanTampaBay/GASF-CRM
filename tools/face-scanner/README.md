@@ -348,6 +348,18 @@ for a later, broader run but cannot influence the current contact sheets.
 
 ---
 
+## The labelling board, by keyboard
+
+Click a face on the photo to jump to its name box, or Tab from box to box.
+Tab in an empty box takes the suggested name. Enter saves the photo and
+opens the next; Ctrl+Enter marks it done. The percentages beside suggested
+names are calibrated from the outcomes volunteers have recorded (1.8.0): a
+number means "matches this strong have been right this often", so the
+server's auto-accept threshold means what it says.
+
+Only one scan runs at a time per `faces.db`; a second one says so and
+stops. A lock file older than six hours is treated as abandoned.
+
 ## Running it on a schedule
 
 Two small PowerShell helpers register a Windows Scheduled Task so this runs by

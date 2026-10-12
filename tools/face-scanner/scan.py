@@ -71,6 +71,7 @@ It is shown once. If you lose it, issue a new one.
 """
 
 import argparse
+import atexit
 import base64
 from collections import OrderedDict
 import hashlib
@@ -115,7 +116,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.7.1"
+SCANNER_VERSION = "1.8.0"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -609,13 +610,15 @@ class InsightFaceBackend(Backend):
             or "onnxruntimeerror" in msg and "cuda" in msg
         )
 
-    def __init__(self):
+    def __init__(self, cpu_only=False):
         from insightface.app import FaceAnalysis  # heavy; imported on demand
         import onnxruntime as ort
 
         import contextlib
 
         providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in ort.get_available_providers()]
+        if cpu_only:
+            providers = ["CPUExecutionProvider"]
         use_cuda = "CUDAExecutionProvider" in providers
         self.device = "GPU" if use_cuda else "CPU"
         chatter = io.StringIO()
@@ -717,6 +720,13 @@ def build_backend(pref="auto"):
         ensure_windows_cuda_dll_dirs()
         try:
             return InsightFaceBackend()
+        except Exception:
+            pass
+        # A broken CUDA stack used to mean no scanning at all. The CPU gives
+        # the same answers, slower; say so and carry on.
+        sys.stderr.write("CUDA could not be used; running on the CPU instead (slower, same results).\n")
+        try:
+            return InsightFaceBackend(cpu_only=True)
         except Exception:
             raise first
 
@@ -984,9 +994,59 @@ def local_caption(image_bytes, cfg, metadata=None):
 
 
 def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    # A 30 s busy timeout and WAL: the Scheduled Task and the launcher both
+    # open this file, and the loser of a write race used to die with
+    # "database is locked" after five seconds. WAL also lets the labelling
+    # board's reader threads coexist with the main thread's writes.
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
+    except sqlite3.DatabaseError:
+        pass
     _migrate(conn)
     return conn
+
+
+def acquire_run_lock():
+    """One scanner per faces.db at a time, said plainly.
+
+    The Scheduled Task fires every half hour and the launcher runs whenever a
+    volunteer presses a button; two scans on one database used to end in a
+    traceback for whichever lost. A lock file beside the database says so
+    instead. One older than six hours belongs to a run that died without
+    cleaning up and is taken over."""
+    path = os.fspath(DB_PATH) + ".lock"
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(path)
+            except OSError:
+                age = 0
+            if age > 6 * 3600:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+                continue
+            sys.exit(
+                f"Another scan is already running on this PC (lock file: {path}).\n"
+                "  Wait for it to finish. If you are sure it is gone, delete that file and try again."
+            )
+        with os.fdopen(fd, "w") as fh:
+            fh.write(f"{os.getpid()} {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+        def release():
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+        atexit.register(release)
+        return path
+    sys.exit(f"Could not take the scan lock ({path}).")
 
 
 def _migrate(conn):
@@ -1521,6 +1581,11 @@ def backfill_reference_quality(api, conn, backend, limit=QUALITY_BACKFILL_PHOTOS
                 (int(m["face_width"]), int(m["face_height"]), float(m["sharpness"]),
                  float(m["clipping"]), float(m["quality"]), ref_id),
             )
+            # The face is in hand: a reference learned before thumbnails existed
+            # gets its picture now, not at the next full relearn.
+            thumb = reference_thumb(pixels, best)
+            if thumb is not None:
+                conn.execute("UPDATE refs SET thumb = ? WHERE id = ? AND thumb IS NULL", (sqlite3.Binary(thumb), ref_id))
             measured += 1
             touched.add(person)
         conn.commit()
@@ -2058,12 +2123,91 @@ def delete_unknown_observations(conn, observation_ids):
 # --------------------------------------------------------------------------- identify
 
 
+# Raw percent -> calibrated percent, built from the outcomes volunteers have
+# recorded. None until loaded, or when there are too few outcomes to trust.
+_CALIBRATION_MAP = None
+
+
+def calibration_map(samples, minimum=CALIBRATION_MIN_SAMPLES, z=CALIBRATION_WILSON_Z):
+    """
+    What a raw score has actually meant: for each raw percent p, the precision
+    of every decided match that scored p or better, as a conservative Wilson
+    floor, made non-decreasing in p (a higher score cannot honestly read as
+    less sure than a lower one). Only where at least `minimum` outcomes exist.
+
+    The raw number was a rendering of distance: 95% meant a cosine distance
+    under 0.05, which distinct photos of one person never reach, so the
+    server's 95% auto-accept had never once fired and a 60% chip - right 196
+    times out of 196 in this club's archive - read as doubtful. Returns None
+    when nothing can be said.
+    """
+    clean = []
+    for sample in samples or []:
+        if not isinstance(sample, dict):
+            continue
+        outcome = str(sample.get("outcome") or "").lower()
+        if outcome not in ("positive", "negative"):
+            continue
+        try:
+            pct = max(0, min(100, int(sample.get("confidence"))))
+        except (TypeError, ValueError):
+            continue
+        clean.append((pct, outcome == "positive"))
+    out = {}
+    best = None
+    for p in range(50, 101):
+        members = [positive for pct, positive in clean if pct >= p]
+        if len(members) >= max(1, int(minimum)):
+            floor = wilson_lower_bound(sum(1 for m in members if m), len(members), z)
+            value = int(round(floor * 100))
+            best = value if best is None else max(best, value)
+        if best is not None:
+            out[p] = best
+    return out or None
+
+
+def set_calibration(mapping):
+    global _CALIBRATION_MAP
+    _CALIBRATION_MAP = mapping or None
+
+
+def calibrate_pct(raw_pct):
+    """The calibrated percent for a raw one; the raw one where no map applies."""
+    p = max(0, min(100, int(raw_pct)))
+    if not _CALIBRATION_MAP or p < 50:
+        return p
+    return int(_CALIBRATION_MAP.get(p, p))
+
+
+def load_calibration(api, verbose=True):
+    """The map from the server's decided outcomes; None if it cannot be had."""
+    try:
+        data = api.get("/calibration", limit=5000)
+    except Exception as e:  # a missing route, a hiccup: raw numbers are the old behaviour
+        if verbose:
+            print(f"Confidence calibration not loaded ({e}); showing raw scores.", flush=True)
+        return None
+    samples = data.get("samples", []) if isinstance(data, dict) else []
+    mapping = calibration_map(samples)
+    if verbose:
+        decided = sum(1 for s in samples if isinstance(s, dict) and str(s.get("outcome") or "").lower() in ("positive", "negative"))
+        if mapping:
+            lo = min(mapping)
+            print(f"Confidence calibrated from {decided} decided outcome(s): a raw {lo}% now reads as {mapping[lo]}%, a raw 60% as {mapping.get(60, 60)}%.", flush=True)
+        else:
+            print(f"Confidence: only {decided} decided outcome(s), fewer than {CALIBRATION_MIN_SAMPLES}; showing raw scores.", flush=True)
+    return mapping
+
+
 def confidence(distance, tolerance):
-    """A readable rendering of distance, not a probability. The volunteer sees a
-    percentage and it should move the way intuition expects: ~1 at a perfect
-    match, ~0.5 right at the tolerance, and nothing past it is offered at all.
+    """The percentage a volunteer sees and the server compares to its threshold.
+
+    The raw rendering of distance - 1 at a perfect match, 0.5 at the tolerance,
+    nothing offered past it - passed through the calibration map when one is
+    loaded, so the number means "matches this strong are right this often".
     Returned as a 0..1 float; the server rounds it to a whole percent on store."""
-    return round(max(0.0, 1.0 - (distance / tolerance)) * 0.5 + 0.5, 3)
+    raw = max(0.0, 1.0 - (distance / tolerance)) * 0.5 + 0.5
+    return round(calibrate_pct(int(round(raw * 100))) / 100.0, 3)
 
 
 def identify(vector, references, backend, tolerance):
@@ -3531,7 +3675,7 @@ display:flex;gap:12px;align-items:center;justify-content:space-between}
 #photo{display:block;max-width:100%;max-height:calc(100vh - 130px);width:auto;height:auto;position:relative;z-index:1}
 #ov{position:absolute;inset:0;pointer-events:none;z-index:2}
 .fb{position:absolute;box-sizing:border-box;border:var(--face-border-width) solid var(--face-border-color);
-background:var(--face-fill-color);border-radius:5px}
+background:var(--face-fill-color);border-radius:5px;pointer-events:auto;cursor:pointer}
 .fb span{position:absolute;left:0;top:0;padding:1px 4px;background:#1d4ed8;border:1px solid #93c5fd;
 border-radius:0 0 5px 0;font-weight:800;font-size:12px;line-height:1.15;min-width:1.2em;text-align:center}
 .fb-ext span{border-radius:999px;padding:1px 6px;font-size:12px;line-height:1.2;min-width:1.2em}
@@ -3822,7 +3966,10 @@ function drawBoxes(p){
     const d=document.createElement('div');
     d.className = tiny ? `fb fb-ext fb-ext-${side}-${vert}` : 'fb';
     d.style.cssText=`left:${left}%;top:${top}%;width:${ww}%;height:${hh}%`;
-    d.innerHTML=`<span>${i+1}</span>`; ov.appendChild(d);
+    d.innerHTML=`<span>${i+1}</span>`;
+    // Click a face, type who it is - as the README always said.
+    d.onclick=()=>{ const inp=document.querySelector(`#rows input[data-i="${i}"]`); if(inp){ inp.focus(); inp.select(); } };
+    ov.appendChild(d);
   });
 }
 function drawCurrent(){
@@ -3865,11 +4012,11 @@ function render(p){
     const val=(p.prefill && p.prefill[String(i)]) || '';
     const row=document.createElement('div'); row.className='row';
     const listId = localNames.length ? "peopleListLocal" : "peopleListGlobal";
-    row.innerHTML=`<label class="facelab"><input type="checkbox" class="boxtoggle" data-box="${i}"`
+    row.innerHTML=`<label class="facelab"><input type="checkbox" class="boxtoggle" data-box="${i}" tabindex="-1"`
       + `${hiddenBoxes.has(i)?'':' checked'} title="Show this face's rectangle on the photo. Unticking only hides it - the name is still saved.">`
       + ` Face ${i+1}</label>`
-      + `<input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}" class="usehint"><img class="hintface" alt="" src="/api/face-thumb?person=${encodeURIComponent(hint.name)}&token=${encodeURIComponent(sessionToken)}" onerror="this.remove()"><span>Use ${esc(hint.name)} (${hint.confidence}%)</span></button>`:'<span></span>'}`
-      + `<button class="notaperson" data-ignore="${i}" title="This is not a person to tag - a poster, a reflection, or somebody in the background. It will not be offered again.">Not a person</button>`;
+      + `<input list="${listId}" data-i="${i}" value="${esc(val)}" placeholder="Name">${hint.name?`<button data-fill="${i}" class="usehint" tabindex="-1"><img class="hintface" alt="" src="/api/face-thumb?person=${encodeURIComponent(hint.name)}&token=${encodeURIComponent(sessionToken)}" onerror="this.remove()"><span>Use ${esc(hint.name)} (${hint.confidence}%)</span></button>`:'<span></span>'}`
+      + `<button class="notaperson" data-ignore="${i}" tabindex="-1" title="This is not a person to tag - a poster, a reflection, or somebody in the background. It will not be offered again.">Not a person</button>`;
     rows.appendChild(row);
     if(val){ addName(val); }
   });
@@ -4257,6 +4404,23 @@ async function beginFinish(){
   }
 }
 document.getElementById('save').onclick=saveAndNext;
+/* The keyboard does the whole photo: Tab moves name to name (the tick, the
+   hint, and "Not a person" are off the tab order), Tab in an empty box takes
+   the hint, Enter is Save & Next, Ctrl+Enter is Done. */
+document.getElementById('rows').addEventListener('keydown', e=>{
+  const inp=e.target && e.target.closest ? e.target.closest('input[data-i]') : null;
+  if(!inp){ return; }
+  if(e.key==='Enter'){
+    e.preventDefault();
+    if(e.ctrlKey||e.metaKey){ donePhoto(); } else { saveAndNext(); }
+    return;
+  }
+  if(e.key==='Tab' && !e.shiftKey && !inp.value.trim() && current){
+    const i=inp.getAttribute('data-i');
+    const hint=(current.hints||[]).find(h=>String(h.index)===String(i));
+    if(hint && hint.name){ inp.value=hint.name; dirty=true; editSeq++; }
+  }
+});
 document.getElementById('boxesall').onclick=()=>{
   const total=(current&&current.boxes)?current.boxes.length:0;
   setAllBoxes(!(total>0 && hiddenBoxes.size>=total));
@@ -5526,6 +5690,22 @@ def selftest():
         print(f"  [{'ok' if cond else 'XX'}] {label}")
         if not cond:
             failures.append(label)
+
+    # Confidence calibration: raw scores read as their measured precision.
+    _cal = ([{"confidence": 60, "outcome": "positive"}] * 200
+            + [{"confidence": 55, "outcome": "positive"}] * 36 + [{"confidence": 55, "outcome": "negative"}] * 4
+            + [{"confidence": 50, "outcome": "negative"}] * 10)
+    _m = calibration_map(_cal)
+    check_that(_m is not None and _m[60] >= 95 and all(_m[p] <= _m[p + 1] for p in range(50, 100) if p in _m and p + 1 in _m),
+               "calibration: strong matches read as their measured precision, never decreasing with score")
+    check_that(_m[50] < _m[60], "calibration: a band with misses reads lower than one without")
+    check_that(calibration_map(_cal[:10]) is None, "calibration: too few outcomes means no map")
+    set_calibration(None)
+    check_that(abs(confidence(0.0, 0.5) - 1.0) < 1e-9 and abs(confidence(0.5, 0.5) - 0.5) < 1e-9,
+               "calibration: without a map the percentage is the raw rendering")
+    set_calibration(_m)
+    check_that(confidence(0.2, 0.5) >= 0.95, "calibration: with the map a raw 80% reads as at least the precision measured at 60%")
+    set_calibration(None)
 
     class StubBackend(Backend):
         """Euclidean, like dlib, so distances are easy to reason about by hand."""
@@ -7421,7 +7601,9 @@ def main():
         )
     tolerance = cfg_tolerance(cfg, engine)
     api = Api(url, key)
+    acquire_run_lock()
     conn = db()
+    set_calibration(load_calibration(api, verbose))
     uploaded_after = parse_ymd(args.uploaded_after, "--uploaded-after")
     uploaded_before = parse_ymd(args.uploaded_before, "--uploaded-before")
     if uploaded_after and uploaded_before and uploaded_after > uploaded_before:
