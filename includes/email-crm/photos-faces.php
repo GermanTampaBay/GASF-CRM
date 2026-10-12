@@ -333,6 +333,14 @@ function gasf_crm_face_sizes( $attachment_id ) {
 		$d = ( $p && file_exists( $p ) ) ? @getimagesize( $p ) : false;
 		if ( $d ) { $out['orig'] = array( (int) $d[0], (int) $d[1] ); }
 	}
+	// Or the JPEG the host's optimiser left beside a compressed WebP. It was
+	// the attached file when the scanner measured, and nothing else records
+	// its size.
+	if ( ! $out['orig'][0] && function_exists( 'gasf_crm_webp_original_beside' ) ) {
+		$j = gasf_crm_webp_original_beside( (string) get_attached_file( $id ) );
+		$d = '' !== $j ? @getimagesize( $j ) : false;
+		if ( $d ) { $out['orig'] = array( (int) $d[0], (int) $d[1] ); }
+	}
 	return $out;
 }
 

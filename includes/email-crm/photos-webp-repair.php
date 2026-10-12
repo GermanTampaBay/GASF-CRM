@@ -71,6 +71,24 @@ function gasf_crm_webp_repair_candidates( array $ids = array(), $since = '', $re
  *
  * @return array|WP_Error {id, rel_old, rel_new, jpeg, delete[]}
  */
+/**
+ * The JPEG the host's optimiser left beside a "-compressed.webp", or ''.
+ *
+ * One rule, used by the repair and by the face code: a box measured against
+ * that JPEG (which is what the scanner was sent, back when it was the
+ * attached file) can only be placed if its size can still be read.
+ */
+function gasf_crm_webp_original_beside( $path ) {
+	$path = (string) $path;
+	if ( '' === $path || ! preg_match( '~-compressed\.webp$~i', $path ) ) { return ''; }
+	$dir  = dirname( $path );
+	$stem = preg_replace( '~(-scaled)?-compressed\.webp$~i', '', basename( $path ) );
+	foreach ( array( 'jpg', 'JPG', 'jpeg', 'JPEG' ) as $ext ) {
+		if ( is_file( $dir . '/' . $stem . '.' . $ext ) ) { return $dir . '/' . $stem . '.' . $ext; }
+	}
+	return '';
+}
+
 function gasf_crm_webp_repair_plan( $id ) {
 	global $wpdb;
 	$id      = (int) $id;
@@ -85,10 +103,7 @@ function gasf_crm_webp_repair_plan( $id ) {
 
 	$dir  = dirname( $path );
 	$stem = preg_replace( '~(-scaled)?-compressed\.webp$~i', '', basename( $path ) );
-	$jpeg = '';
-	foreach ( array( 'jpg', 'JPG', 'jpeg', 'JPEG' ) as $ext ) {
-		if ( is_file( $dir . '/' . $stem . '.' . $ext ) ) { $jpeg = $dir . '/' . $stem . '.' . $ext; break; }
-	}
+	$jpeg = gasf_crm_webp_original_beside( $path );
 	if ( '' === $jpeg ) {
 		return new WP_Error( 'gasf_webp_only', 'no original JPEG beside it; the WebP is the only copy, so it stays' );
 	}

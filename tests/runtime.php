@@ -454,6 +454,28 @@ final class GASF_CRM_Selftest {
 			'box space: the picture size is part of what makes a scan result new' );
 	}
 
+	/** A box measured on the JPEG the host's optimiser left beside its WebP is placed on that JPEG. */
+	public function test_face_box_space_webp_twin() {
+		$id   = $this->library_photo( 'st-webptwin' );
+		$path = get_attached_file( $id );
+		$webp = substr( $path, 0, -4 ) . '-compressed.webp';
+		rename( $path, $webp );
+		file_put_contents( $path, $this->jpeg_bytes( 240, 180 ) );   // the bigger original, left beside it
+		update_post_meta( $id, '_wp_attached_file', substr( (string) get_post_meta( $id, '_wp_attached_file', true ), 0, -4 ) . '-compressed.webp' );
+		update_post_meta( $id, '_wp_attachment_metadata', array( 'width' => 120, 'height' => 90 ) );
+		try {
+			$sizes = gasf_crm_face_sizes( $id );
+			$this->ok( array( 240, 180 ) === $sizes['orig'],
+				'box space: the original JPEG beside a compressed WebP supplies the size the scanner measured on' );
+			$this->ok( array( 240, 180 ) === gasf_crm_face_box_space_guess( $id, array( 200, 100, 30, 40 ), $sizes ),
+				'box space: a box past the WebP but inside that JPEG is placed on the JPEG' );
+			$this->ok( array( 100, 50, 15, 20 ) === gasf_crm_face_box_to( array( 200, 100, 30, 40 ), 240, 180, 120, 90 ),
+				'box space: and lands inside the WebP once converted' );
+		} finally {
+			@unlink( $path );
+		}
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
