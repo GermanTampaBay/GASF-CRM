@@ -3622,6 +3622,8 @@ final class GASF_CRM_Selftest {
 		$this->ok( '1974' === gasf_crm_photo_clean_taken( '1974' ) && '1982-03' === gasf_crm_photo_clean_taken( '1982-03' )
 				&& '2026-10-10' === gasf_crm_photo_clean_taken( '2026-10-10' ),
 			'door: and all three shapes it sends are kept on the way in' );
+		$this->ok( false !== strpos( $door, "restore();\n\ttakenToday();" ) && false !== strpos( $door, 'id="ptaken" value=""' ),
+			'door: the date starts at today, set in the browser (the page itself carries none), after any remembered visit' );
 		$this->ok( false !== strpos( $door, 'font-size:16px' ),
 			'door: boxes use 16px text, so iPhones do not zoom in on every tap' );
 		$this->ok( false !== strpos( $door, 'aria-label="Remove this photo"' ) && false !== strpos( $door, "if (!b || busy) { return; }" ),

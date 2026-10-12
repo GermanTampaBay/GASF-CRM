@@ -1372,6 +1372,7 @@ function gasf_crm_door_script( $party ) {
 		if (placeSel) { placeSel.selectedIndex = 0; }
 		var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
 		var n = document.getElementById('pmemnote'); if (n) { n.parentNode.removeChild(n); }
+		takenToday();
 		takenShow();
 		evPaint();
 	}
@@ -1422,8 +1423,18 @@ function gasf_crm_door_script( $party ) {
 			form.insertBefore(note, form.firstChild);
 		}
 	}
+	// Today, unless a remembered visit filled it. Set here in the browser, not
+	// on the server, so a cached page cannot offer yesterday. A photo's own
+	// camera date still wins over this on the server.
+	function takenToday(){
+		if (!dateIn || !tY || dateIn.value) { return; }
+		var t = new Date(), pad = function(n){ return (n < 10 ? '0' : '') + n; };
+		dateIn.value = t.getFullYear() + '-' + pad(t.getMonth() + 1) + '-' + pad(t.getDate());
+	}
 	restore();
+	takenToday();
 	takenShow();
+	evPaint();
 
 	/*
 	 * Clear the form and put the answer at the top.
