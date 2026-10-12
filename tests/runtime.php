@@ -3614,6 +3614,8 @@ final class GASF_CRM_Selftest {
 		}
 		$this->ok( false === strpos( $door, 'Where was it taken? (optional)' ) && false === strpos( $door, 'What was the occasion? (optional)' ),
 			'door: place and occasion are not marked optional' );
+		$this->ok( false !== strpos( $door, 'aria-label="Remove this photo"' ) && false !== strpos( $door, "if (!b || busy) { return; }" ),
+			'door: a picked photo can be removed before sending, but not while a batch is going' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
 			'door: names are optional on both doors, and the label says so on both' );
 

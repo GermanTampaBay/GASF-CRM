@@ -983,6 +983,9 @@ function gasf_crm_door_styles() {
 		background:rgba(0,0,0,.66);color:#fff;border-radius:2px}
 	.gasf-door-entry .gasf-door-grid .st.done{background:rgba(38,110,45,.9)}
 	.gasf-door-entry .gasf-door-grid .st.err{background:rgba(150,40,30,.92)}
+	.gasf-door-entry .gasf-door-grid .gdel{position:absolute;top:4px;right:4px;width:32px;height:32px;padding:0;
+		border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.65);color:#fff;font-size:20px;line-height:1}
+	.gasf-door-entry .gasf-door-grid .gdel:hover:not(:disabled){background:rgba(150,40,30,.95);border-color:#fff}
 	.gasf-door-entry .gasf-door-box{border:1px solid rgba(128,128,128,.35);border-radius:4px;padding:14px 16px;margin:18px 0}
 	.gasf-door-entry .gasf-door-box h2{margin-top:0}
 	.gasf-door-entry .gasf-door-fine{font-size:.88em;opacity:.75;margin-top:-.4em}
@@ -1063,13 +1066,25 @@ function gasf_crm_door_script( $party ) {
 			var s = p.state === 'done' ? 'sent'
 				: p.state === 'err' ? 'failed'
 				: p.state === 'going' ? 'sending…' : (i + 1);
-			return '<figure><img src="' + p.url + '" alt="">' +
+			// Anything not yet sent can be taken out again - while a batch is
+			// sending, nothing is, so the queue cannot shift under it.
+			var del = (!busy && (p.state === 'new' || p.state === 'err'))
+				? '<button type="button" class="gdel" data-i="' + i + '" aria-label="Remove this photo">&times;</button>' : '';
+			return '<figure><img src="' + p.url + '" alt="">' + del +
 				'<span class="st' + (p.state === 'done' ? ' done' : (p.state === 'err' ? ' err' : '')) + '">' + s + '</span></figure>';
 		}).join('');
 		document.getElementById('pform').hidden = !picked.length;
 		var waiting = picked.filter(function(p){ return p.state === 'new'; }).length;
 		send.disabled = busy || !waiting;
 	}
+
+	grid.addEventListener('click', function(e){
+		var b = e.target.closest ? e.target.closest('.gdel') : null;
+		if (!b || busy) { return; }
+		var p = picked.splice(parseInt(b.dataset.i, 10), 1)[0];
+		if (p) { URL.revokeObjectURL(p.url); }
+		paint();
+	});
 
 	document.getElementById('ppick').onclick = function(){ document.getElementById('pfile').click(); };
 	document.getElementById('pfile').onchange = function(e){
