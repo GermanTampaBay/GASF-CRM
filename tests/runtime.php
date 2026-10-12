@@ -937,7 +937,7 @@ final class GASF_CRM_Selftest {
 		$row = function ( $name, $depth, $kids ) { $t = new stdClass(); $t->name = $name; return array( 'term' => $t, 'depth' => $depth, 'haskids' => $kids ); };
 		$rows = array( $row( 'Club', 0, true ), $row( 'Hall', 1, false ) );
 		$html = gasf_crm_door_place_tiles( $rows, '', true, 'upplace', '' );
-		$this->ok( false !== strpos( $html, 'id="upplaces"' ) && false !== strpos( $html, 'id="upplace" value=""' ) && false === strpos( $html, 'pplace' ),
+		$this->ok( false !== strpos( $html, 'id="upplaces"' ) && false !== strpos( $html, 'id="upplace" value=""' ) && false === strpos( $html, 'id="pplace' ),
 			'upload tiles: the group and the hidden answer carry the upload form\'s ids, not the door\'s' );
 		$this->ok( false === strpos( $html, '<p><strong' ) && false === strpos( $html, 'aria-labelledby' ), 'upload tiles: no question above them - the field has its own label' );
 		$this->ok( false !== strpos( $html, 'data-place="__other"' ) && false === strpos( $html, 'aria-pressed="true"' ), 'upload tiles: somewhere else is offered, nothing is pressed' );
