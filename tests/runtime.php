@@ -349,6 +349,18 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/**
+	 * The grant no longer promises to ask before crediting the photographer,
+	 * and dropping that promise moved the version, so grants recorded against
+	 * the old wording stay distinguishable from new ones.
+	 */
+	public function test_consent_wording() {
+		$text = gasf_crm_photo_consent_text();
+		$this->ok( false === stripos( $text, 'asked first' ), 'consent wording: no promise to ask before naming the sender' );
+		$this->ok( false !== stripos( $text, 'permission to use them' ), 'consent wording: the grant itself is still there' );
+		$this->ok( '2026-07-1' !== GASF_CRM_PHOTO_CONSENT_VERSION, 'consent wording: the version moved with the text' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

@@ -142,12 +142,19 @@ function gasf_crm_photo_display_title( $attachment_id ) {
  * somebody on a phone, not a lawyer's licence. Have it reviewed before it
  * matters.
  * ================================================================== */
-define( 'GASF_CRM_PHOTO_CONSENT_VERSION', '2026-07-1' );
+/*
+ * 2026-10-1 dropped the closing sentence "I understand my name will not be
+ * published alongside them unless I am asked first." It promised a check
+ * before crediting the photographer that the club does not intend to make
+ * every time. Grants made under 2026-07-1 still carry that promise, in their
+ * stored text.
+ */
+define( 'GASF_CRM_PHOTO_CONSENT_VERSION', '2026-10-1' );
 
 function gasf_crm_photo_consent_text() {
 	$org = gasf_crm_cfg()['signature_org'];
 	return sprintf(
-		'I took these photos or have the right to share them, and I give the %s permission to use them — on its website and social media, in newsletters, posters and other publicity, and in its archive. I understand my name will not be published alongside them unless I am asked first.',
+		'I took these photos or have the right to share them, and I give the %s permission to use them — on its website and social media, in newsletters, posters and other publicity, and in its archive.',
 		$org
 	);
 }
