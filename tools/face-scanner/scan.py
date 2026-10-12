@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.6.7"
+SCANNER_VERSION = "1.7.0"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -4009,7 +4009,8 @@ function collectLabels(){
   document.querySelectorAll('#rows input[data-i]').forEach(inp=>{
     const name=inp.value.trim(); if(!name){return;}
     addName(name);
-    const i=parseInt(inp.getAttribute('data-i'),10); labels.push({name, box: current.boxes[i]});
+    const i=parseInt(inp.getAttribute('data-i'),10);
+    labels.push({name, box: current.boxes[i], iw: Number(current.image_width)||0, ih: Number(current.image_height)||0});
   });
   refreshNameList();
   return labels;
@@ -5116,6 +5117,11 @@ def scan(
                         "found": len(boxes),
                         "faces": faces,
                         "boxes": boxes,
+                        # The picture these were measured on. The server converts
+                        # between its sizes from this; without it a box is a number
+                        # with no ruler.
+                        "image_width": image_width,
+                        "image_height": image_height,
                         "engine": backend.name,
                     })
 
@@ -7319,6 +7325,8 @@ def main():
     ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
     ap.add_argument("--version", action="version", version=f"GASF face scanner {SCANNER_VERSION}")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
+    ap.add_argument("--relearn", action="store_true",
+                    help="forget the learn watermark and study every tagged photo again (after a server-side fix to labels)")
     ap.add_argument("--label", action="store_true", help="interactive local browser UI for box->name labeling")
     ap.add_argument("--label-flow", action="store_true",
                     help="with --label: learn/scan first, label unresolved faces, then relearn/rescan")
@@ -7472,6 +7480,14 @@ def main():
         # so it costs nothing when no new photos have been tagged and it lets the
         # reference set grow as volunteers work. One-shot runs only learn when
         # asked, or when there is nothing to compare against yet.
+        if args.relearn:
+            # Back to photo 0 for this engine. Relearning is idempotent per
+            # photo, so this costs time, never correctness.
+            for base in ("learned_modified", "learned_id"):
+                state_set(conn, state_key(backend.name, base), "")
+            if verbose:
+                print("Relearning every tagged photo from the beginning...", flush=True)
+            args.relearn = False
         if args.learn or args.watch or not load_references(conn, backend.name):
             learn(api, conn, backend, verbose)
         scan(

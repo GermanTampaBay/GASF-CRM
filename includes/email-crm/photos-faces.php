@@ -296,6 +296,125 @@ function gasf_crm_face_box_iou( array $a, array $b ) {
 	return $union > 0 ? $intersection / $union : 0.0;
 }
 
+/* ---------------------------------------------------------------------------
+ * Which picture a box was measured on
+ *
+ * Every rectangle here was measured by the scanner against whatever file
+ * /faces/image streamed it that day: the 'large' copy when one existed, the
+ * full photo when it did not. Then the thumbnail sweeper (2.79.0) made 'large'
+ * copies for 1,959 photos AFTER they had been scanned, and every box on them
+ * silently changed meaning - still the right numbers, now read against the
+ * wrong picture. Reference faces were cropped from the wrong spot, labels
+ * paired with the wrong detected face on the scanning PC, and overlays were
+ * drawn past the edge. Nothing failed; the state was correct when written and
+ * wrong by the time it was used.
+ *
+ * So a box now travels with the size it was measured on (iw, ih), exactly as
+ * the ignore list already did, and is converted to whichever size a reader
+ * needs. A box recorded before this is placed by elimination: the smallest
+ * size the club holds that contains it. Checked against the archive, that
+ * guess was wrong for 4 labels in about 750 that could be decided at all.
+ * ------------------------------------------------------------------------ */
+
+/** The pixel sizes this photo exists at: large, full, and the camera original. */
+function gasf_crm_face_sizes( $attachment_id ) {
+	$id   = (int) $attachment_id;
+	$meta = wp_get_attachment_metadata( $id );
+	$meta = is_array( $meta ) ? $meta : array();
+	$out  = array(
+		'large' => array( (int) ( $meta['sizes']['large']['width'] ?? 0 ), (int) ( $meta['sizes']['large']['height'] ?? 0 ) ),
+		'full'  => array( (int) ( $meta['width'] ?? 0 ), (int) ( $meta['height'] ?? 0 ) ),
+		'orig'  => array( 0, 0 ),
+	);
+	// The camera original behind a "-scaled" file. Its size is not in the
+	// metadata, and reading a JPEG header is a few kilobytes.
+	if ( ! empty( $meta['original_image'] ) && function_exists( 'wp_get_original_image_path' ) ) {
+		$p = wp_get_original_image_path( $id );
+		$d = ( $p && file_exists( $p ) ) ? @getimagesize( $p ) : false;
+		if ( $d ) { $out['orig'] = array( (int) $d[0], (int) $d[1] ); }
+	}
+	return $out;
+}
+
+/** The size a box without one was measured on: the smallest that contains it. */
+function gasf_crm_face_box_space_guess( $attachment_id, array $box, $sizes = null ) {
+	$sizes = is_array( $sizes ) ? $sizes : gasf_crm_face_sizes( $attachment_id );
+	$x2 = (int) $box[0] + (int) $box[2];
+	$y2 = (int) $box[1] + (int) $box[3];
+	foreach ( array( 'large', 'full', 'orig' ) as $k ) {
+		list( $w, $h ) = $sizes[ $k ];
+		if ( $w > 0 && $h > 0 && $x2 <= $w + 2 && $y2 <= $h + 2 ) { return array( $w, $h ); }
+	}
+	// Bigger than anything on record: the largest picture is the only candidate.
+	foreach ( array( 'orig', 'full', 'large' ) as $k ) {
+		if ( $sizes[ $k ][0] > 0 ) { return $sizes[ $k ]; }
+	}
+	return array( 0, 0 );
+}
+
+/** The same rectangle on a picture of another size. Unchanged when a size is unknown. */
+function gasf_crm_face_box_to( array $box, $iw, $ih, $tw, $th ) {
+	$box = array_map( 'intval', array_values( $box ) );
+	$iw = (int) $iw; $ih = (int) $ih; $tw = (int) $tw; $th = (int) $th;
+	if ( 4 !== count( $box ) || $iw <= 0 || $ih <= 0 || $tw <= 0 || $th <= 0 || ( $iw === $tw && $ih === $th ) ) { return $box; }
+	$sx = $tw / $iw;
+	$sy = $th / $ih;
+	return array(
+		(int) round( $box[0] * $sx ),
+		(int) round( $box[1] * $sy ),
+		max( 1, (int) round( $box[2] * $sx ) ),
+		max( 1, (int) round( $box[3] * $sy ) ),
+	);
+}
+
+/** Rows of {box, iw, ih, ...}, each box moved onto a picture $tw by $th. */
+function gasf_crm_face_rows_in( $attachment_id, array $rows, $tw, $th ) {
+	$sizes = null;
+	$out   = array();
+	foreach ( $rows as $r ) {
+		if ( ! is_array( $r ) ) { continue; }
+		$box = array_map( 'intval', (array) ( $r['box'] ?? array() ) );
+		if ( 4 !== count( $box ) ) { continue; }
+		$iw = (int) ( $r['iw'] ?? 0 );
+		$ih = (int) ( $r['ih'] ?? 0 );
+		if ( $iw <= 0 || $ih <= 0 ) {
+			if ( null === $sizes ) { $sizes = gasf_crm_face_sizes( $attachment_id ); }
+			list( $iw, $ih ) = gasf_crm_face_box_space_guess( $attachment_id, $box, $sizes );
+		}
+		$r['box'] = gasf_crm_face_box_to( $box, $iw, $ih, $tw, $th );
+		$r['iw']  = (int) $tw;
+		$r['ih']  = (int) $th;
+		$out[]    = $r;
+	}
+	return $out;
+}
+
+/** The size of the file /faces/image streams for this photo today. */
+function gasf_crm_face_served_size( $attachment_id ) {
+	$id    = (int) $attachment_id;
+	$sizes = gasf_crm_face_sizes( $id );
+	$file  = function_exists( 'gasf_crm_photo_served_path' ) ? gasf_crm_photo_served_path( $id, 'large' ) : '';
+	if ( '' !== $file && $sizes['large'][0] > 0 && basename( $file ) !== basename( (string) get_attached_file( $id ) ) ) {
+		return $sizes['large'];
+	}
+	return $sizes['full'];
+}
+
+/**
+ * A photo's labels as the scanner must read them: on the picture it is sent.
+ *
+ * @return array{labels:array,image_width:int,image_height:int}
+ */
+function gasf_crm_face_labels_served( $attachment_id ) {
+	$id = (int) $attachment_id;
+	list( $w, $h ) = gasf_crm_face_served_size( $id );
+	return array(
+		'labels'       => gasf_crm_face_rows_in( $id, gasf_crm_face_labels_for( $id ), $w, $h ),
+		'image_width'  => (int) $w,
+		'image_height' => (int) $h,
+	);
+}
+
 /** Sanitized prediction history retained after suggestion chips disappear. */
 function gasf_crm_face_predictions_for( $attachment_id ) {
 	$id  = (int) $attachment_id;
@@ -488,11 +607,13 @@ function gasf_crm_photo_file_for_size( $attachment_id, $size ) {
  * lives with the scanner — but the largest face in the archive is reliably the
  * most recognisable one, which is all this has to be.
  *
- * The boxes were measured by the scanner against the 'large' intermediate,
- * because that is the size /faces/image serves it, so the crop has to be taken
- * from that same size or it lands somewhere near an ear.
+ * Every label is first moved onto the photo's 'large' size (its full size
+ * when there is no large), so faces measured on different copies compare
+ * fairly; the box comes back with the size it is now on, and the crop converts
+ * it again to whatever file it actually reads. Measured on one picture and
+ * cropped from another is how a reference face landed on an ear.
  *
- * @return array{photo:int,box:int[]}|null
+ * @return array{photo:int,box:int[],iw:int,ih:int}|null
  */
 function gasf_crm_face_reference_shot( $person ) {
 	$person = trim( (string) $person );
@@ -508,14 +629,20 @@ function gasf_crm_face_reference_shot( $person ) {
 	foreach ( (array) get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' ) as $pid ) {
 		$pid = (int) $pid;
 		if ( 'attachment' !== get_post_type( $pid ) ) { continue; }
+		$mine = array();
 		foreach ( gasf_crm_face_labels_for( $pid ) as $label ) {
-			if ( ! gasf_crm_face_name_same( $person, (string) $label['name'] ) ) { continue; }
-			$box = array_map( 'intval', (array) $label['box'] );
-			if ( 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+			if ( gasf_crm_face_name_same( $person, (string) $label['name'] ) ) { $mine[] = $label; }
+		}
+		if ( ! $mine ) { continue; }
+		$sizes = gasf_crm_face_sizes( $pid );
+		$on    = $sizes['large'][0] > 0 ? $sizes['large'] : $sizes['full'];
+		foreach ( gasf_crm_face_rows_in( $pid, $mine, $on[0], $on[1] ) as $label ) {
+			$box = $label['box'];
+			if ( $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 			$a = $box[2] * $box[3];
 			if ( $a > $area ) {
 				$area = $a;
-				$best = array( 'photo' => $pid, 'box' => array_values( $box ) );
+				$best = array( 'photo' => $pid, 'box' => $box, 'iw' => (int) $on[0], 'ih' => (int) $on[1] );
 			}
 		}
 	}
@@ -534,7 +661,7 @@ define( 'GASF_CRM_FACE_REF_PAD', 0.35 );
  * @return string|null
  */
 function gasf_crm_face_reference_thumb( $person ) {
-	$key = 'gasf_face_ref_' . md5( strtolower( gasf_crm_face_canonical_key( $person ) ?: (string) $person ) );
+	$key = 'gasf_face_ref2_' . md5( strtolower( gasf_crm_face_canonical_key( $person ) ?: (string) $person ) );
 
 	$hit = get_transient( $key );
 	if ( is_string( $hit ) ) { return '' === $hit ? null : base64_decode( $hit ); }
@@ -550,7 +677,10 @@ function gasf_crm_face_reference_thumb( $person ) {
 
 	$bytes = null;
 	try {
-		list( $x, $y, $w, $h ) = array_map( 'intval', $shot['box'] );
+		// Onto the file actually being read, whatever size that turns out to be.
+		$dim = @getimagesize( $file );
+		$box = $dim ? gasf_crm_face_box_to( $shot['box'], $shot['iw'], $shot['ih'], (int) $dim[0], (int) $dim[1] ) : $shot['box'];
+		list( $x, $y, $w, $h ) = array_map( 'intval', $box );
 		$pad_x = (int) round( $w * GASF_CRM_FACE_REF_PAD );
 		$pad_y = (int) round( $h * GASF_CRM_FACE_REF_PAD );
 
@@ -1116,7 +1246,7 @@ function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
 		$box  = array_map( 'intval', (array) ( $s['box'] ?? array() ) );
 		if ( $pct < $min || '' === $name || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
 		if ( gasf_crm_face_is_rejected( $id, $name ) ) { continue; }
-		$labels[] = array( 'name' => $name, 'box' => array_values( $box ) );
+		$labels[] = array( 'name' => $name, 'box' => array_values( $box ), 'iw' => (int) ( $s['iw'] ?? 0 ), 'ih' => (int) ( $s['ih'] ?? 0 ) );
 	}
 	if ( ! $labels ) { return $out; }
 
@@ -1147,7 +1277,7 @@ function gasf_crm_faces_auto_accept( $attachment_id, array $suggestions ) {
  *
  * @param array $faces [ ['box'=>[x,y,w,h], 'name'=>'', 'confidence'=>0.0], ... ]
  */
-function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_names = 0, &$auto_labels = 0 ) {
+function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_names = 0, &$auto_labels = 0, $iw = 0, $ih = 0 ) {
 	$id   = (int) $attachment_id;
 	$keep = array();
 	$auto_names  = 0;
@@ -1172,6 +1302,8 @@ function gasf_crm_faces_store( $attachment_id, array $faces, $found, &$auto_name
 		 */
 		$keep[] = array(
 			'box'        => array_values( $box ),
+			'iw'         => max( 0, (int) ( $f['iw'] ?? $iw ) ),
+			'ih'         => max( 0, (int) ( $f['ih'] ?? $ih ) ),
 			'name'       => $name,
 			'confidence' => (int) round( min( 1, max( 0, $conf ) ) * 100 ),
 		);
@@ -1227,14 +1359,18 @@ function gasf_crm_faces_for( $attachment_id ) {
 }
 
 /** Store detection rectangles (named or not) for click-to-label in the UI. */
-function gasf_crm_face_boxes_store( $attachment_id, array $boxes, $found = 0 ) {
+function gasf_crm_face_boxes_store( $attachment_id, array $boxes, $found = 0, $iw = 0, $ih = 0 ) {
 	$id = (int) $attachment_id;
 	$keep = array();
 	foreach ( $boxes as $b ) {
 		$box = array_map( 'intval', (array) ( $b['box'] ?? $b ) );
 		if ( 4 !== count( $box ) ) { continue; }
 		if ( $box[2] <= 0 || $box[3] <= 0 ) { continue; }
-		$keep[] = array( 'box' => array_values( $box ) );
+		$keep[] = array(
+			'box' => array_values( $box ),
+			'iw'  => max( 0, (int) ( is_array( $b ) && isset( $b['iw'] ) ? $b['iw'] : $iw ) ),
+			'ih'  => max( 0, (int) ( is_array( $b ) && isset( $b['ih'] ) ? $b['ih'] : $ih ) ),
+		);
 		if ( count( $keep ) >= 60 ) { break; } // sane cap for crowd shots
 	}
 	if ( $keep ) { update_post_meta( $id, '_gasf_face_boxes', $keep ); }
@@ -1251,7 +1387,11 @@ function gasf_crm_face_boxes_for( $attachment_id ) {
 	foreach ( $raw as $r ) {
 		$box = array_map( 'intval', (array) ( $r['box'] ?? $r ) );
 		if ( 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
-		$out[] = array( 'box' => array_values( $box ) );
+		$out[] = array(
+			'box' => array_values( $box ),
+			'iw'  => max( 0, (int) ( is_array( $r ) ? ( $r['iw'] ?? 0 ) : 0 ) ),
+			'ih'  => max( 0, (int) ( is_array( $r ) ? ( $r['ih'] ?? 0 ) : 0 ) ),
+		);
 	}
 	return $out;
 }
@@ -1281,6 +1421,8 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 		$next[ $key ] = array(
 			'name' => $name,
 			'box'  => array_values( $box ),
+			'iw'   => max( 0, (int) ( $l['iw'] ?? 0 ) ),
+			'ih'   => max( 0, (int) ( $l['ih'] ?? 0 ) ),
 		);
 	}
 	if ( ! $next && ! $replace ) { return 0; }
@@ -1297,7 +1439,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 			$b = array_map( 'intval', (array) ( $h['box'] ?? array() ) );
 			$n = trim( sanitize_text_field( (string) ( $h['name'] ?? '' ) ) );
 			if ( 4 !== count( $b ) || '' === $n ) { continue; }
-			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ) );
+			$all[ implode( ',', $b ) ] = array( 'name' => $n, 'box' => array_values( $b ), 'iw' => max( 0, (int) ( $h['iw'] ?? 0 ) ), 'ih' => max( 0, (int) ( $h['ih'] ?? 0 ) ) );
 		}
 	}
 	$same_name = static function ( $a, $b ) {
@@ -1329,6 +1471,11 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 					gasf_crm_face_prediction_outcome( $id, $old, 'negative', $v['box'] );
 				}
 				$all[ $k ] = $v;
+				$changed++;
+			} elseif ( $v['iw'] > 0 && empty( $all[ $k ]['iw'] ) ) {
+				// The same label, now saying which picture it was measured on.
+				$all[ $k ]['iw'] = $v['iw'];
+				$all[ $k ]['ih'] = $v['ih'];
 				$changed++;
 			}
 		}
@@ -1439,6 +1586,8 @@ function gasf_crm_face_labels_record( $attachment_id, array $map ) {
 			$next[] = array(
 				'name' => $name,
 				'box'  => array_values( $box ),
+				'iw'   => (int) ( $src[ $i ]['iw'] ?? 0 ),
+				'ih'   => (int) ( $src[ $i ]['ih'] ?? 0 ),
 			);
 		}
 		return gasf_crm_face_labels_store( $id, $next, false, true );
@@ -1499,6 +1648,8 @@ function gasf_crm_face_discovery_labels_record( $raw_name, array $occurrences ) 
 		$groups[ $id ][] = array(
 			'client_key' => $key,
 			'box'        => array_values( $box ),
+			'iw'         => $iw,
+			'ih'         => $ih,
 		);
 	}
 
@@ -1514,7 +1665,7 @@ function gasf_crm_face_discovery_labels_record( $raw_name, array $occurrences ) 
 		try {
 			$labels = array();
 			foreach ( $items as $item ) {
-				$labels[] = array( 'name' => $name, 'box' => $item['box'] );
+				$labels[] = array( 'name' => $name, 'box' => $item['box'], 'iw' => $item['iw'], 'ih' => $item['ih'] );
 			}
 			$stored += (int) gasf_crm_face_labels_store( $id, $labels, false, true );
 			$have = gasf_crm_face_labels_for( $id );
@@ -1553,7 +1704,7 @@ function gasf_crm_face_labels_for( $attachment_id ) {
 		$box = array_map( 'intval', (array) ( $r['box'] ?? array() ) );
 		$name = trim( sanitize_text_field( (string) ( $r['name'] ?? '' ) ) );
 		if ( 4 !== count( $box ) || '' === $name ) { continue; }
-		$out[] = array( 'name' => $name, 'box' => array_values( $box ) );
+		$out[] = array( 'name' => $name, 'box' => array_values( $box ), 'iw' => max( 0, (int) ( $r['iw'] ?? 0 ) ), 'ih' => max( 0, (int) ( $r['ih'] ?? 0 ) ) );
 	}
 	return $out;
 }
@@ -1695,6 +1846,7 @@ function gasf_crm_faces_scan_digest( array $item ) {
 		'found'   => $found,
 		'faces'   => $faces,
 		'boxes'   => $boxes,
+		'image'   => array( (int) ( $item['image_width'] ?? 0 ), (int) ( $item['image_height'] ?? 0 ) ),
 		'caption' => trim( sanitize_text_field( (string) ( $item['caption'] ?? '' ) ) ),
 		'faces_scanned' => ! array_key_exists( 'faces_scanned', $item ) || ! empty( $item['faces_scanned'] ),
 		'caption_key' => gasf_crm_faces_caption_key( (string) ( $item['caption_key'] ?? '' ) ),
@@ -1988,12 +2140,15 @@ add_action( 'rest_api_init', function () {
 						&& ! metadata_exists( 'post', $id, '_gasf_caption_suggestion' )
 					)
 				);
+				$served = gasf_crm_face_labels_served( $id );
 				$out[] = array(
 					'id'            => (int) $id,
 					'url'           => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
+					'image_width'   => $served['image_width'],
+					'image_height'  => $served['image_height'],
 					'image_rev'     => gasf_crm_photo_image_rev( $id ),
 					'people'        => gasf_crm_photo_term_names( $id, 'gasf_photo_person' ),
-					'labels'        => gasf_crm_face_labels_for( $id ),
+					'labels'        => $served['labels'],
 					'rejected'      => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
 					// Rectangles a volunteer has said are not people to tag. The
 					// scanner skips any face that lands on one of these, so a
@@ -2086,7 +2241,9 @@ add_action( 'rest_api_init', function () {
 						$found = (int) ( $item['found'] ?? 0 );
 						$accepted_names = 0;
 						$accepted_labels = 0;
-						$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels );
+						$iw = max( 0, (int) ( $item['image_width'] ?? 0 ) );
+						$ih = max( 0, (int) ( $item['image_height'] ?? 0 ) );
+						$kept = gasf_crm_faces_store( $id, $faces, $found, $accepted_names, $accepted_labels, $iw, $ih );
 						$stored += $kept;
 						$auto_names += (int) $accepted_names;
 						$auto_labels += (int) $accepted_labels;
@@ -2099,7 +2256,7 @@ add_action( 'rest_api_init', function () {
 								if ( isset( $f['box'] ) ) { $boxes[] = array( 'box' => (array) $f['box'] ); }
 							}
 						}
-						gasf_crm_face_boxes_store( $id, $boxes, $found );
+						gasf_crm_face_boxes_store( $id, $boxes, $found, $iw, $ih );
 						if ( $kept > 0 ) { update_post_meta( $id, '_gasf_face_suggested_at', current_time( 'mysql', true ) ); }
 						else { delete_post_meta( $id, '_gasf_face_suggested_at' ); }
 						$engine = trim( sanitize_text_field( (string) ( $item['engine'] ?? '' ) ) );
@@ -2237,6 +2394,12 @@ add_action( 'rest_api_init', function () {
 			$in     = (array) $req->get_json_params();
 			$id     = (int) ( $in['photo'] ?? 0 );
 			$labels = (array) ( $in['labels'] ?? array() );
+			$iw = max( 0, (int) ( $in['image_width'] ?? 0 ) );
+			$ih = max( 0, (int) ( $in['image_height'] ?? 0 ) );
+			foreach ( $labels as &$l ) {
+				if ( is_array( $l ) && ( empty( $l['iw'] ) || empty( $l['ih'] ) ) ) { $l['iw'] = $iw; $l['ih'] = $ih; }
+			}
+			unset( $l );
 			if ( ! $id || ! gasf_crm_photo_in_library( $id ) || get_post_meta( $id, '_gasf_photo_flyer', true ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
@@ -2531,12 +2694,15 @@ add_action( 'rest_api_init', function () {
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
+				$served = gasf_crm_face_labels_served( $id );
 				$out[] = array(
 					'id'     => (int) $id,
 					'url'    => rest_url( 'gasf/v1/crm/photos/faces/image?photo=' . (int) $id ),
 					'image_rev' => gasf_crm_photo_image_rev( $id ),
+					'image_width'  => $served['image_width'],
+					'image_height' => $served['image_height'],
 					'people' => array_map( 'html_entity_decode', $people ),
-					'labels' => gasf_crm_face_labels_for( $id ),
+					'labels' => $served['labels'],
 					'rejected' => array_values( wp_list_pluck( gasf_crm_face_rejections_for( $id ), 'name' ) ),
 					'ignored'  => gasf_crm_face_ignored_for( $id ),
 					'uploaded_at' => (string) get_post_field( 'post_date_gmt', $id ),
@@ -2677,7 +2843,8 @@ add_action( 'rest_api_init', function () {
 					}
 					if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
 					if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
-					$labels = gasf_crm_face_labels_for( $id );
+					$served = gasf_crm_face_labels_served( $id );
+					$labels = $served['labels'];
 					$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
 					if ( ! $include_empty && ! $labels && ! $people ) { continue; }
 					$out[] = array(
@@ -2687,6 +2854,8 @@ add_action( 'rest_api_init', function () {
 						'image_rev' => gasf_crm_photo_image_rev( $id ),
 						'people' => array_map( 'html_entity_decode', $people ),
 						'labels' => $labels,
+						'image_width'  => $served['image_width'],
+						'image_height' => $served['image_height'],
 						'pipeline' => gasf_crm_faces_photo_state( $id ),
 					);
 				}

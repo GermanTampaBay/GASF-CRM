@@ -424,8 +424,10 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		 * a fact. Empty array when the feature is off, which is what the
 		 * client's own code path expects.
 		 */
-		'faces'     => function_exists( 'gasf_crm_faces_for' ) ? gasf_crm_faces_for( $id ) : array(),
-		'face_boxes'=> function_exists( 'gasf_crm_face_boxes_for' ) ? gasf_crm_face_boxes_for( $id ) : array(),
+		// Both on the full-size picture, which is what the editor's overlay
+		// scales by. Their order is kept: a label is recorded by its index here.
+		'faces'     => function_exists( 'gasf_crm_face_rows_in' ) ? gasf_crm_face_rows_in( $id, gasf_crm_faces_for( $id ), (int) ( $meta['width'] ?? 0 ), (int) ( $meta['height'] ?? 0 ) ) : array(),
+		'face_boxes'=> function_exists( 'gasf_crm_face_rows_in' ) ? gasf_crm_face_rows_in( $id, gasf_crm_face_boxes_for( $id ), (int) ( $meta['width'] ?? 0 ), (int) ( $meta['height'] ?? 0 ) ) : array(),
 		'summary'   => function_exists( 'gasf_crm_caption_suggestion_for' ) ? gasf_crm_caption_suggestion_for( $id ) : array(),
 	);
 }

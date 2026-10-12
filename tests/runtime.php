@@ -364,6 +364,96 @@ final class GASF_CRM_Selftest {
 			'consent wording: the unticked grant is short and still names both uses it allows' );
 	}
 
+	/**
+	 * A face box carries the size of the picture it was measured on.
+	 *
+	 * The thumbnail sweeper made 'large' copies for 1,959 photos AFTER they
+	 * were scanned, and every box on them was then read against the wrong
+	 * picture: reference faces cropped from the wrong spot or not at all,
+	 * labels paired with the wrong face on the scanning PC. Pinned on the
+	 * primitives: the conversion, the guess for a box recorded without a size,
+	 * what the scanner is sent, and a reference face cropped from a file of a
+	 * different size than its label was measured on.
+	 */
+	public function test_face_box_space() {
+		$this->person_term( 'Selftest Space' );
+
+		// A photo with a 2560x1707 full size and a 1024x683 large, in metadata only.
+		$a = $this->library_photo( 'st-boxspace' );
+		update_post_meta( $a, '_wp_attachment_metadata', array(
+			'width' => 2560, 'height' => 1707, 'file' => '2026/10/st-boxspace.jpg',
+			'sizes' => array( 'large' => array( 'file' => 'st-boxspace-1024x683.jpg', 'width' => 1024, 'height' => 683, 'mime-type' => 'image/jpeg' ) ),
+		) );
+
+		$to = gasf_crm_face_box_to( array( 2174, 1076, 208, 270 ), 2560, 1707, 1024, 683 );
+		$this->ok( abs( $to[0] - 870 ) <= 1 && abs( $to[1] - 431 ) <= 1 && $to[0] + $to[2] <= 1024,
+			'box space: a box moves between sizes by the ratio of the pictures' );
+		$this->ok( array( 5, 6, 7, 8 ) === gasf_crm_face_box_to( array( 5, 6, 7, 8 ), 0, 0, 1024, 683 ),
+			'box space: an unknown source size leaves the box alone rather than guessing a scale' );
+
+		$this->ok( array( 1024, 683 ) === gasf_crm_face_box_space_guess( $a, array( 100, 100, 50, 50 ) ),
+			'box space: a box inside the large copy is read as measured on it' );
+		$this->ok( array( 2560, 1707 ) === gasf_crm_face_box_space_guess( $a, array( 2174, 1076, 208, 270 ) ),
+			'box space: one past the large copy but inside the full photo was measured on the full photo' );
+		$this->ok( array( 2560, 1707 ) === gasf_crm_face_box_space_guess( $a, array( 3005, 799, 555, 734 ) ),
+			'box space: one past every size on record is placed on the largest there is' );
+
+		// A legacy label (no size) and a sized one, served together. No large
+		// file exists here, so the scanner is sent the full photo, and both
+		// labels come out on it.
+		update_post_meta( $a, '_gasf_face_labels', array(
+			array( 'name' => 'Selftest Space', 'box' => array( 2174, 1076, 208, 270 ) ),
+			array( 'name' => 'Selftest Space', 'box' => array( 100, 100, 50, 50 ), 'iw' => 1024, 'ih' => 683 ),
+		) );
+		$served = gasf_crm_face_labels_served( $a );
+		$this->ok( 2560 === $served['image_width'] && 2 === count( $served['labels'] ),
+			'box space: the scanner is told the size of the picture it will be sent' );
+		$this->ok( array( 2174, 1076, 208, 270 ) === $served['labels'][0]['box'],
+			'box space: a legacy label already on that picture is sent as it is' );
+		$this->ok( 250 === $served['labels'][1]['box'][0] && 2560 === $served['labels'][1]['iw'],
+			'box space: a label measured on the large copy is scaled up to it' );
+
+		// A label named in the editor by index inherits the size its box was measured on.
+		gasf_crm_face_boxes_store( $a, array( array( 'box' => array( 100, 100, 50, 50 ) ) ), 1, 1024, 683 );
+		$this->ok( 1024 === (int) gasf_crm_face_boxes_for( $a )[0]['iw'],
+			'box space: detection boxes record the size the scanner measured on' );
+		gasf_crm_face_labels_record( $a, array( array( 'i' => 0, 'name' => 'Selftest Space' ) ) );
+		$lab = null;
+		foreach ( gasf_crm_face_labels_for( $a ) as $l ) { if ( array( 100, 100, 50, 50 ) === $l['box'] ) { $lab = $l; } }
+		$this->ok( $lab && 1024 === (int) $lab['iw'], 'box space: a label named by index carries that size along' );
+
+		// The reference face: labelled on a 2400x1800 picture, cropped from a
+		// 120x90 file. Before this the crop started 1,600px past the file's
+		// right edge, and the person had no thumbnail at all.
+		$b = $this->library_photo( 'st-boxspace-thumb' );
+		update_post_meta( $b, '_wp_attachment_metadata', array( 'width' => 2400, 'height' => 1800, 'file' => '2026/10/st-boxspace-thumb.jpg' ) );
+		update_post_meta( $b, '_gasf_face_labels', array( array( 'name' => 'Selftest Thumbface', 'box' => array( 1700, 900, 300, 400 ) ) ) );
+		$this->person_term( 'Selftest Thumbface' );
+		wp_set_object_terms( $b, array( 'Selftest Thumbface' ), 'gasf_photo_person', false );
+		$key = 'gasf_face_ref2_' . md5( strtolower( gasf_crm_face_canonical_key( 'Selftest Thumbface' ) ?: 'Selftest Thumbface' ) );
+		delete_transient( $key );
+		$shot = gasf_crm_face_reference_shot( 'Selftest Thumbface' );
+		$this->ok( $shot && $b === $shot['photo'] && 2400 === $shot['iw'],
+			'box space: the reference shot says which picture its box is on' );
+		$bytes = gasf_crm_face_reference_thumb( 'Selftest Thumbface' );
+		delete_transient( $key );
+		$this->ok( is_string( $bytes ) && strlen( $bytes ) > 0,
+			'box space: a face labelled on a bigger picture still crops to a thumbnail from the file on disk' );
+		if ( $bytes && class_exists( 'Imagick' ) ) {
+			$im = new Imagick();
+			$im->readImageBlob( $bytes );
+			$this->ok( $im->getImageWidth() <= GASF_CRM_FACE_REF_PX && $im->getImageHeight() <= GASF_CRM_FACE_REF_PX,
+				'box space: and it is thumbnail-sized' );
+			$im->clear();
+		}
+
+		// The picture size is part of the scan digest, so a rescan measured on
+		// a different picture is not mistaken for "nothing changed".
+		$item = array( 'id' => $a, 'found' => 1, 'faces' => array(), 'boxes' => array( array( 100, 100, 50, 50 ) ) );
+		$this->ok( gasf_crm_faces_scan_digest( $item ) !== gasf_crm_faces_scan_digest( $item + array( 'image_width' => 1024, 'image_height' => 683 ) ),
+			'box space: the picture size is part of what makes a scan result new' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
