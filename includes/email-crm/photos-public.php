@@ -329,6 +329,51 @@ function gasf_crm_door_onproperty() {
 }
 
 /**
+ * The place, as tiles to tap rather than a menu to open.
+ *
+ * The menu showed "German-American Society (anywhere)" already chosen, and in
+ * weeks of uploads not one guest changed it: a menu that already shows an
+ * answer reads as answered, and on a phone the chevron is the only hint there
+ * is a choice. The rooms come first, as words people recognise; "Anywhere at
+ * the club" sits after them, quieter, for when they do not know; Welton and
+ * (on the year-round door) "Somewhere else" close the list. With no default
+ * the question reads as a question; a blank is placed by a volunteer, which
+ * is what happened to every mis-defaulted photo anyway.
+ *
+ * @param array  $rows       gasf_crm_door_onproperty() rows: {term, depth, haskids}.
+ * @param string $default    The place to show pressed ('' for none).
+ * @param bool   $with_other Offer "Somewhere else" (the year-round door).
+ */
+function gasf_crm_door_place_tiles( array $rows, $default = '', $with_other = false ) {
+	$rooms = array();
+	$roots = array();
+	$any   = array();
+	foreach ( $rows as $row ) {
+		$name = (string) $row['term']->name;
+		if ( (int) $row['depth'] > 0 ) { $rooms[] = array( $name, $name, '' ); }
+		elseif ( ! empty( $row['haskids'] ) ) { $any[] = array( $name, 'Anywhere at the club', ' any' ); }
+		else { $roots[] = array( $name, $name, '' ); }
+	}
+	$tiles = array_merge( $rooms, $any, $roots );
+	if ( $with_other ) { $tiles[] = array( '__other', 'Somewhere else', ' any' ); }
+
+	$out  = '<p><strong id="pplacelabel">Which part of the club?</strong></p>';
+	$out .= '<div class="gasf-door-places" id="pplaces" role="group" aria-labelledby="pplacelabel">';
+	foreach ( $tiles as $t ) {
+		$out .= sprintf(
+			'<button type="button" class="ptile%s" data-place="%s" aria-pressed="%s">%s</button>',
+			$t[2],
+			esc_attr( $t[0] ),
+			( '' !== $default && $t[0] === $default ) ? 'true' : 'false',
+			esc_html( html_entity_decode( $t[1], ENT_QUOTES ) )
+		);
+	}
+	$out .= '</div>';
+	$out .= '<input type="hidden" id="pplace" value="' . esc_attr( $default ) . '" data-default="' . esc_attr( $default ) . '">';
+	return $out;
+}
+
+/**
  * A posted place name, resolved to the term's OWN spelling — or ''.
  *
  * Term names are stored with entities ("Welton Brewing Co &amp; Oyster Bar")
@@ -694,7 +739,7 @@ function gasf_crm_door_receive( array $door ) {
 	gasf_crm_log( sprintf( 'Door "%s": guest photo #%d %s%s %s',
 		$door['label'], (int) $card['id'],
 		$party ? 'accepted straight into the library' : 'held for a volunteer',
-		$people ? ' (named: ' . implode( ', ', $people ) . ')' : '',
+		( '' !== $place ? ' at ' . $place : ' with no place given' ) . ( $people ? ' (named: ' . implode( ', ', $people ) . ')' : '' ),
 		gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
 
 	echo wp_json_encode( array(
@@ -831,18 +876,8 @@ function gasf_crm_door_page( $door, $notice ) {
 		$rows    = gasf_crm_door_onproperty();
 		$default = (string) ( $door['place'] ?? '' );
 		if ( $rows ) {
-			echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace">';
-			foreach ( $rows as $row ) {
-				printf(
-					'<option value="%s"%s>%s%s%s</option>',
-					esc_attr( $row['term']->name ),
-					selected( $row['term']->name, $default, false ),
-					esc_html( str_repeat( "\xC2\xA0", 4 * min( 2, (int) $row['depth'] ) ) ),
-					esc_html( $row['term']->name ),
-					! empty( $row['haskids'] ) ? esc_html( ' (anywhere)' ) : ''
-				);
-			}
-			echo '</select></p>';
+			// The organiser's room stays pressed: these guests are standing in it.
+			echo gasf_crm_door_place_tiles( $rows, $default, false ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
 		}
 	}
 
@@ -854,28 +889,18 @@ function gasf_crm_door_page( $door, $notice ) {
 		 *
 		 * No "not sure" option, deliberately. It was the path of least
 		 * resistance sitting above every real answer, and each shrug it
-		 * collected was a photo a volunteer had to place instead. The club
-		 * itself is the default: the overwhelmingly likely answer, and wrong in
-		 * a way that is cheap to correct.
+		 * collected was a photo a volunteer had to place instead. Nothing is
+		 * pressed to begin with (2.94.0): the club used to be, and nobody ever
+		 * changed it - see gasf_crm_door_place_tiles(). A blank is placed by a
+		 * volunteer, as every mis-defaulted photo was anyway.
+		 *
+		 * "Somewhere else" takes a typed answer, which is NOT turned into a
+		 * place on the spot - a guest guessing at a room name would quietly grow
+		 * the taxonomy a typo at a time. It travels as a note for whoever
+		 * reviews the photo, who can make it a real place or correct it.
 		 */
 		$rows = gasf_crm_door_onproperty();
-
-		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace">';
-		foreach ( $rows as $row ) {
-			printf(
-				'<option value="%s">%s%s%s</option>',
-				esc_attr( $row['term']->name ),
-				esc_html( str_repeat( "\xC2\xA0", 4 * min( 2, (int) $row['depth'] ) ) ),
-				esc_html( $row['term']->name ),
-				! empty( $row['haskids'] ) ? esc_html( ' (anywhere)' ) : ''
-			);
-		}
-		// Somewhere the club has no term for yet. Typed answers are NOT turned
-		// into places on the spot — a guest guessing at a room name would
-		// quietly grow the taxonomy a typo at a time. It travels as a note for
-		// whoever reviews the photo, who can make it a real place or correct it.
-		echo '<option value="__other">&mdash; somewhere else &mdash;</option>';
-		echo '</select></p>';
+		echo gasf_crm_door_place_tiles( $rows, '', true ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside
 
 		echo '<p id="pplaceotherwrap" hidden><label for="pplaceother">Where?</label><br>';
 		echo '<input type="text" id="pplaceother" maxlength="80" placeholder="A park, a hall, somebody&rsquo;s garden&hellip;" autocomplete="off"></p>';
@@ -1053,6 +1078,14 @@ function gasf_crm_door_styles() {
 		font:inherit;text-decoration:underline;cursor:pointer}
 	.gasf-door-entry .gasf-door-evlist{display:flex;flex-direction:column;gap:6px;margin:8px 0;max-width:420px}
 	.gasf-door-entry .gasf-door-evlist button{text-align:left;padding:9px 12px}
+	/* Place tiles: outlined pills, the pressed one solid; the "anywhere" and
+	   "somewhere else" ones dashed, so the rooms read as the real answers. */
+	.gasf-door-entry .gasf-door-places{display:flex;flex-wrap:wrap;gap:8px;max-width:420px;margin:6px 0 10px}
+	.gasf-door-entry .ptile{flex:0 0 auto;min-height:44px;padding:10px 16px;border-radius:22px;font-size:16px;
+		background:transparent;color:inherit;border:1px solid currentColor;opacity:.9}
+	.gasf-door-entry .ptile.any{border-style:dashed;opacity:.75}
+	.gasf-door-entry .ptile:hover:not([aria-pressed="true"]){background:rgba(127,127,127,.15)}
+	.gasf-door-entry .ptile[aria-pressed="true"]{background:#0f6e56;border:1px solid #0f6e56;color:#fff;opacity:1}
 	.gasf-door-entry .gasf-door-evlist button em{opacity:.8;font-style:normal}
 	.gasf-door-entry .gasf-door-evlist button[aria-pressed="true"]{outline:2px solid #c4eded;outline-offset:1px}
 	.gasf-door-entry .gasf-door-evnone{opacity:.75;font-size:.88em;margin:6px 0}
@@ -1270,16 +1303,29 @@ function gasf_crm_door_script( $party ) {
 		});
 	}
 
-	// "Somewhere else" reveals a box; anything else hides it, so a stale typed
-	// answer cannot be sent alongside a chosen one.
-	var placeSel = document.getElementById('pplace');
-	if (placeSel) {
-		placeSel.onchange = function(){
-			var other = placeSel.value === '__other';
-			document.getElementById('pplaceotherwrap').hidden = !other;
-			if (other) { document.getElementById('pplaceother').focus(); }
-			else { document.getElementById('pplaceother').value = ''; }
-		};
+	// The place is a row of tiles writing into #pplace. "Somewhere else"
+	// reveals a box; anything else hides it, so a stale typed answer cannot
+	// be sent alongside a chosen one.
+	var placeIn  = document.getElementById('pplace');
+	var placeBox = document.getElementById('pplaces');
+	function placeTiles(){ return placeBox ? placeBox.querySelectorAll('.ptile') : []; }
+	function setPlace(v){
+		if (!placeIn) { return; }
+		placeIn.value = v || '';
+		Array.prototype.forEach.call(placeTiles(), function(b){
+			b.setAttribute('aria-pressed', b.dataset.place === placeIn.value ? 'true' : 'false');
+		});
+		var other = placeIn.value === '__other';
+		var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = !other; }
+		var oi = document.getElementById('pplaceother');
+		if (oi) { if (other) { oi.focus(); } else { oi.value = ''; } }
+	}
+	function placeKnown(v){ return Array.prototype.some.call(placeTiles(), function(b){ return b.dataset.place === v; }); }
+	if (placeBox) {
+		placeBox.addEventListener('click', function(e){
+			var b = e.target.closest ? e.target.closest('.ptile') : null;
+			if (b) { setPlace(b.dataset.place); }
+		});
 	}
 
 	function placeAnswer(){
@@ -1429,7 +1475,7 @@ function gasf_crm_door_script( $party ) {
 		['pfrom', 'peventid', 'pplaceother'].concat(REMEMBER).forEach(function(id){
 			var e = document.getElementById(id); if (e) { e.value = ''; }
 		});
-		if (placeSel) { placeSel.selectedIndex = 0; }
+		setPlace(placeIn ? (placeIn.getAttribute('data-default') || '') : '');
 		var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
 		var n = document.getElementById('pmemnote'); if (n) { n.parentNode.removeChild(n); }
 		takenToday();
@@ -1456,13 +1502,10 @@ function gasf_crm_door_script( $party ) {
 			if (rec.event_id && EV.some(function(e){ return String(e.id) === String(rec.event_id) && e.title === rec.pevent; })) {
 				put('peventid', rec.event_id);
 			}
-			if (placeSel && rec.place && Array.prototype.some.call(placeSel.options, function(o){ return o.value === rec.place; })) {
-				placeSel.value = rec.place;
+			if (placeIn && rec.place && placeKnown(rec.place)) {
+				setPlace(rec.place);
 				filled = true;
-				if (rec.place === '__other') {
-					var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = false; }
-					put('pplaceother', rec.place_other);
-				}
+				if (rec.place === '__other') { put('pplaceother', rec.place_other); }
 			}
 		}
 

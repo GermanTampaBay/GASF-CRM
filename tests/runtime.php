@@ -679,6 +679,32 @@ final class GASF_CRM_Selftest {
 		$this->ok( 'permission, names, or title changed' === gasf_crm_backup_needed( $id ), 'sidecar: a consent decision with no revision bump still re-mirrors it' );
 	}
 
+	/** The place is tiles to tap, rooms first, nothing pressed on the year-round door. */
+	public function test_door_place_tiles() {
+		$row = function ( $name, $depth, $kids ) { $t = new stdClass(); $t->name = $name; return array( 'term' => $t, 'depth' => $depth, 'haskids' => $kids ); };
+		$rows = array( $row( 'Club &amp; Co', 0, true ), $row( 'Garden', 1, true ), $row( 'Hut', 2, false ), $row( 'Hall', 1, false ), $row( 'Welton', 0, false ) );
+
+		$html = gasf_crm_door_place_tiles( $rows, '', true );
+		preg_match_all( '~data-place="([^"]*)"~', $html, $m );
+		$this->ok( array( 'Garden', 'Hut', 'Hall', 'Club &amp;amp; Co', 'Welton', '__other' ) === $m[1],
+			'place tiles: rooms first, then anywhere at the club, then Welton, then somewhere else' );
+		$this->ok( false === strpos( $html, '<select' ) && false !== strpos( $html, 'id="pplace" value=""' ),
+			'place tiles: no menu, and nothing chosen to begin with on the year-round door' );
+		$this->ok( false === strpos( $html, 'aria-pressed="true"' ), 'place tiles: no tile reads as already answered' );
+		$this->ok( false !== strpos( $html, '>Anywhere at the club<' ) && false !== strpos( $html, '>Somewhere else<' ),
+			'place tiles: the two shrugs are offered, after the real answers' );
+
+		$party = gasf_crm_door_place_tiles( $rows, 'Hall', false );
+		$this->ok( false !== strpos( $party, 'data-place="Hall" aria-pressed="true"' ) && false !== strpos( $party, 'value="Hall" data-default="Hall"' ),
+			'place tiles: a party link keeps its room pressed' );
+		$this->ok( false === strpos( $party, '__other' ), 'place tiles: a party door offers nowhere off the grounds' );
+
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false === strpos( $door, "placeSel" ) && false !== strpos( $door, "setPlace(placeIn ? (placeIn.getAttribute('data-default') || '') : '');" ),
+			'place tiles: clearing the form returns a party door to its room and a year-round door to nothing' );
+		$this->ok( false !== strpos( $door, "' with no place given'" ), 'place tiles: the log says which tile was tapped, or that none was' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
