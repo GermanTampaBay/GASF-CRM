@@ -686,7 +686,7 @@ final class GASF_CRM_Selftest {
 
 		$html = gasf_crm_door_place_tiles( $rows, '', true );
 		preg_match_all( '~data-place="([^"]*)"~', $html, $m );
-		$this->ok( array( 'Garden', 'Hut', 'Hall', 'Club &amp;amp; Co', 'Welton', '__other' ) === $m[1],
+		$this->ok( array( 'Garden', 'Hut', 'Hall', 'Club &amp; Co', 'Welton', '__other' ) === $m[1],
 			'place tiles: rooms first, then anywhere at the club, then Welton, then somewhere else' );
 		$this->ok( false === strpos( $html, '<select' ) && false !== strpos( $html, 'id="pplace" value=""' ),
 			'place tiles: no menu, and nothing chosen to begin with on the year-round door' );
