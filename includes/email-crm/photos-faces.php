@@ -1837,6 +1837,21 @@ function gasf_crm_faces_unlock( $attachment_id, $kind, $token ) {
 	delete_post_meta( $id, $key );
 }
 
+/**
+ * Is this result the one already on record? If so the photo has been looked
+ * at, and says so: a rescan that cleared the stamp but not the digest left
+ * every unchanged photo re-queued forever, because the stamp is written by
+ * the store that this short-circuits.
+ */
+function gasf_crm_faces_scan_unchanged( $attachment_id, $digest, $prev ) {
+	$id = (int) $attachment_id;
+	if ( '' === (string) $digest || ! hash_equals( (string) $prev, (string) $digest ) ) { return false; }
+	if ( ! metadata_exists( 'post', $id, '_gasf_face_scanned' ) ) {
+		update_post_meta( $id, '_gasf_face_scanned', current_time( 'mysql', true ) );
+	}
+	return true;
+}
+
 function gasf_crm_faces_scan_digest( array $item ) {
 	$id    = (int) ( $item['id'] ?? 0 );
 	$found = (int) ( $item['found'] ?? 0 );
@@ -2242,7 +2257,7 @@ add_action( 'rest_api_init', function () {
 				try {
 					$digest = gasf_crm_faces_scan_digest( $item );
 					$prev   = (string) get_post_meta( $id, '_gasf_face_scan_digest', true );
-					if ( '' !== $digest && hash_equals( $prev, $digest ) ) {
+					if ( gasf_crm_faces_scan_unchanged( $id, $digest, $prev ) ) {
 						$same++;
 						$seen++;
 						$processed_ids[] = $id;
@@ -3050,6 +3065,10 @@ function gasf_crm_faces_admin_handle( $act ) {
 	if ( 'faces_rescan' === $act ) {
 		global $wpdb;
 		$n = $wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scanned'" ); // phpcs:ignore WordPress.DB
+		// The digest too. With the stamp gone and the digest kept, a photo whose
+		// result came back identical (every photo with no faces) was skipped
+		// before the stamp could be rewritten, and re-queued on every poll.
+		$wpdb->query( "DELETE FROM {$wpdb->postmeta} WHERE meta_key = '_gasf_face_scan_digest'" ); // phpcs:ignore WordPress.DB
 		$caption_ids = get_posts( array(
 			'post_type'      => 'attachment',
 			'post_status'    => array( 'inherit', 'private' ),

@@ -386,6 +386,14 @@ function gasf_crm_photo_consent_record( $attachment_id, $decision, $note ) {
 	if ( ! $id || 'attachment' !== get_post_type( $id ) ) {
 		return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 	}
+	// The club's photos only: in the library, or on the way in (an upload or
+	// door photo carries its provenance from the instant its row exists). A
+	// "refuse" unpublishes and moves the file into the private root, which
+	// must not be reachable for a theme image or a sponsor logo by posting
+	// its id. Save and delete have had this gate all along.
+	if ( ! gasf_crm_photo_in_library( $id ) && ! is_array( get_post_meta( $id, '_gasf_photo_source', true ) ) ) {
+		return new WP_Error( 'gasf_crm_notlib', 'That is not one of the club\'s photos.', array( 'status' => 404 ) );
+	}
 	if ( ! gasf_crm_user_can_stream( 'photos' ) ) {
 		return new WP_Error( 'gasf_crm_403', 'You do not have access to photo submissions.', array( 'status' => 403 ) );
 	}

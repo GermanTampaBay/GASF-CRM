@@ -376,6 +376,12 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 
 		@unlink( $f['tmp_name'] ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		$f['tmp_name'] = $jtmp;
+		// Reaped whatever path returns: every refusal below this point used to
+		// leave the converted JPEG in the system temp dir. On success the
+		// sideload has moved it, and there is nothing left to remove.
+		register_shutdown_function( function () use ( $jtmp ) {
+			if ( is_file( $jtmp ) ) { @unlink( $jtmp ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+		} );
 		$f['size']     = (int) filesize( $jtmp );
 		$f['type']     = 'image/jpeg';
 		$name          = preg_replace( '~\.[a-z0-9]+$~i', '', $name ) . '.jpg';
@@ -634,7 +640,12 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 */
 	$optimiser_back = gasf_crm_photo_host_optimiser_off();
 	try {
-		if ( ! empty( $in['sideload'] ) ) {
+		// A converted file is no longer the uploaded file: media_handle_upload
+		// reads the GLOBAL $_FILES, whose temp file the converter has just
+		// replaced, and is_uploaded_file() refuses the JPEG. Until 2.92.0 no
+		// real .heic could land this way; it was hidden because iPhones send
+		// JPEG. The converted file takes the sideload path, like Google Photos.
+		if ( ! empty( $in['sideload'] ) || $isConvert ) {
 			$id = media_handle_sideload(
 				array( 'name' => $f['name'], 'tmp_name' => $f['tmp_name'] ),
 				0,
@@ -698,6 +709,25 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	// three steps further down, against a post that is no longer there.
 	if ( ! get_post( $id ) ) {
 		return new WP_Error( 'gasf_crm_gone', $name . ' was removed while it was still being processed. Please try it again.', array( 'status' => 500 ) );
+	}
+
+	/*
+	 * Clean BEFORE permission is recorded, so a photo that stays private -
+	 * limited, refused, or held for a volunteer - is as free of GPS as one
+	 * that publishes. Until 2.92.0 only publish() scrubbed, so the private
+	 * store, the kiosk at full size, the download button, and the backup all
+	 * carried the camera's coordinates for exactly the photos whose permission
+	 * was most restricted. Nothing is lost: the EXIF this plugin wants is
+	 * already in postmeta, read by the add_attachment hook inside the insert.
+	 * A photo whose data cannot be removed is not kept, as publish() refuses.
+	 */
+	if ( ! $isVideo ) {
+		$main  = get_attached_file( $id );
+		$clean = $main ? gasf_crm_photo_scrub( $main ) : true;
+		if ( is_wp_error( $clean ) ) {
+			wp_delete_attachment( $id, true );
+			return new WP_Error( 'gasf_crm_scrub', 'This photo carries hidden camera data that could not be removed, so it was not kept: ' . $clean->get_error_message(), array( 'status' => 500 ) );
+		}
 	}
 
 	// Permission, recorded the same way and against the same wording as a

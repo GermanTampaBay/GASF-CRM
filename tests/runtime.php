@@ -483,6 +483,108 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/** A real HEIC lands as a JPEG through the upload path (not only through the converter). */
+	public function test_heic_upload_lands() {
+		if ( ! class_exists( 'Imagick' ) || ! count( ( new Imagick() )->queryFormats( 'HEIC' ) ) ) {
+			$this->ok( true, 'heic upload: skipped, no HEIC support on this host' );
+			return;
+		}
+		$im = new Imagick(); $im->newImage( 64, 48, 'gray' ); $im->setImageFormat( 'heic' );
+		$tmp = wp_tempnam( 'st-land.heic' );
+		$im->writeImage( $tmp ); $im->destroy();
+		$r = gasf_crm_photo_upload_one(
+			array( 'name' => 'st-land.heic', 'type' => 'image/heic', 'tmp_name' => $tmp, 'error' => 0, 'size' => filesize( $tmp ) ),
+			array( 'note' => 'selftest', 'consent_scope' => 'limited' ) );
+		$id = is_array( $r ) ? (int) ( $r['id'] ?? 0 ) : 0;
+		if ( $id ) { $this->made[] = $id; }
+		$this->ok( $id > 0, 'heic upload: a converted file is sideloaded and lands as a photo' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
+		$this->ok( $id && 'image/jpeg' === get_post_mime_type( $id ), 'heic upload: as a JPEG' );
+		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/** A photo that stays private is scrubbed on the way in, not only when published. */
+	public function test_scrub_at_intake() {
+		$bytes = $this->jpeg_with_gps();
+		$tmp   = wp_tempnam( 'st-gps-in.jpg' );
+		file_put_contents( $tmp, $bytes );
+		$this->ok( gasf_crm_photo_has_metadata( $tmp ), 'scrub at intake: the fixture carries metadata before upload' );
+		$r  = gasf_crm_photo_upload_one(
+			array( 'name' => 'st-gps-in.jpg', 'type' => 'image/jpeg', 'tmp_name' => $tmp, 'error' => 0, 'size' => strlen( $bytes ) ),
+			array( 'note' => 'selftest', 'consent_scope' => 'limited' ) );
+		$id = is_array( $r ) ? (int) ( $r['id'] ?? 0 ) : 0;
+		if ( $id ) { $this->made[] = $id; }
+		$this->ok( $id > 0, 'scrub at intake: the limited upload landed' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
+		$path = $id ? get_attached_file( $id ) : '';
+		$this->ok( $id && gasf_crm_photo_is_private( $id ), 'scrub at intake: and stayed private' );
+		$this->ok( $path && is_file( $path ) && ! gasf_crm_photo_has_metadata( $path ),
+			'scrub at intake: the private file carries no camera metadata' );
+		@unlink( $tmp ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/** The backup never mirrors a mass deletion it cannot believe. */
+	public function test_backup_deletion_floor() {
+		$this->ok( ! gasf_crm_backup_deletions_allowed( 5000, 0, 5000 ), 'backup floor: an empty library read deletes nothing' );
+		$this->ok( ! gasf_crm_backup_deletions_allowed( 5000, 4000, 1000 ), 'backup floor: a thousand photos gone at once is refused' );
+		$this->ok( gasf_crm_backup_deletions_allowed( 5000, 4990, 10 ), 'backup floor: a normal tidy-up is mirrored' );
+		$this->ok( gasf_crm_backup_deletions_allowed( 5000, 4800, 200 ), 'backup floor: up to five percent of the index is believed' );
+		$this->ok( ! gasf_crm_backup_deletions_allowed( 5000, 4700, 300 ), 'backup floor: past five percent is not' );
+		$this->ok( gasf_crm_backup_deletions_allowed( 100, 90, 10 ), 'backup floor: a small archive may still lose up to 25' );
+		$this->ok( gasf_crm_backup_deletions_allowed( 0, 0, 0 ), 'backup floor: nothing to delete is always fine' );
+	}
+
+	/** A current photo is recognised by size and mtime, without hashing it. */
+	public function test_backup_stat_before_md5() {
+		$id   = $this->library_photo( 'st-stat' );
+		$file = get_attached_file( $id );
+		clearstatcache( true, $file );
+		update_post_meta( $id, '_gasf_photo_backup', array(
+			'at'    => gmdate( 'c' ),
+			'rev'   => (int) get_post_meta( $id, '_gasf_photo_rev', true ),
+			'md5'   => 'not-the-real-hash',
+			'size'  => (int) filesize( $file ),
+			'mtime' => (int) filemtime( $file ),
+			'name'  => gasf_crm_backup_name( $id, $file ),
+			'items' => array( 'img' => 'x', 'json' => 'y' ),
+		) );
+		$this->ok( '' === gasf_crm_backup_needed( $id ), 'backup stat: matching size and mtime mean no hash is taken' );
+		$st = get_post_meta( $id, '_gasf_photo_backup', true );
+		$st['size'] = $st['size'] + 1;
+		update_post_meta( $id, '_gasf_photo_backup', $st );
+		$this->ok( 'file content changed' === gasf_crm_backup_needed( $id ), 'backup stat: a size change falls through to the hash, which disagrees' );
+	}
+
+	/** Consent decisions reach only the club's photos. */
+	public function test_consent_route_is_library_only() {
+		$lib = $this->library_photo( 'st-consent-lib' );
+		$r   = gasf_crm_photo_consent_record( $lib, 'grant', 'selftest' );
+		$this->ok( ! ( is_wp_error( $r ) && 'gasf_crm_notlib' === $r->get_error_code() ), 'consent gate: a library photo passes the gate' );
+
+		$dir  = wp_upload_dir();
+		$name = 'st-notlib-' . wp_rand() . '.jpg';
+		file_put_contents( trailingslashit( $dir['path'] ) . $name, $this->jpeg_bytes() );
+		$other = wp_insert_attachment( array( 'post_title' => 'st-notlib', 'post_mime_type' => 'image/jpeg', 'post_status' => 'inherit' ), trailingslashit( $dir['path'] ) . $name );
+		update_post_meta( $other, '_wp_attached_file', ltrim( trailingslashit( ltrim( (string) $dir['subdir'], '/' ) ) . $name, '/' ) );
+		$this->made[] = $other;
+		$r = gasf_crm_photo_consent_record( $other, 'refuse', 'selftest' );
+		$this->ok( is_wp_error( $r ) && 'gasf_crm_notlib' === $r->get_error_code(), 'consent gate: an attachment that is not a club photo is refused' );
+		$this->ok( ! gasf_crm_photo_is_private( $other ) && 'inherit' === get_post_status( $other ), 'consent gate: and nothing was moved or hidden' );
+	}
+
+	/** An unchanged scan result still counts as "looked at" after a rescan cleared the stamp. */
+	public function test_rescan_restamps() {
+		$id   = $this->library_photo( 'st-rescan' );
+		$item = array( 'id' => $id, 'found' => 0, 'faces' => array(), 'boxes' => array() );
+		$d    = gasf_crm_faces_scan_digest( $item );
+		update_post_meta( $id, '_gasf_face_scan_digest', $d );
+		delete_post_meta( $id, '_gasf_face_scanned' );
+		$this->ok( gasf_crm_faces_scan_unchanged( $id, $d, $d ), 'rescan: an identical result is recognised' );
+		$this->ok( metadata_exists( 'post', $id, '_gasf_face_scanned' ), 'rescan: and the photo is stamped as looked at again' );
+		$this->ok( ! gasf_crm_faces_scan_unchanged( $id, $d, 'other' ), 'rescan: a different result is not' );
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-faces.php' );
+		$this->ok( false !== strpos( $src, "WHERE meta_key = '_gasf_face_scan_digest'\" ); // phpcs:ignore" ),
+			'rescan: "Rescan everything" clears the digest as well as the stamp' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

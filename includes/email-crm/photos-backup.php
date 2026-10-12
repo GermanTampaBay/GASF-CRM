@@ -33,6 +33,24 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
 
 /** One run will not upload more than this many items or this many bytes. */
 define( 'GASF_CRM_BACKUP_MAX_ITEMS', 25 );
+
+/**
+ * May this pass mirror this many deletions?
+ *
+ * The library list comes from one query; an empty or short answer (a DB
+ * hiccup, a half-loaded module, a bad deploy) used to read as "everything
+ * was deleted", and the pass obligingly removed every remote copy and
+ * wiped the index - the archive deleting itself, with the re-upload taking
+ * days. A clear-out of more than 25 photos or 5% of the index in one
+ * quarter-hour is not something volunteers do; it is refused, logged, and
+ * counted as a failure so the admin banner shows.
+ */
+function gasf_crm_backup_deletions_allowed( $index_count, $live_count, $gone_count ) {
+	$index_count = (int) $index_count; $live_count = (int) $live_count; $gone_count = (int) $gone_count;
+	if ( $gone_count <= 0 ) { return true; }
+	if ( $live_count <= 0 ) { return false; }
+	return $gone_count <= max( 25, (int) ceil( $index_count * 0.05 ) );
+}
 define( 'GASF_CRM_BACKUP_MAX_BYTES', 250 * MB_IN_BYTES );
 
 /** Graph upload sessions are mandatory over 4 MB; chunks must be 320 KiB multiples. */
@@ -366,7 +384,14 @@ function gasf_crm_backup_needed( $id ) {
 		if ( gasf_crm_backup_name( $id, $file ) !== (string) ( $state['name'] ?? '' ) ) {
 			return 'archive name changed';
 		}
-		if ( md5_file( $file ) !== (string) ( $state['md5'] ?? '' ) ) {
+		// Size and mtime first. A clean pass used to md5 every photo in the
+		// library every fifteen minutes - gigabytes of reads inside the one cron
+		// process the host's CPU kill has already hit. Hash only what moved.
+		clearstatcache( true, $file );
+		$same_stat = isset( $state['size'], $state['mtime'] )
+			&& (int) $state['size'] === (int) filesize( $file )
+			&& (int) $state['mtime'] === (int) filemtime( $file );
+		if ( ! $same_stat && md5_file( $file ) !== (string) ( $state['md5'] ?? '' ) ) {
 			return 'file content changed';
 		}
 		// An edited photo is not backed up until its ORIGINAL is. The record
@@ -463,6 +488,8 @@ function gasf_crm_backup_one( $id ) {
 		'at'     => gmdate( 'c' ),
 		'rev'    => (int) get_post_meta( $id, '_gasf_photo_rev', true ),
 		'md5'    => md5_file( $file ),
+		'size'   => (int) filesize( $file ),
+		'mtime'  => (int) filemtime( $file ),
 		'name'   => $name,
 		'folder' => $folder,
 		'items'  => array_filter( array(
@@ -645,8 +672,19 @@ function gasf_crm_backup_run( $dry = false ) {
 
 		$index = (array) get_option( 'gasf_crm_backup_index', array() );
 		$live  = array_flip( array_map( 'intval', $ids ) );
+		$gone  = array();
 		foreach ( $index as $pid => $entry ) {
-			if ( isset( $live[ (int) $pid ] ) ) { continue; }
+			if ( ! isset( $live[ (int) $pid ] ) ) { $gone[] = $pid; }
+		}
+		if ( ! gasf_crm_backup_deletions_allowed( count( $index ), count( $ids ), count( $gone ) ) ) {
+			$last_error = sprintf( 'refused to mirror %d deletion(s): the library reported %d photo(s) against %d in the index, which looks like a failed read, not a clear-out',
+				count( $gone ), count( $ids ), count( $index ) );
+			gasf_crm_log( 'Backup: ' . $last_error );
+			$fail++;
+			$gone = array();
+		}
+		foreach ( $gone as $pid ) {
+			$entry = $index[ $pid ];
 			// The index entry goes either way — the photo has left the
 			// library and must not be re-uploaded — but what could not be
 			// deleted is queued rather than forgotten.
