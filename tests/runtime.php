@@ -1192,11 +1192,11 @@ final class GASF_CRM_Selftest {
 		$back();
 		$this->ok( $before === $count(), 'optimiser: and every one is back afterwards, so blog uploads keep it' );
 
+		// The email intake was the fourth route until 2.90.0 removed it.
 		$up = (string) file_get_contents( GASF_CRM_DIR . '/photos-upload.php' );
-		$ph = (string) file_get_contents( GASF_CRM_DIR . '/photos.php' );
 		$this->ok(
-			3 <= substr_count( $up, 'gasf_crm_photo_host_optimiser_off()' ) && false !== strpos( $ph, 'gasf_crm_photo_host_optimiser_off()' ),
-			'optimiser: stepped aside on every intake route - upload, sideload, derivatives, and email'
+			3 <= substr_count( $up, 'gasf_crm_photo_host_optimiser_off()' ),
+			'optimiser: stepped aside on every intake route - upload, sideload, and derivatives'
 		);
 
 		// The derivative builds: one at a time, and never from a web request.
