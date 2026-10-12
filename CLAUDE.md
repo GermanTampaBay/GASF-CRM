@@ -112,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 825 assertions in 113 tests, run on the server against live
+- **`tests/runtime.php`** — 868 assertions in 116 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -183,7 +183,11 @@ club may keep it but never show it. **Enforced in the zip export.**
 orphans stuck past a day raise their own admin banner. Health alerts email the
 WP admins after 24h without a clean pass.
 
-**Face suggestions** (`photos-faces.php`, v2.15.0) — see below.
+**Face suggestions** (`photos-faces.php`, v2.15.0) — see below. Since 2.100.0
+every deleted image leaves a dated tombstone (`gasf_face_tombstones`, 180
+days) and the scanner asks `faces/tombstones?since=` before each learn, so a
+withdrawn photo stops being a reference. The suite's fixture deletions write
+tombstones too; that is harmless noise, not a bug.
 
 ---
 
@@ -295,9 +299,10 @@ architecture keeps that answer cheap to reverse. Board call.
    a real-world one — middle initial, genuine Sr./Jr. — reads better now that
    names appear in public titles. The principled fix is re-keying refs, labels,
    and rejections off term ids; not worth it at 127 people and zero collisions.
-10. **No near-duplicate detection** — dedup is exact-bytes only, so the same
-    photo re-encoded by WhatsApp arrives as new. And **no trash/undo**: every
-    delete is a force-delete.
+10. **No trash/undo**: every delete is a force-delete. (Near-duplicate
+    detection exists since 2.102.0: a 64-bit difference hash at intake, a
+    "looks like a copy of #N" note on the newer photo, `wp gasf-crm twins`
+    for what was already there. It notes; it never deletes.)
 11. **Half the library is still the host's compressed WebP** (2,746 of 5,205 on
     2026-10-05). Until v2.73.0 Bluehost's optimiser *replaced* each upload with
     `<name>-compressed.webp` and left the JPEG original unlinked beside it. New
@@ -428,12 +433,12 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.99.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.102.1** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
 The face scanner has its own: `SCANNER_VERSION` near the top of
-`tools/face-scanner/scan.py` (1.8.1 as of its description no longer claiming it never tags), shown at the
+`tools/face-scanner/scan.py` (1.9.0 as of forgetting photos the server has deleted), shown at the
 top of the launcher's *Advanced settings* and by `scan.py --version`. Bump it
 with every change to that folder; it is the only way to tell from the scanning
 PC which copy is running. The `1.3` in its `USER_AGENT` is a fixed string

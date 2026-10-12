@@ -458,7 +458,10 @@ function gasf_crm_photo_dhash_missing( $limit = 60, array $only = array() ) {
  * looking for twins among what is already there - that is `wp gasf-crm
  * twins`, run once, by a person, because the answer is a list of deletions.
  */
-function gasf_crm_photo_dhash_sweep( $limit = 60, $own_cpu = 30, $process_cpu = 75, array $only = array() ) {
+// Four hundred a run: forty real photos cost 0.56 s of CPU from their medium
+// derivatives, so the CPU guard, not the count, is what stops a batch that
+// has to fall back to full files.
+function gasf_crm_photo_dhash_sweep( $limit = 400, $own_cpu = 30, $process_cpu = 75, array $only = array() ) {
 	$cpu = static function () {
 		$u = getrusage();
 		return (float) $u['ru_utime.tv_sec'] + (float) $u['ru_stime.tv_sec']
