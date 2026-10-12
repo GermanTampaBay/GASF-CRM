@@ -424,6 +424,28 @@ function gasf_crm_face_labels_served( $attachment_id ) {
 }
 
 /** Sanitized prediction history retained after suggestion chips disappear. */
+/**
+ * May the scanner be sent this photo at all?
+ *
+ * In the library, and one the club may show: a refused or withdrawn photo
+ * is not scanned, not offered for labelling, not learned from, and not
+ * streamed to the scanning PC. The one policy function answers, as it does
+ * for the kiosk - the scanner is a display the club does not look at.
+ */
+function gasf_crm_faces_photo_eligible( $attachment_id ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) { return false; }
+	return ! function_exists( 'gasf_crm_photo_may' ) || gasf_crm_photo_may( $id, 'kiosk' );
+}
+
+/** The same face, measured on pictures of possibly different sizes. */
+function gasf_crm_face_boxes_same( array $a, $aw, $ah, array $b, $bw, $bh, $min ) {
+	if ( (int) $aw > 0 && (int) $ah > 0 && (int) $bw > 0 && (int) $bh > 0 && function_exists( 'gasf_crm_face_box_overlap' ) ) {
+		return gasf_crm_face_box_overlap( $a, $aw, $ah, $b, $bw, $bh ) >= $min;
+	}
+	return gasf_crm_face_box_iou( $a, $b ) >= $min;
+}
+
 function gasf_crm_face_predictions_for( $attachment_id ) {
 	$id  = (int) $attachment_id;
 	$raw = get_post_meta( $id, '_gasf_face_predictions', true );
@@ -443,6 +465,8 @@ function gasf_crm_face_predictions_for( $attachment_id ) {
 			'canonical'   => $canonical,
 			'confidence'  => min( 100, max( 0, (int) ( $item['confidence'] ?? 0 ) ) ),
 			'box'         => array_values( $box ),
+			'iw'          => max( 0, (int) ( $item['iw'] ?? 0 ) ),
+			'ih'          => max( 0, (int) ( $item['ih'] ?? 0 ) ),
 			'outcome'     => $outcome,
 			'recorded_at' => trim( sanitize_text_field( (string) ( $item['recorded_at'] ?? '' ) ) ),
 			'outcome_at'  => trim( sanitize_text_field( (string) ( $item['outcome_at'] ?? '' ) ) ),
@@ -483,11 +507,13 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 		if ( $confidence <= 1 ) { $confidence = (int) round( min( 1, max( 0, (float) ( $face['confidence'] ?? 0 ) ) ) * 100 ); }
 		$confidence = min( 100, max( 0, $confidence ) );
 		if ( '' === $canonical || 4 !== count( $box ) || $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+		$iw = max( 0, (int) ( $face['iw'] ?? 0 ) );
+		$ih = max( 0, (int) ( $face['ih'] ?? 0 ) );
 		$match = -1;
 		foreach ( $all as $i => $old ) {
 			if (
 				gasf_crm_face_name_same( $name, (string) ( $old['name'] ?? '' ) )
-				&& gasf_crm_face_box_iou( $box, (array) ( $old['box'] ?? array() ) ) >= 0.35
+				&& gasf_crm_face_boxes_same( $box, $iw, $ih, (array) ( $old['box'] ?? array() ), (int) ( $old['iw'] ?? 0 ), (int) ( $old['ih'] ?? 0 ), 0.35 )
 			) {
 				$match = $i;
 				break;
@@ -500,6 +526,8 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 				$updated['canonical'] = $canonical;
 				$updated['confidence'] = $confidence;
 				$updated['box'] = array_values( $box );
+				$updated['iw']  = $iw;
+				$updated['ih']  = $ih;
 				if ( $updated !== $all[ $match ] ) {
 					$all[ $match ] = $updated;
 					$changed++;
@@ -513,6 +541,8 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 			'name'        => $name,
 			'canonical'   => $canonical,
 			'confidence'  => $confidence,
+			'iw'          => $iw,
+			'ih'          => $ih,
 			'box'         => array_values( $box ),
 			'outcome'     => 'pending',
 			'recorded_at' => current_time( 'mysql', true ),
@@ -528,7 +558,7 @@ function gasf_crm_face_predictions_record( $attachment_id, array $faces ) {
 }
 
 /** Apply an explicit box-level positive or photo/person rejection outcome. */
-function gasf_crm_face_prediction_outcome( $attachment_id, $name, $outcome, $box = null ) {
+function gasf_crm_face_prediction_outcome( $attachment_id, $name, $outcome, $box = null, $iw = 0, $ih = 0 ) {
 	$id = (int) $attachment_id;
 	$canonical = gasf_crm_face_canonical_key( $name );
 	$outcome = sanitize_key( (string) $outcome );
@@ -539,7 +569,7 @@ function gasf_crm_face_prediction_outcome( $attachment_id, $name, $outcome, $box
 	$changed = 0;
 	foreach ( $all as &$record ) {
 		if ( ! gasf_crm_face_name_same( $name, (string) ( $record['name'] ?? '' ) ) ) { continue; }
-		if ( $target && gasf_crm_face_box_iou( $target, (array) $record['box'] ) < 0.15 ) { continue; }
+		if ( $target && ! gasf_crm_face_boxes_same( $target, $iw, $ih, (array) $record['box'], (int) ( $record['iw'] ?? 0 ), (int) ( $record['ih'] ?? 0 ), 0.15 ) ) { continue; }
 		if ( $outcome === (string) $record['outcome'] ) { continue; }
 		$record['outcome'] = $outcome;
 		$record['outcome_at'] = current_time( 'mysql', true );
@@ -637,6 +667,8 @@ function gasf_crm_face_reference_shot( $person ) {
 	foreach ( (array) get_objects_in_term( array( (int) $term->term_id ), 'gasf_photo_person' ) as $pid ) {
 		$pid = (int) $pid;
 		if ( 'attachment' !== get_post_type( $pid ) ) { continue; }
+		// A face from a photo the club may not show is not the club's reference face.
+		if ( function_exists( 'gasf_crm_photo_may' ) && ! gasf_crm_photo_may( $pid, 'kiosk' ) ) { continue; }
 		$mine = array();
 		foreach ( gasf_crm_face_labels_for( $pid ) as $label ) {
 			if ( gasf_crm_face_name_same( $person, (string) $label['name'] ) ) { $mine[] = $label; }
@@ -1509,7 +1541,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 	if ( ! $next && ! $replace ) { return 0; }
 	if ( $human_verified ) {
 		foreach ( $next as $label ) {
-			gasf_crm_face_prediction_outcome( $id, $label['name'], 'positive', $label['box'] );
+			gasf_crm_face_prediction_outcome( $id, $label['name'], 'positive', $label['box'], $label['iw'], $label['ih'] );
 		}
 	}
 
@@ -1537,7 +1569,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 				&& ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] )
 			) {
 				// A different identity on the same reviewed box explicitly supersedes the old prediction.
-				gasf_crm_face_prediction_outcome( $id, $all[ $k ]['name'], 'negative', $all[ $k ]['box'] );
+				gasf_crm_face_prediction_outcome( $id, $all[ $k ]['name'], 'negative', $all[ $k ]['box'], (int) ( $all[ $k ]['iw'] ?? 0 ), (int) ( $all[ $k ]['ih'] ?? 0 ) );
 			}
 			if ( ! isset( $all[ $k ], $next[ $k ] ) || ! $same_name( $all[ $k ]['name'], $next[ $k ]['name'] ) ) {
 				$changed++;
@@ -1549,7 +1581,7 @@ function gasf_crm_face_labels_store( $attachment_id, array $labels, $replace = f
 			$old = isset( $all[ $k ] ) ? (string) ( $all[ $k ]['name'] ?? '' ) : '';
 			if ( ! isset( $all[ $k ] ) || ! $same_name( $old, $v['name'] ) ) {
 				if ( $human_verified && '' !== $old ) {
-					gasf_crm_face_prediction_outcome( $id, $old, 'negative', $v['box'] );
+					gasf_crm_face_prediction_outcome( $id, $old, 'negative', $v['box'], $v['iw'], $v['ih'] );
 				}
 				$all[ $k ] = $v;
 				$changed++;
@@ -1886,7 +1918,7 @@ function gasf_crm_faces_try_lock( $attachment_id, $kind, $ttl = 300 ) {
 	$id   = (int) $attachment_id;
 	$kind = preg_replace( '/[^a-z0-9_-]/i', '', (string) $kind );
 	if ( ! $id || '' === $kind ) { return ''; }
-	if ( in_array( $kind, array( 'scan', 'label', 'reject', 'discover' ), true ) ) { $kind = 'write'; }
+	if ( in_array( $kind, array( 'scan', 'label', 'reject', 'discover', 'ignore', 'caption' ), true ) ) { $kind = 'write'; }
 
 	$key   = '_gasf_face_lock_' . $kind;
 	$token = wp_generate_uuid4();
@@ -1907,7 +1939,7 @@ function gasf_crm_faces_unlock( $attachment_id, $kind, $token ) {
 	$id   = (int) $attachment_id;
 	$kind = preg_replace( '/[^a-z0-9_-]/i', '', (string) $kind );
 	if ( ! $id || '' === $kind || '' === (string) $token ) { return; }
-	if ( in_array( $kind, array( 'scan', 'label', 'reject', 'discover' ), true ) ) { $kind = 'write'; }
+	if ( in_array( $kind, array( 'scan', 'label', 'reject', 'discover', 'ignore', 'caption' ), true ) ) { $kind = 'write'; }
 	$key  = '_gasf_face_lock_' . $kind;
 	$have = json_decode( (string) get_post_meta( $id, $key, true ), true );
 	if ( ! is_array( $have ) || (string) ( $have['token'] ?? '' ) !== (string) $token ) { return; }
@@ -2045,7 +2077,7 @@ function gasf_crm_faces_metrics_build( $sample_limit = 150 ) {
 	foreach ( (array) $ids as $id ) {
 		$id = (int) $id;
 		if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
-		if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+		if ( ! gasf_crm_faces_photo_eligible( $id ) ) { continue; }
 		$s = gasf_crm_faces_photo_state( $id );
 		$out['total']++;
 		$out['states'][ $s['state'] ] = (int) ( $out['states'][ $s['state'] ] ?? 0 ) + 1;
@@ -2252,7 +2284,7 @@ add_action( 'rest_api_init', function () {
 			$out = array();
 			foreach ( $ids as $id ) {
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
-				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+				if ( ! gasf_crm_faces_photo_eligible( $id ) ) { continue; }
 				$needs_faces = ! metadata_exists( 'post', $id, '_gasf_face_scanned' );
 				$needs_caption = '' !== $caption_key && (
 					$needs_faces
@@ -2303,7 +2335,7 @@ add_action( 'rest_api_init', function () {
 		'permission_callback' => $guard,
 		'callback'            => function ( WP_REST_Request $req ) {
 			$id = (int) $req->get_param( 'photo' );
-			if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) {
+			if ( ! $id || ! gasf_crm_faces_photo_eligible( $id ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
 			$size = (string) $req->get_param( 'size' );
@@ -2820,7 +2852,7 @@ add_action( 'rest_api_init', function () {
 			$out = array();
 			foreach ( $ids as $id ) {
 				if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
-				if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+				if ( ! gasf_crm_faces_photo_eligible( $id ) ) { continue; }
 				$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );
 				$served = gasf_crm_face_labels_served( $id );
 				$out[] = array(
@@ -2970,7 +3002,7 @@ add_action( 'rest_api_init', function () {
 						$modified = (string) get_post_field( 'post_date_gmt', $id );
 					}
 					if ( get_post_meta( $id, '_gasf_photo_flyer', true ) ) { continue; }
-					if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
+					if ( ! gasf_crm_faces_photo_eligible( $id ) ) { continue; }
 					$served = gasf_crm_face_labels_served( $id );
 					$labels = $served['labels'];
 					$people = gasf_crm_photo_term_names( $id, 'gasf_photo_person' );

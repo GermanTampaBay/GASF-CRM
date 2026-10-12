@@ -1421,6 +1421,23 @@ JS;
 	 * thumbnail. This is where most of the benefit of "name the file properly"
 	 * lands, at no risk at all.
 	 */
+	/**
+	 * A photo's date as words, at the precision it was given: "1974", "March
+	 * 1982", or the full day in the site's date format. The three precisions
+	 * exist because that is how much people know about an old photo; feeding
+	 * "1982-03" to a date parser turned it into "March 1, 1982" in the public
+	 * title, and a bare year into whatever the parser made of it.
+	 */
+	function gasf_photo_taken_label( $taken ) {
+		$taken = trim( (string) $taken );
+		if ( preg_match( '~^(\d{4})$~', $taken ) ) { return $taken; }
+		if ( preg_match( '~^(\d{4})-(\d{2})$~', $taken, $m ) ) {
+			return wp_date( 'F Y', mktime( 12, 0, 0, (int) $m[2], 1, (int) $m[1] ) );
+		}
+		if ( preg_match( '~^\d{4}-\d{2}-\d{2}$~', $taken ) ) { return mysql2date( get_option( 'date_format' ), $taken . ' 00:00:00' ); }
+		return $taken;
+	}
+
 	function gasf_photo_title( $attachment_id ) {
 		$id    = (int) $attachment_id;
 		$info  = gasf_photo_info( $id );
@@ -1434,7 +1451,7 @@ JS;
 		$where = array_filter( array(
 			$place ? gasf_photo_label( $place->name ) : '',
 			! empty( $info['events'] ) ? gasf_photo_label( $info['events'][0] ) : '',
-			$info['taken'] ? mysql2date( get_option( 'date_format' ), $info['taken'] . ' 00:00:00' ) : '',
+			$info['taken'] ? gasf_photo_taken_label( $info['taken'] ) : '',
 		) );
 
 		if ( $who && $where ) { return implode( ', ', $who ) . ' — ' . implode( ', ', $where ); }

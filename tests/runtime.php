@@ -802,6 +802,61 @@ final class GASF_CRM_Selftest {
 			'door names: the server splits what arrives, and the browser says so and splits before sending' );
 	}
 
+	/** A photo's date is written at the precision it was given. */
+	public function test_taken_label() {
+		$this->ok( '1974' === gasf_photo_taken_label( '1974' ), 'taken label: a year is a year' );
+		$this->ok( 'March 1982' === gasf_photo_taken_label( '1982-03' ), 'taken label: a month is "March 1982", not the first of March' );
+		$this->ok( mysql2date( get_option( 'date_format' ), '2026-10-10 00:00:00' ) === gasf_photo_taken_label( '2026-10-10' ), 'taken label: a full day keeps the site format' );
+		$this->ok( '' === gasf_photo_taken_label( '' ), 'taken label: nothing is nothing' );
+		$src = (string) file_get_contents( dirname( GASF_CRM_DIR ) . '/photo-catalog.php' );
+		$this->ok( false !== strpos( $src, 'gasf_photo_taken_label( $info[\'taken\'] )' ) && false === strpos( $src, '$info[\'taken\'] . \' 00:00:00\'' ),
+			'taken label: the public title uses it' );
+	}
+
+	/** A thumbnail failure is tried again after a week, and only a real failure is a failure. */
+	public function test_sizes_retry() {
+		$id = $this->library_photo( 'st-sizes-retry' );
+		update_post_meta( $id, '_wp_attachment_metadata', array( 'width' => 120, 'height' => 90 ) );
+		$this->ok( in_array( $id, gasf_crm_photo_sizes_missing( 25, array( $id ) ), true ), 'sizes retry: a photo with no sizes is on the list' );
+		update_post_meta( $id, GASF_CRM_SIZES_TRIED, time() );
+		$this->ok( ! in_array( $id, gasf_crm_photo_sizes_missing( 25, array( $id ) ), true ), 'sizes retry: one tried just now is not' );
+		update_post_meta( $id, GASF_CRM_SIZES_TRIED, time() - GASF_CRM_SIZES_RETRY_AFTER - 60 );
+		$this->ok( in_array( $id, gasf_crm_photo_sizes_missing( 25, array( $id ) ), true ), 'sizes retry: one tried over a week ago is back on it' );
+		$up = (string) file_get_contents( GASF_CRM_DIR . '/photos-upload.php' );
+		$this->ok( false !== strpos( $up, 'if ( true === $ran && empty( $meta[\'sizes\'] ) )' ), 'sizes retry: only a generator that ran and produced nothing is stamped' );
+	}
+
+	/** The zip stores images rather than deflating them, counts every refusal, and stops under the CPU kill. */
+	public function test_zip_budget_and_count() {
+		$lib = (string) file_get_contents( GASF_CRM_DIR . '/photos-library.php' );
+		$this->ok( false !== strpos( $lib, 'ZipArchive::CM_STORE' ), 'zip: images are stored, not deflated' );
+		$this->ok( false === strpos( $lib, 'if ( gasf_crm_photo_is_private( $id ) ) { continue; } // not cleared for use' ), 'zip: no silent skip ahead of the permission count' );
+		$this->ok( false !== strpos( $lib, "'gasf_crm_zipbudget'" ) && false !== strpos( $lib, 'GASF_CRM_LIB_ZIP_CPU_BUDGET' ) && GASF_CRM_LIB_ZIP_CPU_BUDGET < 120, 'zip: a build gives up, out loud, short of the host kill' );
+	}
+
+	/** The scanner is fed only what the club may show, and the rest of the face records carry their sizes. */
+	public function test_scanner_feeds_respect_consent() {
+		$ok = $this->library_photo( 'st-feed-ok' );
+		$no = $this->library_photo( 'st-feed-refused' );
+		update_post_meta( $no, '_gasf_photo_consent', array( 'granted' => false, 'scope' => 'refused', 'at' => current_time( 'mysql', true ) ) );
+		$this->ok( gasf_crm_faces_photo_eligible( $ok ), 'scanner feeds: an ordinary library photo is offered' );
+		$this->ok( ! gasf_crm_faces_photo_eligible( $no ), 'scanner feeds: a refused photo is not' );
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-faces.php' );
+		$this->ok( 5 === substr_count( $src, 'gasf_crm_faces_photo_eligible( $id )' ), 'scanner feeds: the queue, its count, the label queue, the confirmed feed, and the image route all ask' );
+
+		// Locks: ignore and caption share the write lock with scan.
+		$lock = gasf_crm_faces_try_lock( $ok, 'scan' );
+		$ign  = gasf_crm_faces_try_lock( $ok, 'ignore' );
+		$cap  = gasf_crm_faces_try_lock( $ok, 'caption' );
+		gasf_crm_faces_unlock( $ok, 'scan', $lock );
+		$this->ok( '' !== $lock && '' === $ign && '' === $cap, 'scanner feeds: ignore and caption wait for a scan in progress' );
+
+		// A prediction measured on the large copy is matched by an outcome measured on the full one.
+		gasf_crm_face_predictions_record( $ok, array( array( 'name' => 'Selftest Pred', 'box' => array( 100, 100, 50, 50 ), 'confidence' => 70, 'iw' => 1024, 'ih' => 683 ) ) );
+		$n = gasf_crm_face_prediction_outcome( $ok, 'Selftest Pred', 'positive', array( 250, 250, 125, 125 ), 2560, 1707 );
+		$this->ok( 1 === $n, 'scanner feeds: a prediction and its outcome match across picture sizes' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

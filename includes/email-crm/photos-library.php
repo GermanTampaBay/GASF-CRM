@@ -35,6 +35,8 @@ define( 'GASF_CRM_LIB_PER_PAGE', 60 );
  */
 define( 'GASF_CRM_LIB_ZIP_MAX_FILES', 80 );
 define( 'GASF_CRM_LIB_ZIP_MAX_BYTES', 750 * MB_IN_BYTES );
+// Process CPU seconds at which a build gives up, under the host's 120 s kill.
+define( 'GASF_CRM_LIB_ZIP_CPU_BUDGET', 90 );
 
 /** How long a built zip stays downloadable before it is swept. */
 define( 'GASF_CRM_LIB_ZIP_TTL', 30 * MINUTE_IN_SECONDS );
@@ -749,7 +751,9 @@ function gasf_crm_photo_zip_build( array $ids, $convert = false ) {
 	$bytes   = 0;
 	foreach ( $ids as $id ) {
 		if ( 'attachment' !== get_post_type( $id ) ) { continue; }
-		if ( gasf_crm_photo_is_private( $id ) ) { continue; } // not cleared for use
+		// No silent skip of privately stored photos here: a limited-permission
+		// photo lives in the private store, and skipping it before the
+		// permission check left it out of the count that exists to name it.
 
 		// Recording a permission has to DO something, or it is a label rather
 		// than a decision — and a bulk download for the newsletter is exactly
@@ -824,8 +828,21 @@ function gasf_crm_photo_zip_build( array $ids, $convert = false ) {
 			}
 		}
 
+		// The host kills any process at 120 s of CPU, outright. Stop short of
+		// that and say so: a zip missing its last twenty photos with no word
+		// is the silent loss this build exists to avoid.
+		$ru  = getrusage();
+		$cpu = (float) $ru['ru_utime.tv_sec'] + (float) $ru['ru_stime.tv_sec'];
+		if ( $cpu >= GASF_CRM_LIB_ZIP_CPU_BUDGET ) {
+			$zip->close();
+			@unlink( $path ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			foreach ( $temps as $tmp ) { @unlink( $tmp ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			return new WP_Error( 'gasf_crm_zipbudget', 'That download would take longer than this server allows in one go. Narrow the filter, or take it in a couple of goes' . ( $convert ? ', or leave WebP as it is' : '' ) . '.' );
+		}
 		$written += (int) filesize( $src );
 		$zip->addFile( $src, $name );
+		// Already-compressed images gain nothing from deflate but CPU.
+		if ( method_exists( $zip, 'setCompressionName' ) ) { $zip->setCompressionName( $name, ZipArchive::CM_STORE ); }
 	}
 
 	$org  = sanitize_file_name( gasf_crm_cfg()['signature_org'] ?: 'photos' );

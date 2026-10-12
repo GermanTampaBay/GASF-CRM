@@ -157,6 +157,10 @@ function gasf_crm_photo_upload_build_derivatives( $attachment_id, $wait = 0 ) {
 		$optimiser_back();
 		$wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', 'gasf_crm_derivatives' ) );
 	}
+	// True means the generator actually ran. The sweep used to mark a photo
+	// "tried" whatever happened - a file briefly unreadable, a lock not had -
+	// and never looked at it again.
+	return true;
 }
 
 /** The build itself; only ever called holding the gasf_crm_derivatives lock. */
@@ -226,6 +230,7 @@ function gasf_crm_photo_upload_schedule_derivatives( $attachment_id ) {
  * an image too small to need any - so it cannot block the queue forever.
  */
 define( 'GASF_CRM_SIZES_TRIED', '_gasf_sizes_tried' );
+define( 'GASF_CRM_SIZES_RETRY_AFTER', 7 * DAY_IN_SECONDS );
 
 /** Club photos with no thumbnails, newest first. */
 function gasf_crm_photo_sizes_missing( $limit = 25, array $only = array() ) {
@@ -237,7 +242,7 @@ function gasf_crm_photo_sizes_missing( $limit = 25, array $only = array() ) {
 		   LEFT JOIN {$wpdb->postmeta} f ON f.post_id = p.ID AND f.meta_key = '_wp_attached_file'
 		  WHERE p.post_type = 'attachment' AND p.post_mime_type LIKE %s
 		    AND EXISTS ( SELECT 1 FROM {$wpdb->postmeta} g WHERE g.post_id = p.ID AND g.meta_key LIKE %s )
-		    AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} t WHERE t.post_id = p.ID AND t.meta_key = %s )
+		    AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} t WHERE t.post_id = p.ID AND t.meta_key = %s AND t.meta_value > %d )
 		    AND ( m.meta_value IS NULL OR m.meta_value NOT LIKE %s OR m.meta_value LIKE %s )
 		    AND NOT ( p.post_mime_type = 'image/webp' AND f.meta_value LIKE %s
 		              AND NOT EXISTS ( SELECT 1 FROM {$wpdb->postmeta} s WHERE s.post_id = p.ID AND s.meta_key = %s ) )
@@ -246,6 +251,9 @@ function gasf_crm_photo_sizes_missing( $limit = 25, array $only = array() ) {
 		'image/%',
 		$wpdb->esc_like( '_gasf_photo' ) . '%',
 		GASF_CRM_SIZES_TRIED,
+		// A failure is tried again after a week: Imagick memory, a file mid-move,
+		// a resizer that was busy - none of them is forever.
+		time() - GASF_CRM_SIZES_RETRY_AFTER,
 		'%' . $wpdb->esc_like( '"sizes";a:' ) . '%',
 		'%' . $wpdb->esc_like( '"sizes";a:0:' ) . '%',
 		'%' . $wpdb->esc_like( '-compressed.webp' ),
@@ -274,9 +282,12 @@ function gasf_crm_photo_sizes_sweep( $limit = 25, $own_cpu = 40, $process_cpu = 
 	foreach ( gasf_crm_photo_sizes_missing( $limit, $only ) as $id ) {
 		$now = $cpu();
 		if ( $now - $start >= $own_cpu || $now >= $process_cpu ) { break; }
-		if ( false === gasf_crm_photo_upload_build_derivatives( $id, 5 ) ) { break; } // resizer busy: next time
+		$ran = gasf_crm_photo_upload_build_derivatives( $id, 5 );
+		if ( false === $ran ) { break; } // resizer busy: next time
 		$meta = wp_get_attachment_metadata( $id );
-		if ( empty( $meta['sizes'] ) ) { update_post_meta( $id, GASF_CRM_SIZES_TRIED, time() ); }
+		// Stamped only when the generator ran and still produced nothing; the
+		// stamp itself expires after a week (see gasf_crm_photo_sizes_missing).
+		if ( true === $ran && empty( $meta['sizes'] ) ) { update_post_meta( $id, GASF_CRM_SIZES_TRIED, time() ); }
 		$n++;
 	}
 	if ( $n ) { gasf_crm_log( sprintf( 'CRM photos: thumbnail sweep worked on %d photo(s)', $n ) ); }
