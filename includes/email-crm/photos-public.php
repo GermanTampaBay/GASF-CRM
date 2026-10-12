@@ -786,7 +786,6 @@ function gasf_crm_door_page( $door, $notice ) {
 
 	// Above everything, because once the button is pressed this is the only
 	// question the submitter still has.
-	echo '<div id="pdone" class="gasf-door-done" role="status" aria-live="polite" hidden></div>';
 
 	if ( $party ) {
 		echo '<p>Took a good one tonight? Send it to the club and it goes up on the screen inside &mdash; and into the club&rsquo;s archive.</p>';
@@ -1048,8 +1047,6 @@ function gasf_crm_door_styles() {
 	   competing with Send. */
 	.gasf-door-entry .gasf-door-linkbtn{background:none;border:0;padding:0;color:inherit;
 		font:inherit;text-decoration:underline;cursor:pointer}
-	.gasf-door-entry .gasf-door-done{border:1px solid #0f6e56;border-left:5px solid #0f6e56;
-		border-radius:3px;padding:14px 16px;margin:0 0 18px;font-size:1.05em}
 	.gasf-door-entry .gasf-door-evlist{display:flex;flex-direction:column;gap:6px;margin:8px 0;max-width:420px}
 	.gasf-door-entry .gasf-door-evlist button{text-align:left;padding:9px 12px}
 	.gasf-door-entry .gasf-door-evlist button em{opacity:.8;font-style:normal}
@@ -1062,7 +1059,7 @@ function gasf_crm_door_styles() {
 	   see something is happening. Outside .gasf-door-entry because it covers
 	   the whole page. */
 	.gasf-wurst{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;
-		justify-content:center;gap:14px;background:rgba(15,25,22,.82);color:#fff;font-size:18px;text-align:center;padding:16px}
+		justify-content:center;gap:14px;background:rgba(15,25,22,.94);color:#fff;font-size:18px;text-align:center;padding:16px}
 	.gasf-wurst svg{width:150px;height:auto;overflow:visible}
 	.gasf-wurst .w-dance{transform-origin:60px 140px;animation:wurst-hop .7s ease-in-out infinite}
 	.gasf-wurst .w-arm-l{transform-origin:28px 70px;animation:wurst-wave .35s ease-in-out infinite alternate}
@@ -1073,6 +1070,14 @@ function gasf_crm_door_styles() {
 	@keyframes wurst-wave{from{transform:rotate(-35deg)}to{transform:rotate(25deg)}}
 	@keyframes wurst-kick{0%,100%{transform:rotate(0)}50%{transform:rotate(-30deg)}}
 	@media (prefers-reduced-motion:reduce){.gasf-wurst *{animation:none!important}}
+	.gasf-door-pop{position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;
+		background:rgba(15,25,22,.7);padding:16px}
+	.gasf-door-pop .pop-box{background:#fff;color:#1d2b27;border-top:6px solid #0f6e56;border-radius:6px;
+		max-width:360px;width:100%;padding:22px 20px 18px;text-align:center;box-shadow:0 18px 40px rgba(0,0,0,.4)}
+	.gasf-door-pop .pop-text{font-size:18px;line-height:1.45;margin:0 0 18px}
+	.gasf-door-pop .pop-ok{background:#0f6e56;color:#fff;border:1px solid #0f6e56;border-radius:3px;
+		font:inherit;font-size:17px;min-width:140px;min-height:44px;padding:10px 18px;cursor:pointer}
+	.gasf-door-pop .pop-ok:hover{background:#0c5a46}
 	@media (max-width:480px){
 		.gasf-door-entry .gasf-door-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}
 	}
@@ -1484,10 +1489,10 @@ function gasf_crm_door_script( $party ) {
 		wurst.setAttribute('aria-live', 'polite');
 		wurst.innerHTML =
 			'<svg viewBox="0 0 120 160" aria-hidden="true"><g class="w-dance">' +
-			'<g class="w-leg-l"><path d="M48 128 L42 150 L32 152" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
-			'<g class="w-leg-r"><path d="M72 128 L78 150 L88 152" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
-			'<g class="w-arm-l"><path d="M28 70 L10 56 L6 46" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
-			'<g class="w-arm-r"><path d="M92 70 L110 56 L114 46" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-leg-l"><path d="M48 128 L42 150 L32 152" stroke="#f3e3c8" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-leg-r"><path d="M72 128 L78 150 L88 152" stroke="#f3e3c8" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-arm-l"><path d="M28 70 L10 56 L6 46" stroke="#f3e3c8" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-arm-r"><path d="M92 70 L110 56 L114 46" stroke="#f3e3c8" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
 			'<rect x="26" y="8" width="68" height="126" rx="34" fill="#b8642c" stroke="#7a3d17" stroke-width="3"/>' +
 			'<path d="M38 96 L82 84 M38 112 L82 100 M40 80 L80 68" stroke="#7a3d17" stroke-width="3" stroke-linecap="round" opacity=".55"/>' +
 			'<path d="M44 20 Q52 28 46 36 Q40 44 50 52 Q60 60 52 68" stroke="#f2c230" stroke-width="5" fill="none" stroke-linecap="round"/>' +
@@ -1507,7 +1512,6 @@ function gasf_crm_door_script( $party ) {
 
 	function finish(ok, bad, held, why){
 		wurstOff();
-		var banner = document.getElementById('pdone');
 
 		// Before the boxes are emptied below, and from what was SENT.
 		if (ok && lastSent) { remember(lastSent); }
@@ -1529,27 +1533,47 @@ function gasf_crm_door_script( $party ) {
 		paint();
 		msg.textContent = '';
 
-		if (banner) {
-			/*
-			 * Say WHY, using the server's own words. The generic "please try
-			 * again in a moment" was worse than unhelpful for the commonest
-			 * failure there is: a photo already sent, where trying again is
-			 * guaranteed to fail the same way forever.
-			 */
-			banner.textContent = ok
-				? ok + ' photo' + (ok === 1 ? '' : 's') + ' sent — thank you!' +
-					(held ? ' Somebody from the club will take a look shortly.' : '') +
-					(bad ? ' ' + bad + ' could not be sent: ' + why : '')
-				: (why || 'Nothing was sent. Please try again in a moment.');
-			banner.hidden = false;
-			banner.scrollIntoView({ block: 'center' });
-		}
+		/*
+		 * Say WHY, using the server's own words. The generic "please try
+		 * again in a moment" was worse than unhelpful for the commonest
+		 * failure there is: a photo already sent, where trying again is
+		 * guaranteed to fail the same way forever.
+		 */
+		var text = ok
+			? ok + ' photo' + (ok === 1 ? '' : 's') + ' sent — thank you!' +
+				(held ? ' Somebody from the club will take a look shortly.' : '') +
+				(bad ? ' ' + bad + ' could not be sent: ' + why : '')
+			: (why || 'Nothing was sent. Please try again in a moment.');
+		// A clean success closes itself after five seconds. Anything that
+		// failed waits for OK, because it says what to do about it.
+		resultPop(text, ok && !bad);
+	}
+
+	/* The result, as a pop-up: a banner at the top of the page was easy to
+	   miss. Back to the landing page on OK, or by itself after 5 seconds. */
+	function resultPop(text, autoClose){
+		var old = document.querySelector('.gasf-door-pop'); if (old) { old.remove(); }
+		var pop = document.createElement('div');
+		pop.className = 'gasf-door-pop';
+		pop.setAttribute('role', 'alertdialog');
+		pop.setAttribute('aria-modal', 'true');
+		pop.innerHTML = '<div class="pop-box"><p class="pop-text"></p><button type="button" class="pop-ok">OK</button></div>';
+		pop.querySelector('.pop-text').textContent = text;
+		var timer = null;
+		var close = function(){
+			clearTimeout(timer);
+			if (pop.parentNode) { pop.remove(); }
+			window.scrollTo({ top: 0, behavior: 'smooth' });
+		};
+		pop.querySelector('.pop-ok').onclick = close;
+		pop.addEventListener('click', function(e){ if (e.target === pop) { close(); } });
+		document.body.appendChild(pop);
+		pop.querySelector('.pop-ok').focus();
+		if (autoClose) { timer = setTimeout(close, 5000); }
 	}
 
 	send.onclick = function(){
 		busy = true;
-		var top = document.getElementById('pdone');
-		if (top) { top.hidden = true; }
 		paint();
 
 		// Read the answers ONCE, before the first upload: they describe the
