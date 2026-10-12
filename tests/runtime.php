@@ -978,7 +978,7 @@ final class GASF_CRM_Selftest {
 		$this->ok( false !== strpos( $src, "'/crm/photos/faces/tombstones', array(\n\t\t'methods'             => 'GET',\n\t\t'permission_callback' => \$guard," ),
 			'tombstones: the route is behind the scanner key' );
 		$py = (string) file_get_contents( dirname( GASF_CRM_DIR, 2 ) . '/tools/face-scanner/scan.py' );
-		$this->ok( false !== strpos( $py, '    forget_deleted(api, conn, verbose)\n    beat = _HeartbeatTicker(' ) && false !== strpos( $py, 'removed += forget_photos(conn, [photo_id])' ),
+		$this->ok( false !== strpos( $py, "    forget_deleted(api, conn, verbose)\n    beat = _HeartbeatTicker(" ) && false !== strpos( $py, 'removed += forget_photos(conn, [photo_id])' ),
 			'tombstones: the scanner asks before every learn, and forgets a photo that vanishes mid-learn' );
 	}
 
