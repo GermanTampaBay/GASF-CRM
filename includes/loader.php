@@ -200,13 +200,6 @@ if ( true ) {
 			// Second watched mailbox. Blank disables the stream entirely rather
 			// than half-enabling it.
 			'mailbox_photos' => '',
-		// Take photos in and ask the sender about them without waiting for a
-		// volunteer. Somebody who bothered to send photos AND is willing to
-		// label them wants us to have them; making them wait days because
-		// nobody got round to pressing a button loses the one moment they were
-		// motivated. Approval still happens — afterwards, when there is
-		// something worth approving.
-		'photos_auto'    => 1,
 			'tenant_id'      => '',
 			'client_id'      => '',
 			'client_secret'  => '',
@@ -388,15 +381,6 @@ if ( true ) {
 			gasf_crm_log( 'CRM: dropped legacy global unique index ' . $index . ' on ' . $table );
 		}
 
-		// Give every photo taken in before the item table a claim of its own.
-		//
-		// Not optional and not deferrable: the intake sweep removes private
-		// images that nothing owns, so a photo left without an item row would be
-		// deleted by the next unattended run. Ordered after install_tables for
-		// the obvious reason and before the version stamp so a failure here is
-		// retried rather than recorded as done.
-		if ( function_exists( 'gasf_crm_photo_backfill' ) ) { gasf_crm_photo_backfill(); }
-
 		flush_rewrite_rules( false );
 
 		/*
@@ -505,19 +489,6 @@ if ( true ) {
 	} );
 	add_action( 'gasf_crm_sync_event', 'gasf_crm_sync' );
 
-	/**
-	 * Photo reminders ride the sync.
-	 *
-	 * Not because they belong together, but because the sync is the only thing
-	 * on this site with a real system cron behind it. WP-Cron fires on page
-	 * traffic, and a club site can sit idle overnight — a "two day" reminder
-	 * scheduled that way would go out whenever somebody next happened to visit.
-	 *
-	 * Running hourly costs one indexed query and the work is idempotent:
-	 * reminded_at is stamped before the send, so nothing is chased twice.
-	 */
-	add_action( 'gasf_crm_sync_event', 'gasf_crm_photo_autoprocess', 15 );
-	add_action( 'gasf_crm_sync_event', 'gasf_crm_photo_chase', 20 );
 	add_action( 'gasf_crm_sync_event', function () {
 		if ( function_exists( 'gasf_crm_case_release_stale_owners' ) ) {
 			gasf_crm_case_release_stale_owners( (int) GASF_CRM_CASE_OWNER_TIMEOUT_MINUTES );
@@ -525,18 +496,8 @@ if ( true ) {
 	}, 25 );
 
 	/**
-	 * The intake also runs on its OWN schedule, not only as a passenger on the
-	 * sync.
-	 *
-	 * Riding the sync means a message ingested by a run whose intake step has
-	 * already gone past — two overlapping cron invocations are enough — waits a
-	 * full hour for the next one. Somebody emails photos in and hears nothing
-	 * for an hour, which is exactly what sending automatically was meant to
-	 * stop. This is a catch-up: it costs one indexed query when there is
-	 * nothing to do, and the lock stops it colliding with the sync's copy.
-	 *
-	 * Every 15 minutes, not 10 (2.72.2): the host rate-limits the whole site,
-	 * and the photo jobs were two of the most frequent things asking.
+	 * The 15-minute photo housekeeping hook (origin pruning and the like).
+	 * Every 15 minutes, not 10 (2.72.2): the host rate-limits the whole site.
 	 */
 
 	/**
@@ -561,23 +522,13 @@ if ( true ) {
 	add_action( 'init', function () {
 		gasf_crm_cron_ensure( 'gasf_crm_photo_event', 60 );
 	} );
-	add_action( 'gasf_crm_photo_event', 'gasf_crm_photo_autoprocess' );
-
-	if ( defined( 'WP_CLI' ) && WP_CLI ) {
-		WP_CLI::add_command( 'gasf-crm photos', function () {
-			$n = gasf_crm_photo_autoprocess();
-			WP_CLI::success( sprintf( '%d photo(s) taken in.', (int) $n ) );
-		} );
-	}
 
 	if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		WP_CLI::add_command( 'gasf-crm sync', function () {
 			$r  = gasf_crm_sync();
-			$ph = function_exists( 'gasf_crm_photo_autoprocess' ) ? (int) gasf_crm_photo_autoprocess() : 0;
-			$ch = function_exists( 'gasf_crm_photo_chase' ) ? (int) gasf_crm_photo_chase() : 0;
 			WP_CLI::success( sprintf(
-				'%d new message(s), %d reopened, %d queued, %d announced, %d photo(s) taken in, %d reminder(s).',
-				$r['new'], $r['reopened'], $r['queued'], $r['notified'], $ph, $ch
+				'%d new message(s), %d reopened, %d queued, %d announced.',
+				$r['new'], $r['reopened'], $r['queued'], $r['notified']
 			) );
 		} );
 	}

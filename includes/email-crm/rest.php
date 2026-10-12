@@ -251,10 +251,6 @@ add_action( 'rest_api_init', function () {
 				'status'    => (string) $thread['status'],
 				'stream'    => $stream,
 				'mailbox'   => gasf_crm_stream_mailbox( $stream ),
-				// Photos kept from this submission, with whatever the sender has
-				// since told us about them. Always present, empty on a thread
-				// nobody has taken a photo from.
-				'photos'    => function_exists( 'gasf_crm_photo_thread_block' ) ? gasf_crm_photo_thread_block( $id ) : array(),
 				'can_reply' => (bool) $mine,
 				'locked_by' => ( ! $mine && $holder ) ? gasf_crm_display_name( $holder->ID ) : null,
 				'case'      => array(

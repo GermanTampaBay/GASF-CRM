@@ -53,7 +53,6 @@ const MUST_COVER = [
 	'includes/email-crm/ui-script.php',
 	'includes/email-crm/ui-styles.php',
 	'includes/email-crm/auth.php',
-	'includes/email-crm/photos-page.php',
 	'includes/email-crm/photos-public.php',
 	'includes/email-crm/admin.php',
 	'includes/email-crm/contracts.php',

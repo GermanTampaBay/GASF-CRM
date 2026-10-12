@@ -508,47 +508,6 @@ function gasf_crm_render_inbox() {
 	</div></div>
 	<?php endif; ?>
 
-<?php
-	// Somebody who filled in the tagging form was told a volunteer would check
-	// it over. This is where that becomes visible without having to guess which
-	// thread to reopen. Only shown to people who hold the photos stream, and
-	// only when there is genuinely something waiting.
-	if ( function_exists( 'gasf_crm_photo_actionable_threads' ) && gasf_crm_user_can_stream( 'photos' ) ) :
-		$waiting   = gasf_crm_photo_actionable_threads();
-		$described = array_sum( wp_list_pluck( $waiting, 'described' ) );
-		$released  = array_sum( wp_list_pluck( $waiting, 'released' ) );
-		if ( $described + $released ) : ?>
-	<div class="wrap"><div class="note ok" style="margin-top:16px">
-		<?php
-		// Two different jobs, said separately. "Check what they told us" and
-		// "nobody replied, work it out yourself" take different amounts of
-		// effort, and a single blended number tells you neither.
-		$bits = array();
-		if ( $described ) {
-			$bits[] = sprintf( '<strong>%d photo%s described by the sender</strong>, waiting for you to check',
-				(int) $described, 1 === (int) $described ? '' : 's' );
-		}
-		if ( $released ) {
-			$bits[] = sprintf( '<strong>%d photo%s the sender never replied about</strong>, now yours to label',
-				(int) $released, 1 === (int) $released ? '' : 's' );
-		}
-		echo wp_kses_post( ucfirst( implode( ', and ', $bits ) ) ) . '.';
-		?>
-		<div style="margin-top:8px">
-			<?php foreach ( $waiting as $tid => $n ) :
-				$th = gasf_crm_get_thread( (int) $tid );
-				if ( ! $th || ! gasf_crm_user_can_stream( (string) $th['stream'] ) ) { continue; } ?>
-				<button class="btn sec" data-openthread="<?php echo (int) $tid; ?>" style="margin:0 6px 6px 0">
-					<?php echo esc_html( $th['subject'] ? $th['subject'] : '(no subject)' ); ?>
-					&middot; <?php echo (int) ( $n['described'] + $n['released'] ); ?>
-				</button>
-			<?php endforeach; ?>
-		</div>
-	</div></div>
-		<?php endif;
-	endif;
-	?>
-
 <?php gasf_crm_render_help(); ?>
 
 <?php if ( gasf_crm_user_can_stream( 'photos' ) ) : ?>
@@ -559,15 +518,13 @@ function gasf_crm_render_inbox() {
 			<?php // than left for a volunteer to discover when approval refuses.  ?>
 			<div class="pane note err" style="margin:10px">
 				<strong>The Photo Catalogue is switched off.</strong>
-				Photos already here can still be looked at, but nothing can be approved,
-				no new submissions are being taken in, and the tagging links we have sent
-				will not open. Turn <em>Photo Catalogue</em> back on in GASF Utilities →
+				Photos already here can still be looked at, but nothing can be approved
+				or taken in. Turn <em>Photo Catalogue</em> back on in GASF Utilities →
 				Settings to resume.
 			</div>
 		<?php endif; ?>
 		<div class="tabs pstates">
 			<button class="on" data-pstate="review">Needs you</button>
-			<button data-pstate="waiting">With the sender</button>
 			<button data-pstate="done">Done</button>
 			<button data-pstate="all">All</button>
 		</div>

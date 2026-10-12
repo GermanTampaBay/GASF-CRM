@@ -1919,22 +1919,6 @@ final class GASF_CRM_Selftest {
 		foreach ( gasf_crm_door_onproperty() as $row ) { $on[] = html_entity_decode( $row['term']->name, ENT_QUOTES ); }
 		$this->ok( in_array( 'Welton Brewing Co & Oyster Bar', $on, true ), 'places: Welton is on-property for parties' );
 		$this->ok( ! in_array( 'England Brothers Park', $on, true ), 'places: England Brothers Park is not' );
-
-		// The tagging page offers the same short list, plus wherever the camera
-		// put one of the photos - read-only use of real terms, no writes.
-		$names = function ( $rows ) {
-			return array_map( function ( $r ) { return html_entity_decode( $r['term']->name, ENT_QUOTES ); }, $rows );
-		};
-		$home  = (int) gasf_photo_home_place();
-		$plain = $names( gasf_crm_photo_page_places( array( $home ), 0 ) );
-		$this->ok( in_array( 'Welton Brewing Co & Oyster Bar', $plain, true ) && ! in_array( 'England Brothers Park', $plain, true ),
-			'tagging page: the place list is the grounds and Welton, not every public place' );
-		$park = get_term_by( 'name', 'England Brothers Park', 'gasf_photo_place' );
-		if ( $park ) {
-			$geo = $names( gasf_crm_photo_page_places( array( $home, (int) $park->term_id ), (int) $park->term_id ) );
-			$this->ok( in_array( 'England Brothers Park', $geo, true ),
-				'tagging page: but a place the camera put a photo at stays offered, so it can be preselected' );
-		}
 	}
 
 	/**
@@ -3638,12 +3622,6 @@ final class GASF_CRM_Selftest {
 			'door: a picked photo can be removed before sending, but not while a batch is going' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
 			'door: names are optional on both doors, and the label says so on both' );
-
-		$page = (string) file_get_contents( GASF_CRM_DIR . '/photos-page.php' );
-		$this->ok( false !== strpos( $page, 'class="delp" aria-label="Remove this person"' ),
-			'tagging page: each person box carries a remove button' );
-		$this->ok( false !== strpos( $page, "closest('.delp')" ) && false !== strpos( $page, 'add.disabled = false' ),
-			'tagging page: removing a box frees the add button if the limit had been reached' );
 	}
 
 	/**
@@ -4147,68 +4125,37 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
-	 * A photo that failed to import is tried again, and a person can revive one
-	 * that ran out of tries.
+	 * An email with a photo attached is an ordinary email (2.90.0).
 	 *
-	 * 'failed' used to be where an item went on its first error, and nothing
-	 * reads 'failed': one timeout and the photo was never fetched again, its
-	 * submission closed as "no images on this message", and Keep answered
-	 * "already being fetched" for ever. Pinned on the item primitives, with no
-	 * Graph and no real submission: the rows hang off an id nothing else uses.
+	 * The intake that took attachments in, the tagging link it sent the
+	 * sender, and the reminders are gone in favour of the photo door. Pinned
+	 * on every way back in: a function, a hook, a route, or a rewrite rule
+	 * left behind would quietly start mailing members again.
 	 */
-	public function test_failed_photo_import_is_retried() {
-		global $wpdb;
-		$items = gasf_crm_table( 'photo_items' );
-		$sid   = 900000000 + wp_rand( 1, 9999999 );
-		$att   = 'st-att-' . wp_rand();
-
-		try {
-			$first = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
-			if ( ! $this->ok( is_array( $first ), 'import retry: a new attachment can be claimed' ) ) { return; }
-
-			$this->ok( 'pending_import' === gasf_crm_photo_item_fail( $first, 'selftest: Graph timed out' ),
-				'import retry: a first failure hands the photo back for another attempt' );
-			$owed = gasf_crm_photo_submission_owed( $sid );
-			$this->ok( 1 === $owed['open'] && 0 === $owed['failed'],
-				'import retry: and its submission still owes a photo, so it cannot close as "no images"' );
-
-			$again = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
-			$this->ok( is_array( $again ) && (int) $again['id'] === (int) $first['id'],
-				'import retry: the next pass claims the same item again' );
-			$this->ok( '' === gasf_crm_photo_item_fail( $first, 'selftest: a stale worker' ),
-				'import retry: a worker whose claim was taken over cannot fail the new one' );
-			$this->ok( 'importing' === $wpdb->get_var( $wpdb->prepare( "SELECT state FROM {$items} WHERE id = %d", (int) $first['id'] ) ),
-				'import retry: which is still importing' );
-
-			// Up to the ceiling. The claim counts attempts; the last one is terminal.
-			$claim = $again;
-			$state = '';
-			for ( $n = 2; $n <= GASF_CRM_PHOTO_MAX_ATTEMPTS; $n++ ) {
-				$state = gasf_crm_photo_item_fail( $claim, 'selftest: failure ' . $n );
-				if ( $n < GASF_CRM_PHOTO_MAX_ATTEMPTS ) {
-					$claim = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
-					if ( ! is_array( $claim ) ) { break; }
-				}
-			}
-			$this->ok( 'failed' === $state, 'import retry: after the last allowed attempt it is given up on' );
-			$this->ok( 0 === gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 ),
-				'import retry: and an unattended pass no longer claims it' );
-			$owed = gasf_crm_photo_submission_owed( $sid );
-			$this->ok( 0 === $owed['open'] && 1 === $owed['failed'] && false !== strpos( $owed['reason'], 'selftest' ),
-				'import retry: the submission reports it as given up on, with the reason' );
-
-			$this->ok( gasf_crm_photo_item_revive( $sid, $att ), 'import retry: a volunteer asking revives it' );
-			$fresh = gasf_crm_photo_item_claim( $sid, $att, 'selftest.jpg', 'image/jpeg', 10 );
-			$this->ok(
-				is_array( $fresh )
-				&& 1 === (int) $wpdb->get_var( $wpdb->prepare( "SELECT attempt_count FROM {$items} WHERE id = %d", (int) $first['id'] ) ),
-				'import retry: and it can be claimed again with a fresh set of attempts'
-			);
-			$this->ok( ! gasf_crm_photo_item_revive( $sid, $att ),
-				'import retry: reviving does nothing to a photo that is being fetched' );
-		} finally {
-			$wpdb->query( $wpdb->prepare( "DELETE FROM {$items} WHERE submission_id = %d", $sid ) );
+	public function test_email_photos_are_ordinary_email() {
+		foreach ( array( 'gasf_crm_photo_autoprocess', 'gasf_crm_photo_chase', 'gasf_crm_photo_invite_create',
+			'gasf_crm_photo_invite_send', 'gasf_crm_photo_approve', 'gasf_crm_photo_keep', 'gasf_crm_photo_page' ) as $fn ) {
+			$this->ok( ! function_exists( $fn ), "email photos: $fn is gone" );
 		}
+		$this->ok( ! has_action( 'gasf_crm_sync_event', 'gasf_crm_photo_autoprocess' )
+			&& ! has_action( 'gasf_crm_photo_event', 'gasf_crm_photo_autoprocess' )
+			&& ! has_action( 'gasf_crm_sync_event', 'gasf_crm_photo_chase' ),
+			'email photos: neither the hourly sync nor the 15-minute job takes attachments in or chases anyone' );
+
+		$routes = rest_get_server()->get_routes();
+		foreach ( array( 'approve', 'invite', 'confirm' ) as $r ) {
+			$this->ok( ! isset( $routes[ '/gasf/v1/crm/photos/' . $r ] ), "email photos: the /crm/photos/$r route is gone" );
+		}
+		$this->ok( isset( $routes['/gasf/v1/crm/photos/list'] ) && isset( $routes['/gasf/v1/crm/photos/save'] ),
+			'email photos: but the Photos screen\'s own routes are still there' );
+
+		global $wp_rewrite;
+		$rules = implode( "\n", array_keys( (array) $wp_rewrite->extra_rules_top ) );
+		$this->ok( false === strpos( $rules, 'photos/tag/' ) && false === strpos( $rules, 'photos/img/' ),
+			'email photos: the tagging-link and tagging-image URLs no longer route' );
+
+		$counts = gasf_crm_photo_gallery( 'review', 1 )['counts'];
+		$this->ok( ! array_key_exists( 'waiting', $counts ), 'email photos: the review queue has no "with the sender" bucket' );
 	}
 
 	/**

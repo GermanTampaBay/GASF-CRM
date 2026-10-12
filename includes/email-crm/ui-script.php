@@ -500,22 +500,6 @@ function gasf_crm_render_inbox_script() {
 			// they opened the page to read. It is now at the very bottom: it
 			// matters when something has gone wrong and never before then.
 
-			// On a submission thread the photos ARE the job, so they go above the
-			// message and the reply box goes under it. The email on these is
-			// almost always "see attached"; leading with a reply form asks the
-			// wrong question and buries the right one.
-			//
-			// True whenever the thread has photos at all, not only when one is
-			// waiting on somebody: even a card that just says "with the sender
-			// until the 1st" tells a volunteer more, at a glance, than the words
-			// "See attached." ever will.
-			var pb = photoBlock(t);
-			var photosFirst = (t.photos || []).length > 0;
-			if (photosFirst) {
-				html += pb;
-				html += '<h3 class="mailhead">The email it arrived with</h3>';
-			}
-
 			// Newest first in the visible thread, so the latest reply is at the top.
 			(t.messages || []).slice().reverse().forEach(function(m){
 				// A cloud link or an attached email has nothing to download, so it
@@ -527,13 +511,6 @@ function gasf_crm_render_inbox_script() {
 					var cls  = a.kind === 'file' ? 'att' : 'att att--noload';
 					var chip = '<a class="' + cls + '" href="' + esc(a.url) + '">' + icon + ' ' +
 						esc(a.name) + esc(note) + '</a>';
-					// Only real image attachments can be kept. A cloud link has no
-					// bytes and an attached email is an .eml, so offering this on
-					// either would be a button whose only outcome is an error.
-					if (a.image && t.can_reply) {
-						chip += '<button class="keep" data-msg="' + esc(a.msg) + '" data-att="' + esc(a.id) +
-							'" title="Copy this into the club’s photo collection">Keep photo</button>';
-					}
 					return chip;
 				}).join('');
 				// Only on inbound: outbound is always the club mailbox, so showing
@@ -653,7 +630,6 @@ function gasf_crm_render_inbox_script() {
 					'<div id="msg"></div>';
 			}
 
-			if (!photosFirst) { html += pb; }
 			// Both audit trails last, in the order somebody troubleshooting would
 			// want them: what happened to the thread, then the case machinery.
 			html += history(t.events);
@@ -672,7 +648,6 @@ function gasf_crm_render_inbox_script() {
 			});
 			wire(id, t);
 			wireCopy();
-			wirePhotos(id, t);
 
 			// Remember where this conversation was, so the minute refresh can
 			// tell whether it has moved on since.
@@ -1563,162 +1538,6 @@ function gasf_crm_render_inbox_script() {
 			'<div class="actions"><button class="btn p-ok">' + esc(opts.okLabel || 'Add these tags') + '</button>' +
 			(opts.big ? '<button class="btn sec p-cancel" type="button">Cancel</button>' : '') +
 			'<span class="p-msg muted"></span></div>';
-	}
-
-	// Photos kept from this submission and where each one sits in the chase.
-	// Purgatory shows NO form: the person who actually knows has been asked and
-	// still has days to answer, and putting a blank form in front of a volunteer
-	// meanwhile is asking two people the same question.
-	function photoBlock(t){
-		var ph = t.photos || [];
-		// Kept where the viewer can reach them. Same reason the library keeps
-		// lgrid._photos: opening a photo should not need another round trip.
-		window._crmPhotoCards = window._crmPhotoCards || {};
-		ph.forEach(function(x){ window._crmPhotoCards[x.id] = x; });
-
-		// Nothing kept yet. If images came in, say what to do with them —
-		// otherwise the only clue is a small button beside an attachment chip,
-		// which never explains that keeping is what unlocks asking the sender
-		// anything. Somebody sent five photos and waited for an email that was
-		// never going to come, because this block rendered nothing at all.
-		if (!ph.length) {
-			var imgs = 0, who = '';
-			(t.messages || []).forEach(function(m){
-				if (m.direction === 'in' && !who) { who = m.from; }
-				(m.attachments || []).forEach(function(a){ if (a.image) { imgs++; } });
-			});
-			if (!imgs) { return ''; }
-
-			return '<div class="photos"><h3>Photos in this email (' + imgs + ')</h3>' +
-				'<p class="muted">None kept yet. Press <strong>Keep photo</strong> beside the ones worth having, ' +
-				'above &mdash; each goes into the club&rsquo;s Media Library. Once at least one is kept, ' +
-				'a button appears here to ask ' + esc(who || 'the sender') + ' what they are.</p></div>';
-		}
-
-		var head = '<div class="photos"><h3>Photos kept from this email (' + ph.length + ')</h3>';
-
-		var cards = ph.map(function(p){
-			var s = '<div class="pcard" data-photo="' + p.id + '">' +
-				// A button, not a link to a new tab. On a phone the new tab
-				// evicted this page, and coming back reloaded it into the default
-				// view — you lost the thread you were working through and every
-				// field you had filled in. Opening in place cannot do that.
-				'<button type="button" class="pthumb" aria-label="Open this photo">' +
-				(p.thumb ? '<img src="' + esc(p.thumb) + '" alt="">' : '') + '</button>' +
-				'<div class="pbody">';
-
-			if (p.confirmed) {
-				s += '<div class="pdone">✓ Tagged' + (p.people.length ? ' — ' + esc(p.people.join(', ')) : '') + '</div>' +
-					(p.flyer ? '<div class="muted"><span class="badge fly">flyer/ad</span></div>' : '') +
-					(p.caption ? '<p class="muted">' + esc(p.caption) + '</p>' : '') +
-					// Offered only once it is tagged: before that the name would
-					// have nothing in it worth carrying.
-					(p.dlname && p.url
-						? '<a class="att" href="' + esc(p.url) + '" download="' + esc(p.dlname) + '">⬇ ' + esc(p.dlname) + '</a>'
-						: '');
-
-			} else if (p.state === 'waiting') {
-				s += '<div class="muted">Waiting on the sender until <strong>' + esc(p.release) + '</strong>. ' +
-					'They have been asked, and reminded once. If they never reply it becomes yours to label.' +
-					(p.taken ? ' The camera said ' + esc(whenOf(p)) + '.' : '') + '</div>' +
-					// Never blocked, only un-nagged. Somebody who happens to know
-					// should not have to wait five days to say so.
-					'<div class="actions"><button class="btn sec p-early">I know what this is — label it now</button></div>' +
-					'<div class="pedit" hidden>' + photoForm(p, p.saved || {}) + '</div>';
-
-			} else if (p.pending) {
-				s += '<div class="pfrom">The sender says:</div>' + photoForm(p, p.pending);
-
-			} else if (p.state === 'released') {
-				s += '<div class="pfrom">The sender never replied &mdash; label it from what you can see:</div>' +
-					photoForm(p, p.saved || {});
-
-			} else {
-				s += '<div class="pfrom">Nobody has been asked about this one:</div>' + photoForm(p, p.saved || {});
-			}
-
-			return s + '</div></div>';
-		}).join('');
-
-		var ask = '<div class="actions" style="margin-top:12px">' +
-			'<button class="btn sec" id="askdetails">Ask the sender what these are</button>' +
-			'<span id="askmsg" class="muted"></span></div>' +
-			'<p class="muted" style="margin:8px 0 0">Sends them a private link, good for 30 days, asking who is in the photos and when they were taken. Their answers come back here for you to approve — nothing they type becomes a tag on its own.</p>';
-
-		return head + cards + ask + '</div>';
-	}
-
-	function wirePhotos(id, t){
-		// "Keep photo" on an attachment chip.
-		Array.prototype.forEach.call(pane.querySelectorAll('.keep'), function(b){
-			b.onclick = function(){
-				b.disabled = true; b.textContent = 'Keeping…';
-				api('/photos/approve', { method:'POST', body: JSON.stringify({
-					id: id, msg: b.dataset.msg, att: b.dataset.att,
-					op_id: nextOpId('photo-approve-' + id + '-' + String(b.dataset.msg || '') + '-' + String(b.dataset.att || ''))
-				})}).then(function(){
-					b.textContent = '✓ Kept';
-					open(id); // redraw so the photo appears in the block below
-				}).catch(function(e){
-					b.disabled = false; b.textContent = 'Keep photo';
-					alert(e.message);
-				});
-			};
-		});
-
-		var ask = document.getElementById('askdetails'), askmsg = document.getElementById('askmsg');
-		if (ask) {
-			ask.onclick = function(){
-				ask.disabled = true; askmsg.textContent = 'Sending…';
-				api('/photos/invite', { method:'POST', body: JSON.stringify({
-					id: id,
-					op_id: nextOpId('photo-invite-' + id)
-				}) })
-					.then(function(r){
-						askmsg.textContent = 'Asked ' + r.to + ' about ' + r.photos + ' photo(s).';
-					})
-					.catch(function(e){ ask.disabled = false; askmsg.textContent = e.message; });
-			};
-		}
-
-		// "I know what this is" reveals the form during the grace period.
-		Array.prototype.forEach.call(pane.querySelectorAll('.p-early'), function(b){
-			b.onclick = function(){
-				var box = b.closest('.pcard').querySelector('.pedit');
-				if (box) { box.hidden = false; }
-				b.remove();
-			};
-		});
-
-		wireEventPickers(pane);
-		wirePlaceSelects(pane);
-		wirePeople(pane);
-
-		Array.prototype.forEach.call(pane.querySelectorAll('.pcard'), function(card){
-			var ok = card.querySelector('.p-ok');
-			if (!ok) { return; }
-			ok.onclick = function(){
-				var msg = card.querySelector('.p-msg');
-				ok.disabled = true; msg.textContent = 'Saving…';
-				var v = function(sel){ var el = card.querySelector(sel); return el ? el.value : ''; };
-				api('/photos/confirm', { method:'POST', body: JSON.stringify({
-					id: id,
-					photo: parseInt(card.dataset.photo, 10),
-					people: peopleValues(card),
-					groups: groupValues(card),
-					place: placeValue(card), event: v('.p-event'),
-					flyer: !!(card.querySelector('.p-flyer') && card.querySelector('.p-flyer').checked),
-					// Set only when the occasion was picked from the calendar, so
-					// a hand-typed name never claims to be a specific event.
-					event_id: parseInt(v('.p-evid'), 10) || 0,
-					taken: v('.p-taken'), caption: v('.p-caption'),
-					face_map: faceAssignments(card.querySelector('.pfaceov')),
-					revision: v('.p-rev'),
-					op_id: nextOpId('photo-confirm-' + id + '-' + parseInt(card.dataset.photo, 10))
-				})}).then(function(){ loadPeople(true); open(id); })
-				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
-			};
-		});
 	}
 
 	// Calendar suggestions, shared by review cards, upload, and bulk tagging.
@@ -2874,7 +2693,7 @@ function gasf_crm_render_inbox_script() {
 
 			if (!r.photos.length) {
 				pgrid.innerHTML = '<div class="pane muted">' + (pstate === 'review'
-					? 'Nothing needs you. Photos appear here once the sender has described them, or once they have had five days to and have not.'
+					? 'Nothing needs you. Photos sent through the photo door, or uploaded, wait here until somebody approves them.'
 					: 'Nothing here.') + '</div>';
 				return;
 			}
@@ -2883,8 +2702,7 @@ function gasf_crm_render_inbox_script() {
 					(p.thumb ? '<img src="' + esc(p.thumb) + '" alt="" loading="lazy">' : '') +
 					'<span class="pmeta">' + esc(p.from) +
 					(whenOf(p) ? ' · ' + esc(whenOf(p)) : '') +
-					(p.bucket === 'review' && p.pending ? '<em>described</em>'
-						: (p.bucket === 'review' ? '<em>no reply</em>' : '')) +
+					(p.bucket === 'review' && p.pending ? '<em>described</em>' : '') +
 					'</span></button>';
 			}).join('');
 			Array.prototype.forEach.call(pgrid.querySelectorAll('.pthumbcard'), function(b){
@@ -2911,7 +2729,7 @@ function gasf_crm_render_inbox_script() {
 				// "the page is broken" look identical otherwise, and only one of
 				// them is worth anybody's time.
 				? '<div class="note err">The image file is missing from the server, though its record is still here. ' +
-				  'Nothing can be done with it — reject it, and it can be taken in again from the original email.</div>'
+				  'Nothing can be done with it — reject it.</div>'
 				: '<div class="pbigwrap"><button type="button" class="pbig" aria-label="Open this photo full size">' +
 				  '<img src="' + esc(p.full || p.thumb) + '" alt=""></button></div>';
 
@@ -2922,12 +2740,7 @@ function gasf_crm_render_inbox_script() {
 				// they are — but worth knowing before it joins the collection.
 				(p.known ? '' : ' <span class="firsttime">first time we have heard from them</span>') + '</p>';
 
-			if (p.state === 'waiting') {
-				h += '<div class="note warn">Asked, and reminded once. They have until <strong>' + esc(p.release) +
-					'</strong> to answer. You can label it yourself now if you know.</div>';
-			} else if (p.state === 'released') {
-				h += '<div class="note warn">The sender never answered. Label it from what you can see.</div>';
-			} else if (p.pending) {
+			if (p.pending) {
 				h += '<div class="note ok">The sender described this. Check it and approve.</div>';
 			} else if (p.state === 'confirmed') {
 				h += '<div class="note ok">Approved and tagged.</div>';

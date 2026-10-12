@@ -520,7 +520,8 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * Provenance, stamped the instant the row exists — NOT after the upload call
 	 * returns.
 	 *
-	 * gasf_crm_photo_sweep_orphans deletes private files in the review folder
+	 * Until 2.90.0, when the email intake was removed, its sweep deleted private
+	 * files in the review folder
 	 * that carry neither a queue claim nor provenance, on the reasonable grounds
 	 * that unreviewed bytes nobody owns are exactly what that folder exists to
 	 * prevent. A direct upload has no queue claim by definition, so provenance
@@ -585,9 +586,9 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 		// and returns success, ignoring the expected value entirely. A held door
 		// photo that two volunteers open at once would then let both first
 		// decisions win: one deletes the attachment while the other publishes it
-		// and stamps confirmed onto a post that no longer exists. The email intake
-		// seeds this at zero for exactly this reason (see gasf_crm_photo_approve);
-		// an upload never did, so its held photos raced. Written here, inside
+		// and stamps confirmed onto a post that no longer exists. The old email
+		// intake seeded this at zero for exactly this reason; an upload never
+		// did, so its held photos raced. Written here, inside
 		// add_attachment, the row exists before the photo can be decided on.
 		update_post_meta( $new_id, '_gasf_photo_rev', 0 );
 

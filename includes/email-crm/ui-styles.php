@@ -16,10 +16,6 @@ function gasf_crm_styles() {
 [hidden]{display:none !important}
 /* Design tokens — the club's archive palette.
 
-   Shared with the tagging page a member fills in (photos-page.php), so a
-   volunteer moving between the form and the queue it lands in stays inside one
-   thing rather than two products. Same paper, same ink, same type registers.
-
    Deliberately NOT the theme's stylesheet: pulling that in would drag the site
    header, hero, menu and cookie banner into a tool whose entire purpose is an
    uncluttered view of an email. The --gasf-* names are kept exactly as they

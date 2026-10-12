@@ -350,8 +350,7 @@ function gasf_crm_admin_tab() {
 					?>
 					<p class="description" style="color:#b32d2e">
 						<strong>This stream needs the Photo Catalogue module, which is switched off.</strong>
-						Photos are not being taken in, nothing can be approved, and tagging links
-						already sent to submitters will not open. Enable <em>Photo Catalogue</em>
+						Nothing can be approved. Enable <em>Photo Catalogue</em>
 						to resume — nothing has been lost in the meantime.
 					</p>
 				<?php endif; ?>
@@ -622,68 +621,20 @@ function gasf_crm_admin_tab() {
 	<?php endif; ?>
 
 	<?php if ( 'photos' === $tab ) : ?>
-	<h3>Photo submissions</h3>
+	<h3>Photo review</h3>
 	<?php
-	if ( ! function_exists( 'gasf_crm_photo_pending_threads' ) ) {
-		echo '<p class="description">The photo module is not loaded.</p>';
-	} else {
-		global $wpdb;
-		$inv_t   = gasf_crm_table( 'photo_invites' );
-		$sent    = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$inv_t}" );
-		$opened  = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$inv_t} WHERE opened_at IS NOT NULL" );
-		$done    = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$inv_t} WHERE submitted_at IS NOT NULL" );
-		$live    = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COUNT(*) FROM {$inv_t} WHERE submitted_at IS NULL AND expires_at > %s", current_time( 'mysql', true ) ) );
-		$nudged  = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$inv_t} WHERE reminded_at IS NOT NULL" );
-
-		$acts      = gasf_crm_photo_actionable_threads();
-		$described = array_sum( wp_list_pluck( $acts, 'described' ) );
-		$released  = array_sum( wp_list_pluck( $acts, 'released' ) );
-		$waiting   = $described + $released;
-
-		// Purgatory is worth showing here even though it is not work: it is the
-		// answer to "we kept photos days ago and nothing has happened".
-		$grace = 0;
-		foreach ( gasf_crm_photo_untagged_ids() as $aid ) {
-			if ( 'waiting' === gasf_crm_photo_state( $aid )['state'] ) { $grace++; }
-		}
-
-		// Who could actually act on a submission. Zero here means answers arrive
-		// and nobody is told — the failure this panel exists to make visible.
-		$reviewers = array();
-		foreach ( gasf_crm_notify_recipients() as $addr => $streams ) {
-			if ( in_array( 'photos', (array) $streams, true ) ) { $reviewers[] = $addr; }
-		}
-
-		printf(
-			'<p class="description">%d tagging link(s) sent, %d opened, %d filled in, %d reminded. %d still live and unanswered.</p>',
-			$sent, $opened, $done, $nudged, $live
-		);
-
-		printf(
-			'<p class="description">A submitter is reminded once after %d days and given %d before the photos are handed to a volunteer to label. <strong>%d photo(s)</strong> are inside that grace period now &mdash; nobody is being asked to do anything about those, on purpose.</p>',
-			(int) GASF_CRM_PHOTO_REMIND_DAYS,
-			(int) GASF_CRM_PHOTO_RELEASE_DAYS,
-			(int) $grace
-		);
-
-		if ( $waiting ) {
-			printf(
-				'<div class="notice notice-warning inline"><p><strong>%d photo(s) need a volunteer at <code>%s</code>:</strong> %d described by the sender and waiting to be checked, %d never answered and now theirs to label. Nothing a submitter typed becomes a tag until somebody confirms it.</p></div>',
-				(int) $waiting,
-				esc_html( home_url( '/email' ) ),
-				(int) $described,
-				(int) $released
-			);
-		}
-
-		if ( ! $reviewers ) {
-			echo '<div class="notice notice-error inline"><p><strong>Nobody holds the Photo submissions stream.</strong> Descriptions can still be submitted and will be stored, but no one is told and no one can turn them into tags. Tick <em>Photo submissions</em> under <strong>Can see</strong> for at least one approved account above.</p></div>';
-		} else {
-			printf( '<p class="description">Reviewed by: %s.</p>', esc_html( implode( ', ', $reviewers ) ) );
-		}
-
-		echo '<p class="description">Links expire after ' . (int) GASF_CRM_PHOTO_INVITE_DAYS . ' days. Tokens are stored hashed, so an expired or lost link cannot be recovered — send a fresh one from the thread instead.</p>';
+	// Who could actually approve what arrives through the door or an upload.
+	// Zero here means photos wait and nobody is told.
+	$reviewers = array();
+	foreach ( gasf_crm_notify_recipients() as $addr => $streams ) {
+		if ( in_array( 'photos', (array) $streams, true ) ) { $reviewers[] = $addr; }
 	}
+	if ( ! $reviewers ) {
+		echo '<div class="notice notice-error inline"><p><strong>Nobody holds the Photo submissions stream.</strong> Photos sent through the door wait for approval, but no one is told and no one can approve them. Tick <em>Photo submissions</em> under <strong>Can see</strong> for at least one approved account above.</p></div>';
+	} else {
+		printf( '<p class="description">Reviewed by: %s.</p>', esc_html( implode( ', ', $reviewers ) ) );
+	}
+	echo '<p class="description">Emailed photos are not taken in: an email with a photo attached is an ordinary email. Point the sender at the photo door.</p>';
 	?>
 
 	<?php
