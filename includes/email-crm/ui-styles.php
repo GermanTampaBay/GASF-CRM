@@ -674,6 +674,10 @@ input:focus,select:focus,textarea:focus,.edbody:focus{
 .lf-where .ptile:hover:not([aria-pressed="true"]){background:rgba(127,127,127,.15)}
 .lf-where .ptile[aria-pressed="true"]{background:#0f6e56;border-color:#0f6e56;color:#fff;opacity:1}
 .lf-where select{margin-top:4px}
+/* "Looks like a copy of #N": the twin's picture beside the words. */
+.pnear{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.pnear img{height:56px;width:auto;border-radius:3px;flex:0 0 auto}
+.pnear span{flex:1 1 200px}
 /* "One name per box, please" under a name box that holds several. */
 .pnote{display:block;font-size:11px;color:#b3261e;margin:2px 0 0 2px}
 .lf-ev input{width:100%}

@@ -2389,6 +2389,23 @@ add_action( 'rest_api_init', function () {
 		},
 	) );
 
+	// "Not a copy - keep both": takes the near-duplicate note off a photo and
+	// remembers the verdict, so the same pair is not raised again.
+	register_rest_route( 'gasf/v1', '/crm/photos/near-keep', array(
+		'methods'             => 'POST',
+		'permission_callback' => $photo_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$aid  = (int) $req->get_param( 'photo' );
+			if ( ! $aid || 'attachment' !== get_post_type( $aid ) ) {
+				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+			}
+			$near = get_post_meta( $aid, '_gasf_photo_near', true );
+			if ( is_array( $near ) && ! empty( $near['id'] ) ) { update_post_meta( $aid, '_gasf_photo_near_kept', (int) $near['id'] ); }
+			delete_post_meta( $aid, '_gasf_photo_near' );
+			return array( 'ok' => true );
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/save', array(
 		'methods'             => 'POST',
 		'permission_callback' => $photo_guard,
@@ -2629,6 +2646,8 @@ function gasf_crm_photo_card( $attachment_id ) {
 		'taken'   => $info['taken'] ?? '',
 		'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
 		'flyer'   => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
+		// The photo this one looks like a re-encoded copy of, if any.
+		'near'    => function_exists( 'gasf_crm_photo_near_info' ) ? gasf_crm_photo_near_info( $id ) : null,
 		'guess'   => ( ! empty( $info['place_guess'] ) && ! is_wp_error( $info['place_guess'] ) ) ? $info['place_guess']->name : '',
 		'alts'    => ! empty( $info['place_alts'] ) ? wp_list_pluck( $info['place_alts'], 'name' ) : array(),
 		'people'  => $info['people'] ?? array(),

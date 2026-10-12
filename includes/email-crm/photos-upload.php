@@ -298,6 +298,260 @@ add_action( 'init', function () {
 	if ( function_exists( 'gasf_crm_cron_ensure' ) ) { gasf_crm_cron_ensure( 'gasf_crm_photo_sizes_event', 120 ); }
 } );
 
+/* =====================================================================
+ * Near-duplicates: the same picture, re-encoded
+ * ================================================================== */
+
+/*
+ * The exact-bytes defence above catches a folder dragged in twice. It cannot
+ * catch the same photo coming back through WhatsApp, Facebook, or a phone's
+ * "share" sheet, each of which re-encodes it - so the library holds twins
+ * that differ in every byte and in nothing anybody can see.
+ *
+ * A difference hash answers that: shrink the picture to nine by eight grey
+ * pixels and write down, for each row, whether each pixel is brighter than
+ * the one to its left. Sixty-four bits that survive re-encoding, resizing,
+ * and mild colour shifts, and that a crop or a different moment breaks. Two
+ * hashes within six bits of each other are the same picture for the club's
+ * purposes. The hash is stored on every photo at intake and backfilled for
+ * the existing library by a budgeted sweep; a match is NOTED on the newer
+ * photo, never acted on - a volunteer decides, with both in front of them.
+ */
+define( 'GASF_CRM_NEAR_DISTANCE', 6 );
+
+/**
+ * The 64-bit difference hash of an image file as sixteen hex characters.
+ *
+ * '' when the file cannot be read, or when the picture has no signal to hash:
+ * a single flat colour comes out all zeros, and all-zero hashes would make
+ * every blank slide a near-copy of every other.
+ */
+function gasf_crm_photo_dhash_file( $path ) {
+	$path = (string) $path;
+	if ( '' === $path || ! is_file( $path ) || ! function_exists( 'imagecreatefromstring' ) ) { return ''; }
+	$bytes = (string) file_get_contents( $path );
+	if ( '' === $bytes ) { return ''; }
+	$im = @imagecreatefromstring( $bytes ); // phpcs:ignore WordPress.PHP.NoSilencedErrors -- not an image is an ordinary answer
+	unset( $bytes );
+	if ( ! $im ) { return ''; }
+	$small = imagecreatetruecolor( 9, 8 );
+	imagecopyresampled( $small, $im, 0, 0, 0, 0, 9, 8, imagesx( $im ), imagesy( $im ) );
+	imagedestroy( $im );
+	$bits = '';
+	for ( $y = 0; $y < 8; $y++ ) {
+		$prev = null;
+		for ( $x = 0; $x < 9; $x++ ) {
+			$c = imagecolorat( $small, $x, $y );
+			$g = ( ( ( $c >> 16 ) & 255 ) * 299 + ( ( $c >> 8 ) & 255 ) * 587 + ( $c & 255 ) * 114 ) / 1000;
+			if ( null !== $prev ) { $bits .= $g > $prev ? '1' : '0'; }
+			$prev = $g;
+		}
+	}
+	imagedestroy( $small );
+	if ( substr_count( $bits, '1' ) < 4 || substr_count( $bits, '0' ) < 4 ) { return ''; }
+	$hex = '';
+	for ( $i = 0; $i < 64; $i += 4 ) { $hex .= dechex( bindec( substr( $bits, $i, 4 ) ) ); }
+	return $hex;
+}
+
+/** How many of the 64 bits differ. 64 for anything that is not a pair of hashes. */
+function gasf_crm_photo_dhash_distance( $a, $b ) {
+	static $pop = array( 0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4 );
+	$a = (string) $a; $b = (string) $b;
+	if ( 16 !== strlen( $a ) || 16 !== strlen( $b ) || ! ctype_xdigit( $a ) || ! ctype_xdigit( $b ) ) { return 64; }
+	$d = 0;
+	for ( $i = 0; $i < 16; $i++ ) { $d += $pop[ hexdec( $a[ $i ] ) ^ hexdec( $b[ $i ] ) ]; }
+	return $d;
+}
+
+/**
+ * The closest other photo within the distance, as {id, distance}, or null.
+ *
+ * One query over every stored hash and a sixteen-step compare each: five
+ * thousand photos is a few milliseconds, and nothing is cached to go stale.
+ */
+function gasf_crm_photo_near_find( $hash, $exclude = 0, $max = GASF_CRM_NEAR_DISTANCE ) {
+	global $wpdb;
+	if ( 16 !== strlen( (string) $hash ) ) { return null; }
+	$rows = $wpdb->get_results( $wpdb->prepare(
+		"SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND post_id <> %d",
+		'_gasf_photo_dhash', (int) $exclude
+	) );
+	$best = null;
+	foreach ( (array) $rows as $r ) {
+		$d = gasf_crm_photo_dhash_distance( $hash, $r->meta_value );
+		if ( $d > $max || ( $best && $d >= $best['distance'] ) ) { continue; }
+		if ( 'attachment' !== get_post_type( (int) $r->post_id ) ) { continue; }
+		$best = array( 'id' => (int) $r->post_id, 'distance' => $d );
+	}
+	return $best;
+}
+
+/**
+ * Store a photo's hash and note its nearest twin on it, if there is one.
+ *
+ * The note goes on the NEW photo, so the one already in the library is
+ * untouched: it is the copy that arrived that is in question. A twin the
+ * volunteers have already said to keep ("not a copy") is not noted again.
+ */
+function gasf_crm_photo_near_mark( $attachment_id, $hash ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || 16 !== strlen( (string) $hash ) ) { return null; }
+	update_post_meta( $id, '_gasf_photo_dhash', (string) $hash );
+	$near = gasf_crm_photo_near_find( $hash, $id );
+	if ( $near && (int) get_post_meta( $id, '_gasf_photo_near_kept', true ) === $near['id'] ) { $near = null; }
+	if ( $near ) {
+		update_post_meta( $id, '_gasf_photo_near', $near + array( 'at' => time() ) );
+		gasf_crm_log( sprintf( 'CRM photos: #%d looks like a copy of #%d (%d of 64 bits apart)', $id, $near['id'], $near['distance'] ) );
+	} else {
+		delete_post_meta( $id, '_gasf_photo_near' );
+	}
+	return $near;
+}
+
+/**
+ * What the cards carry: the twin, with enough to show it. null when there is
+ * none, or when the twin has since been deleted - this photo is then the only
+ * copy, and the note comes off.
+ */
+function gasf_crm_photo_near_info( $attachment_id ) {
+	$id   = (int) $attachment_id;
+	$near = get_post_meta( $id, '_gasf_photo_near', true );
+	if ( ! is_array( $near ) || empty( $near['id'] ) ) { return null; }
+	$other = (int) $near['id'];
+	if ( 'attachment' !== get_post_type( $other ) ) {
+		delete_post_meta( $id, '_gasf_photo_near' );
+		return null;
+	}
+	return array(
+		'id'       => $other,
+		'distance' => (int) ( $near['distance'] ?? 0 ),
+		'thumb'    => function_exists( 'gasf_crm_photo_img_url' ) ? gasf_crm_photo_img_url( $other, 'medium' ) : '',
+		'title'    => function_exists( 'gasf_crm_photo_display_title' ) ? gasf_crm_photo_display_title( $other ) : (string) get_the_title( $other ),
+		'where'    => ( function_exists( 'gasf_crm_photo_is_private' ) && gasf_crm_photo_is_private( $other ) ) ? 'waiting for review' : 'in the library',
+	);
+}
+
+/** Image attachments with no hash yet, newest first. */
+function gasf_crm_photo_dhash_missing( $limit = 60, array $only = array() ) {
+	$args = array(
+		'post_type'      => 'attachment',
+		'post_status'    => array( 'inherit', 'private' ),
+		'post_mime_type' => 'image',
+		'posts_per_page' => max( 1, (int) $limit ),
+		'fields'         => 'ids',
+		'orderby'        => 'ID',
+		'order'          => 'DESC',
+		'meta_query'     => array( array( 'key' => '_gasf_photo_dhash', 'compare' => 'NOT EXISTS' ) ), // phpcs:ignore WordPress.DB.SlowDBQuery
+	);
+	if ( $only ) { $args['post__in'] = array_map( 'intval', $only ); }
+	return array_map( 'intval', (array) get_posts( $args ) );
+}
+
+/**
+ * Hash the photos that predate the hash, a budgeted batch at a time.
+ *
+ * From the medium derivative where there is one - three hundred pixels wide
+ * hashes the same as the original and costs a hundredth of the decode - and
+ * the full file otherwise. A photo that cannot be hashed is stamped '-' so it
+ * is not tried every quarter hour. Stores the hash only; it does not go
+ * looking for twins among what is already there - that is `wp gasf-crm
+ * twins`, run once, by a person, because the answer is a list of deletions.
+ */
+function gasf_crm_photo_dhash_sweep( $limit = 60, $own_cpu = 30, $process_cpu = 75, array $only = array() ) {
+	$cpu = static function () {
+		$u = getrusage();
+		return (float) $u['ru_utime.tv_sec'] + (float) $u['ru_stime.tv_sec']
+			+ ( (float) $u['ru_utime.tv_usec'] + (float) $u['ru_stime.tv_usec'] ) / 1e6;
+	};
+	$start = $cpu();
+	$n     = 0;
+	foreach ( gasf_crm_photo_dhash_missing( $limit, $only ) as $id ) {
+		$now = $cpu();
+		if ( $now - $start >= $own_cpu || $now >= $process_cpu ) { break; }
+		$file = (string) get_attached_file( $id );
+		$meta = (array) wp_get_attachment_metadata( $id );
+		$path = $file;
+		if ( '' !== $file && ! empty( $meta['sizes']['medium']['file'] ) ) {
+			$m = dirname( $file ) . '/' . basename( (string) $meta['sizes']['medium']['file'] );
+			if ( is_file( $m ) ) { $path = $m; }
+		}
+		$hash = gasf_crm_photo_dhash_file( $path );
+		update_post_meta( $id, '_gasf_photo_dhash', '' !== $hash ? $hash : '-' );
+		$n++;
+	}
+	if ( $n ) { gasf_crm_log( sprintf( 'CRM photos: hashed %d photo(s) for near-duplicate checks', $n ) ); }
+	return $n;
+}
+add_action( 'gasf_crm_photo_dhash_event', function () { gasf_crm_photo_dhash_sweep(); } );
+add_action( 'init', function () {
+	if ( function_exists( 'gasf_crm_cron_ensure' ) ) { gasf_crm_cron_ensure( 'gasf_crm_photo_dhash_event', 300 ); }
+} );
+
+/**
+ * Every pair of hashed photos within the distance, closest first.
+ *
+ * Not every pair compared: six differing bits over eight bytes leaves at
+ * least two bytes identical, so candidates are those sharing a byte at the
+ * same position - a few hundred thousand compares for the library instead of
+ * fifteen million.
+ */
+function gasf_crm_photo_twins( $max = GASF_CRM_NEAR_DISTANCE ) {
+	global $wpdb;
+	$rows = $wpdb->get_results( $wpdb->prepare(
+		"SELECT post_id, meta_value FROM {$wpdb->postmeta} WHERE meta_key = %s AND LENGTH(meta_value) = 16",
+		'_gasf_photo_dhash'
+	) );
+	$hash = array();
+	foreach ( (array) $rows as $r ) { $hash[ (int) $r->post_id ] = (string) $r->meta_value; }
+	$seen  = array();
+	$pairs = array();
+	for ( $pos = 0; $pos < 16; $pos += 2 ) {
+		$bucket = array();
+		foreach ( $hash as $id => $h ) { $bucket[ substr( $h, $pos, 2 ) ][] = $id; }
+		foreach ( $bucket as $ids ) {
+			$c = count( $ids );
+			if ( $c < 2 ) { continue; }
+			for ( $i = 0; $i < $c; $i++ ) {
+				for ( $j = $i + 1; $j < $c; $j++ ) {
+					$a = min( $ids[ $i ], $ids[ $j ] ); $b = max( $ids[ $i ], $ids[ $j ] );
+					if ( isset( $seen[ "$a-$b" ] ) ) { continue; }
+					$seen[ "$a-$b" ] = true;
+					$d = gasf_crm_photo_dhash_distance( $hash[ $a ], $hash[ $b ] );
+					if ( $d <= $max ) { $pairs[] = array( 'a' => $a, 'b' => $b, 'distance' => $d ); }
+				}
+			}
+		}
+	}
+	usort( $pairs, function ( $x, $y ) { return $x['distance'] <=> $y['distance'] ?: $x['a'] <=> $y['a']; } );
+	return $pairs;
+}
+
+if ( defined( 'WP_CLI' ) && WP_CLI ) {
+	/*
+	 * wp gasf-crm twins [--max=6] [--mark]
+	 *
+	 * Lists the library's near-duplicate pairs. --mark notes each pair on its
+	 * newer photo, so the volunteer screens show "looks like a copy of #N"
+	 * with both pictures and a delete button - nothing is deleted here.
+	 */
+	WP_CLI::add_command( 'gasf-crm twins', function ( $args, $assoc ) {
+		$max   = max( 0, min( 64, (int) ( $assoc['max'] ?? GASF_CRM_NEAR_DISTANCE ) ) );
+		$mark  = ! empty( $assoc['mark'] );
+		$left  = count( gasf_crm_photo_dhash_missing( 1 ) );
+		$pairs = gasf_crm_photo_twins( $max );
+		if ( $left ) { WP_CLI::warning( 'Some photos are not hashed yet (the sweep runs every 15 minutes); the list is partial.' ); }
+		foreach ( $pairs as $pr ) {
+			$new = max( $pr['a'], $pr['b'] ); $old = min( $pr['a'], $pr['b'] );
+			WP_CLI::line( sprintf( '%2d bits  #%d  ~  #%d   %s  |  %s', $pr['distance'], $old, $new, get_the_title( $old ), get_the_title( $new ) ) );
+			if ( $mark && (int) get_post_meta( $new, '_gasf_photo_near_kept', true ) !== $old ) {
+				update_post_meta( $new, '_gasf_photo_near', array( 'id' => $old, 'distance' => $pr['distance'], 'at' => time() ) );
+			}
+		}
+		WP_CLI::success( sprintf( '%d pair(s) within %d bits%s.', count( $pairs ), $max, $mark ? ', noted on the newer photo of each' : '' ) );
+	} );
+}
+
 /*
  * A minute of phone video, near enough.
  *
@@ -427,6 +681,10 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			), array( 'status' => 409 ) );
 		}
 	}
+	// And the picture itself, for the twin the bytes cannot catch - see
+	// gasf_crm_photo_dhash_file(). Taken here, from the incoming file, because
+	// publishing re-encodes it and the host's optimiser may replace it.
+	$dhash = $isVideo ? '' : gasf_crm_photo_dhash_file( $f['tmp_name'] );
 
 	$size = (int) ( $f['size'] ?? 0 );
 	$cap  = $isVideo ? GASF_CRM_UPLOAD_MAX_VIDEO_BYTES : ( defined( 'GASF_CRM_PHOTO_MAX_BYTES' ) ? GASF_CRM_PHOTO_MAX_BYTES : 0 );
@@ -919,6 +1177,7 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	 * was outside the duplicate defence.
 	 */
 	if ( ! empty( $src_md5 ) ) { update_post_meta( $id, '_gasf_photo_src_md5', $src_md5 ); }
+	if ( '' !== $dhash ) { gasf_crm_photo_near_mark( $id, $dhash ); }
 
 	// Anonymous uploads carry where the request came from. A volunteer's upload
 	// does not need it: their user id is already on the provenance, and logging

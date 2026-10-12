@@ -1023,6 +1023,81 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/** The same picture re-encoded is noticed; a different picture is not; a blank has nothing to say. */
+	public function test_near_duplicates() {
+		// A picture with some structure: a gradient, a bright blob, and a dark block.
+		$pic = function ( $vertical, $quality ) {
+			$im = imagecreatetruecolor( 160, 120 );
+			for ( $i = 0; $i < ( $vertical ? 120 : 160 ); $i++ ) {
+				$v = (int) ( $i * 255 / ( $vertical ? 119 : 159 ) );
+				$c = imagecolorallocate( $im, $v, (int) ( $v / 2 ), 255 - $v );
+				if ( $vertical ) { imageline( $im, 0, $i, 159, $i, $c ); } else { imageline( $im, $i, 0, $i, 119, $c ); }
+			}
+			imagefilledellipse( $im, 50, 60, 44, 30, imagecolorallocate( $im, 255, 255, 255 ) );
+			imagefilledrectangle( $im, 115, 15, 150, 50, imagecolorallocate( $im, 10, 10, 10 ) );
+			ob_start(); imagejpeg( $im, null, $quality ); imagedestroy( $im );
+			return ob_get_clean();
+		};
+		$a  = wp_tempnam( 'st-near-a.jpg' ); file_put_contents( $a, $pic( false, 92 ) );
+		$a2 = wp_tempnam( 'st-near-a2.jpg' ); file_put_contents( $a2, $pic( false, 30 ) );
+		$b  = wp_tempnam( 'st-near-b.jpg' ); file_put_contents( $b, $pic( true, 92 ) );
+		$ha = gasf_crm_photo_dhash_file( $a ); $ha2 = gasf_crm_photo_dhash_file( $a2 ); $hb = gasf_crm_photo_dhash_file( $b );
+		$this->ok( 16 === strlen( $ha ) && ctype_xdigit( $ha ), 'near: a picture hashes to sixteen hex characters' );
+		$this->ok( gasf_crm_photo_dhash_distance( $ha, $ha2 ) <= GASF_CRM_NEAR_DISTANCE, 'near: the same picture at a third of the quality is within reach (' . gasf_crm_photo_dhash_distance( $ha, $ha2 ) . ' bits)' );
+		$this->ok( gasf_crm_photo_dhash_distance( $ha, $hb ) > 20, 'near: a different picture is far away (' . gasf_crm_photo_dhash_distance( $ha, $hb ) . ' bits)' );
+		$this->ok( 0 === gasf_crm_photo_dhash_distance( $ha, $ha ) && 64 === gasf_crm_photo_dhash_distance( '0000000000000000', 'ffffffffffffffff' ) && 64 === gasf_crm_photo_dhash_distance( $ha, '-' ),
+			'near: distance is zero to itself, sixty-four to the opposite, and sixty-four to no hash at all' );
+		$flat = wp_tempnam( 'st-near-flat.jpg' ); file_put_contents( $flat, $this->jpeg_bytes( 40, 30 ) );
+		$im = imagecreatetruecolor( 40, 30 ); imagefilledrectangle( $im, 0, 0, 40, 30, imagecolorallocate( $im, 90, 90, 90 ) ); ob_start(); imagejpeg( $im, null, 90 ); file_put_contents( $flat, ob_get_clean() ); imagedestroy( $im );
+		$this->ok( '' === gasf_crm_photo_dhash_file( $flat ), 'near: a flat picture has no hash, so blanks cannot all be copies of each other' );
+		$this->ok( '' === gasf_crm_photo_dhash_file( $flat . '.missing' ), 'near: a missing file has no hash' );
+
+		// The library photo, hashed by the sweep; a re-encoded copy arriving finds it.
+		$lib = $this->library_photo( 'st-near-lib' );
+		file_put_contents( get_attached_file( $lib ), $pic( false, 92 ) );
+		$this->ok( 1 === gasf_crm_photo_dhash_sweep( 5, 30, 110, array( $lib ) ) && $ha === get_post_meta( $lib, '_gasf_photo_dhash', true ), 'near: the sweep hashes a photo that predates the hash' );
+		$this->ok( 0 === gasf_crm_photo_dhash_sweep( 5, 30, 110, array( $lib ) ), 'near: and does not hash it again' );
+		$found = gasf_crm_photo_near_find( $ha2, 0 );
+		$this->ok( $found && $lib === $found['id'], 'near: the copy finds the original' );
+		$this->ok( null === gasf_crm_photo_near_find( $hb, 0 ), 'near: a different picture finds nothing' );
+		$this->ok( null === gasf_crm_photo_near_find( $ha2, $lib ), 'near: a photo is never its own twin' );
+
+		$r = gasf_crm_photo_upload_one(
+			array( 'name' => 'st-near-a2.jpg', 'type' => 'image/jpeg', 'tmp_name' => $a2, 'error' => 0, 'size' => filesize( $a2 ) ),
+			array( 'note' => 'selftest', 'consent_scope' => 'limited', 'sideload' => 1 ) );
+		$new = is_array( $r ) ? (int) ( $r['id'] ?? 0 ) : 0;
+		if ( $new ) { $this->made[] = $new; }
+		$this->ok( $new > 0, 'near: the copy was taken in' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
+		$near = $new ? get_post_meta( $new, '_gasf_photo_near', true ) : null;
+		$this->ok( is_array( $near ) && $lib === (int) $near['id'], 'near: intake noted the twin on the new photo' );
+		$this->ok( ! get_post_meta( $lib, '_gasf_photo_near', true ), 'near: and not on the one already in the library' );
+		$info = $new ? gasf_crm_photo_library_card( $new ) : null;
+		$this->ok( $info && ! empty( $info['near'] ) && $lib === $info['near']['id'] && 'in the library' === $info['near']['where'] && '' !== $info['near']['thumb'],
+			'near: the card carries the twin with its picture and where it is' );
+		$this->ok( is_array( $r ) && ! empty( $r['near'] ) || ( is_array( $r ) && ! empty( $r['held'] ) ), 'near: the upload answer carries it too, or the photo was held' );
+
+		// "Not a copy - keep both" takes the note off and is remembered.
+		$keep = $this->rest_post( '/gasf/v1/crm/photos/near-keep', array( 'photo' => $new ) );
+		$this->ok( is_array( $keep ) && ! empty( $keep['ok'] ) && ! get_post_meta( $new, '_gasf_photo_near', true ) && $lib === (int) get_post_meta( $new, '_gasf_photo_near_kept', true ),
+			'near: keep both clears the note and remembers the pair' );
+		$this->ok( null === gasf_crm_photo_near_mark( $new, $ha2 ), 'near: a kept pair is not raised again' );
+		delete_post_meta( $new, '_gasf_photo_near_kept' );
+		$this->ok( null !== gasf_crm_photo_near_mark( $new, $ha2 ), 'near: forgetting the verdict raises it again' );
+		$pairs = gasf_crm_photo_twins();
+		$hit = false; foreach ( $pairs as $pr ) { if ( $pr['a'] === min( $lib, $new ) && $pr['b'] === max( $lib, $new ) ) { $hit = true; } }
+		$this->ok( $hit, 'near: the twins report lists the pair' );
+		wp_delete_attachment( $lib, true );
+		$this->ok( null === gasf_crm_photo_near_info( $new ) && ! get_post_meta( $new, '_gasf_photo_near', true ), 'near: when the twin is deleted the note comes off - this is the only copy now' );
+		foreach ( array( $a, $a2, $b, $flat ) as $t ) { @unlink( $t ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		$up = (string) file_get_contents( GASF_CRM_DIR . '/photos-upload.php' );
+		$this->ok( false !== strpos( $up, "\$dhash = \$isVideo ? '' : gasf_crm_photo_dhash_file( \$f['tmp_name'] );" ) && false !== strpos( $up, "if ( '' !== \$dhash ) { gasf_crm_photo_near_mark( \$id, \$dhash ); }" ),
+			'near: intake hashes the incoming bytes and notes the twin before the hold branch' );
+		$js = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$this->ok( false !== strpos( $js, 'function nearNote(p)' ) && false !== strpos( $js, 'h += nearNote(p);' ) && false !== strpos( $js, 'if (p.near) { bits.push(nearNote(p)); }' ),
+			'near: the review screen and the library editor both show the note' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

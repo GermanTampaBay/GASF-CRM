@@ -1467,6 +1467,26 @@ function gasf_crm_render_inbox_script() {
 		if (m && +m[2] >= 1 && +m[2] <= 12) { return MONTHS[+m[2] - 1] + ' ' + m[1]; }
 		return t;
 	}
+	// "Looks like a copy of #N": the twin the server found at intake, with its
+	// picture, and a way to say it is not one. Deleting stays the ordinary
+	// delete - nothing here acts on the guess.
+	function nearNote(p){
+		if (!p || !p.near) { return ''; }
+		var n = p.near;
+		return '<div class="note warn pnear" data-photo="' + p.id + '">' +
+			(n.thumb ? '<img src="' + esc(n.thumb) + '" alt="">' : '') +
+			'<span>Looks like a copy of <strong>#' + n.id + '</strong>' + (n.title ? ' — ' + esc(n.title) : '') + ', ' + esc(n.where || '') +
+			' (' + n.distance + ' of 64 bits apart). If it is, delete this one as usual.</span> ' +
+			'<button type="button" class="btn sec pnearkeep">Not a copy — keep both</button></div>';
+	}
+	document.addEventListener('click', function(ev){
+		var b = ev.target.closest ? ev.target.closest('.pnearkeep') : null;
+		if (!b) { return; }
+		var box = b.closest('.pnear');
+		b.disabled = true;
+		api('/photos/near-keep', { method:'POST', body: JSON.stringify({ photo: Number(box.dataset.photo) }) })
+			.then(function(){ box.remove(); }, function(e){ b.disabled = false; b.textContent = (e && e.message) || 'Could not save that'; });
+	});
 	function whenOf(p){
 		return [ takenLabel(p && p.taken), (p && p.taken_at) || '' ].filter(Boolean).join(' ');
 	}
@@ -2536,9 +2556,12 @@ function gasf_crm_render_inbox_script() {
 						if (finished) { u.state = 'sending'; }
 						var now = Date.now();
 						if (finished || now - lastPaint > 200) { lastPaint = now; upPaint(); }
-					}).then(function(){
+					}).then(function(r){
 						u.state = 'done';
 						added++;
+						// The server noticed a twin on the way in: say so here, where
+						// the uploader is still looking, not only on the photo's card.
+						if (r && r.photo && r.photo.near) { u.msg = 'added — looks like a copy of #' + r.photo.near.id; }
 					}).catch(function(e){
 						u.state = 'failed';
 						u.msg = u.name + ' ' + (e && e.message ? e.message : 'failed.');
@@ -2662,6 +2685,7 @@ function gasf_crm_render_inbox_script() {
 					'<span class="pmeta">' + esc(p.from) +
 					(whenOf(p) ? ' · ' + esc(whenOf(p)) : '') +
 					(p.bucket === 'review' && p.pending ? '<em>described</em>' : '') +
+					(p.near ? '<em>looks like a copy</em>' : '') +
 					'</span></button>';
 			}).join('');
 			Array.prototype.forEach.call(pgrid.querySelectorAll('.pthumbcard'), function(b){
@@ -2790,6 +2814,7 @@ function gasf_crm_render_inbox_script() {
 				// Not a verdict — most first-timers are exactly who they say
 				// they are — but worth knowing before it joins the collection.
 				(p.known ? '' : ' <span class="firsttime">first time we have heard from them</span>') + '</p>';
+			h += nearNote(p);
 
 			if (p.pending) {
 				h += '<div class="note ok">The sender described this. Check it and approve.</div>';
@@ -4140,6 +4165,7 @@ function gasf_crm_render_inbox_script() {
 		if (when) { bits.push(esc(when)); }
 		if (p.w) { bits.push(p.w + '×' + p.h + ' · ' + Math.round(p.bytes / 1024) + ' KB'); }
 		if (p.from) { bits.push('Given to the club by ' + esc(p.from)); }
+		if (p.near) { bits.push(nearNote(p)); }
 
 		/*
 		 * The verdict, and nothing else.

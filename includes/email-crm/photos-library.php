@@ -357,6 +357,8 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		'taken'   => (string) ( $info['taken'] ?? '' ),
 		'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
 		'flyer'   => (bool) get_post_meta( $id, '_gasf_photo_flyer', true ),
+		// The photo this one looks like a re-encoded copy of, if any.
+		'near'    => function_exists( 'gasf_crm_photo_near_info' ) ? gasf_crm_photo_near_info( $id ) : null,
 		// A clip has no thumbnail and no sizes, so the grid and the viewer both
 		// need to know before they try to put it in an <img>.
 		'kind'    => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
