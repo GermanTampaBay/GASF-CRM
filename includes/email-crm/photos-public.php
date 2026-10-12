@@ -190,6 +190,27 @@ function gasf_crm_door_stamp_spend( $stamp ) {
 	return true;
 }
 
+/**
+ * One box, several names: "John, Mary and Bob" is three people, not one.
+ *
+ * Guests type a whole party into the first box whatever the label says, and
+ * the archive then holds a person called "Lydia Laurel Hickey and Laura
+ * Puckett". Split on the separators people actually use - commas, slashes,
+ * ampersands, plus signs, line breaks, and the words "and"/"und" standing
+ * alone (Brand and Anderson are left whole). The same rule runs in the
+ * guest's browser; this is for what arrives regardless.
+ */
+function gasf_crm_door_split_names( $raw ) {
+	$parts = preg_split( '~\s*(?:[,;/&+\r\n]|\b(?:and|und)\b)\s*~iu', (string) $raw );
+	$out   = array();
+	foreach ( (array) $parts as $p ) {
+		$p = trim( preg_replace( '~\s+~u', ' ', (string) $p ) );
+		if ( '' === $p ) { continue; }
+		if ( ! in_array( strtolower( $p ), array_map( 'strtolower', $out ), true ) ) { $out[] = $p; }
+	}
+	return $out;
+}
+
 function gasf_crm_door_device_count( $token ) {
 	return (int) get_transient( gasf_crm_door_device_key( $token ) );
 }
@@ -711,7 +732,9 @@ function gasf_crm_door_receive( array $door ) {
 	$people = array();
 	foreach ( (array) ( $_POST['people'] ?? array() ) as $n ) {
 		$n = trim( sanitize_text_field( wp_unslash( (string) $n ) ) );
-		if ( '' !== $n ) { $people[] = $n; }
+		foreach ( gasf_crm_door_split_names( $n ) as $one ) {
+			if ( ! in_array( strtolower( $one ), array_map( 'strtolower', $people ), true ) ) { $people[] = $one; }
+		}
 	}
 
 	// A party knows its own event and night; the place is now the guest's to
@@ -1121,7 +1144,8 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .pdel{flex:0 0 auto;width:44px;padding:8px 0;background:transparent;color:inherit;
 		border:1px solid currentColor;opacity:.7}
 	.gasf-door-entry .pdel:hover{opacity:1;background:rgba(127,127,127,.15)}
-	.gasf-door-entry .pwrap{position:relative}
+	.gasf-door-entry .pwrap{position:relative;flex-wrap:wrap}
+	.gasf-door-entry .pnote{flex:1 0 100%;font-size:.88em;color:#f3c8c8;margin:2px 0 0 2px}
 	/* Phones. 16px is the size below which iOS Safari zooms the whole page in
 	   on every tap into a box, and 44px is a thumb. */
 	.gasf-door-entry input[type=text],.gasf-door-entry select,.gasf-door-entry textarea{font-size:16px}
@@ -1279,16 +1303,58 @@ function gasf_crm_door_script( $party ) {
 		paint();
 	};
 
-	document.getElementById('paddp').onclick = function(){
+	function addNameBox(value){
 		var box = document.getElementById('pnames');
 		var w = box.querySelector('.pwrap').cloneNode(true);
 		var n = w.querySelector('input');
-		n.value = '';
+		n.value = value || '';
 		n.removeAttribute('id'); // the label belongs to the first box only
 		var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
+		var note = w.querySelector('.pnote'); if (note) { note.remove(); }
 		box.appendChild(w);
-		n.focus();
-	};
+		return n;
+	}
+	document.getElementById('paddp').onclick = function(){ addNameBox('').focus(); };
+
+	// One box, several names. The same rule as the server's: commas, slashes,
+	// ampersands, plus signs, line breaks, and "and"/"und" standing alone.
+	function splitNames(v){
+		return String(v || '').split(/\s*(?:[,;\/&+\r\n]|\b(?:and|und)\b)\s*/i)
+			.map(function(s){ return s.replace(/\s+/g, ' ').trim(); })
+			.filter(function(s, i, a){ return s && a.map(function(x){ return x.toLowerCase(); }).indexOf(s.toLowerCase()) === i; });
+	}
+	function noteFor(input){
+		var w = input.closest('.pwrap');
+		var note = w.querySelector('.pnote');
+		var parts = splitNames(input.value);
+		if (parts.length > 1) {
+			if (!note) { note = document.createElement('span'); note.className = 'pnote'; w.appendChild(note); }
+			note.textContent = 'One name per box, please — these will go into ' + parts.length + ' boxes.';
+		} else if (note) { note.remove(); }
+	}
+	// Leaving the box, or Enter, does the splitting: the first name stays,
+	// the rest get boxes of their own. Submit does it too, in case neither.
+	function splitBox(input){
+		var parts = splitNames(input.value);
+		if (parts.length < 2) { noteFor(input); return null; }
+		input.value = parts[0];
+		var last = null;
+		for (var i = 1; i < parts.length; i++) { last = addNameBox(parts[i]); }
+		noteFor(input);
+		return last;
+	}
+	function splitAllBoxes(){
+		Array.prototype.forEach.call(document.querySelectorAll('#pnames .pname'), function(i){ splitBox(i); });
+	}
+	document.getElementById('pnames').addEventListener('input', function(e){ if (e.target.classList.contains('pname')) { noteFor(e.target); } });
+	document.getElementById('pnames').addEventListener('focusout', function(e){ if (e.target.classList.contains('pname')) { splitBox(e.target); } });
+	document.getElementById('pnames').addEventListener('keydown', function(e){
+		if (e.key === 'Enter' && e.target.classList.contains('pname') && splitNames(e.target.value).length > 1) {
+			e.preventDefault();
+			var last = splitBox(e.target);
+			if (last) { last.focus(); }
+		}
+	});
 	// "×" takes a box away again. The last one is emptied rather than removed,
 	// so there is always one to type into.
 	document.getElementById('pnames').addEventListener('click', function(e){
@@ -1725,6 +1791,7 @@ function gasf_crm_door_script( $party ) {
 
 		// Read the answers ONCE, before the first upload: they describe the
 		// batch, and a guest editing a box mid-send should not split it.
+		splitAllBoxes();
 		var people = Array.prototype.map.call(document.querySelectorAll('#pnames .pname'), function(i){
 			return i.value.trim();
 		}).filter(Boolean);

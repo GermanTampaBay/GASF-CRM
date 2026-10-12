@@ -787,6 +787,21 @@ final class GASF_CRM_Selftest {
 		$this->ok( false !== strpos( $ui, "'That was the last one. Nothing needs you.'" ), 'review: the end of the queue is said plainly' );
 	}
 
+	/** Several names in one box become several people, on the server as in the browser. */
+	public function test_door_splits_names() {
+		$this->ok( array( 'John', 'Mary', 'Bob', 'Sue', 'Tom', 'Jan', 'Jo' ) === gasf_crm_door_split_names( 'John, Mary and Bob & Sue/Tom; Jan + Jo' ),
+			'door names: commas, and, ampersands, slashes, semicolons, and plus signs all separate' );
+		$this->ok( array( 'Lydia Laurel Hickey', 'Laura Puckett' ) === gasf_crm_door_split_names( 'Lydia Laurel Hickey and Laura Puckett' ),
+			'door names: the case the archive actually holds comes apart' );
+		$this->ok( array( 'Hans Brand', 'Sandy Anderson' ) === gasf_crm_door_split_names( "Hans Brand und\nSandy Anderson" ),
+			'door names: "und" and a line break separate, but Brand and Anderson stay whole' );
+		$this->ok( array( 'Mary-Ann Brandt' ) === gasf_crm_door_split_names( '  Mary-Ann   Brandt ' ), 'door names: one name is one name, tidied' );
+		$this->ok( array( 'Jo' ) === gasf_crm_door_split_names( 'Jo, jo, JO' ), 'door names: the same name twice is once' );
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false !== strpos( $door, 'gasf_crm_door_split_names( $n )' ) && false !== strpos( $door, "One name per box, please" ) && false !== strpos( $door, 'splitAllBoxes();' ),
+			'door names: the server splits what arrives, and the browser says so and splits before sending' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
