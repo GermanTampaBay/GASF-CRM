@@ -148,8 +148,10 @@ function gasf_crm_photo_display_title( $attachment_id ) {
  * before crediting the photographer that the club does not intend to make
  * every time. Grants made under 2026-07-1 still carry that promise, in their
  * stored text.
+ *
+ * 2026-10-2 shortened the unticked (limited) wording; same scope.
  */
-define( 'GASF_CRM_PHOTO_CONSENT_VERSION', '2026-10-1' );
+define( 'GASF_CRM_PHOTO_CONSENT_VERSION', '2026-10-2' );
 
 function gasf_crm_photo_consent_text() {
 	$org = gasf_crm_cfg()['signature_org'];
@@ -311,7 +313,7 @@ add_action( 'gasf_crm_photo_event', 'gasf_crm_photo_origin_prune' );
  * survives any later edit of this sentence.
  */
 function gasf_crm_photo_consent_text_limited() {
-	return 'Untick the box to let us use these images solely for display on our property and for general archival usage.';
+	return 'Untick to limit use to display at the club and our archive.';
 }
 
 /**

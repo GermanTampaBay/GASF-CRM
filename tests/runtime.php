@@ -358,7 +358,10 @@ final class GASF_CRM_Selftest {
 		$text = gasf_crm_photo_consent_text();
 		$this->ok( false === stripos( $text, 'asked first' ), 'consent wording: no promise to ask before naming the sender' );
 		$this->ok( false !== stripos( $text, 'permission to use them' ), 'consent wording: the grant itself is still there' );
-		$this->ok( '2026-07-1' !== GASF_CRM_PHOTO_CONSENT_VERSION, 'consent wording: the version moved with the text' );
+		$this->ok( ! in_array( GASF_CRM_PHOTO_CONSENT_VERSION, array( '2026-07-1', '2026-10-1' ), true ), 'consent wording: the version moved with the text' );
+		$lim = gasf_crm_photo_consent_text_limited();
+		$this->ok( false !== stripos( $lim, 'display at the club' ) && false !== stripos( $lim, 'archive' ) && strlen( $lim ) < 80,
+			'consent wording: the unticked grant is short and still names both uses it allows' );
 	}
 
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
