@@ -783,7 +783,7 @@ final class GASF_CRM_Selftest {
 	public function test_review_advances() {
 		$ui = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
 		$this->ok( false === strpos( $ui, 'loadPhotos(); openPhoto(id);' ), 'review: approving no longer re-opens the photo just approved' );
-		$this->ok( 2 === substr_count( $ui, 'openAfter(id);' ), 'review: approve and reject both move on to the next photo' );
+		$this->ok( 2 === substr_count( $ui, 'openAfter(id, ' ), 'review: approve and reject both move on to the next photo' );
 		$this->ok( false !== strpos( $ui, "'That was the last one. Nothing needs you.'" ), 'review: the end of the queue is said plainly' );
 	}
 
