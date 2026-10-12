@@ -3931,7 +3931,7 @@ final class GASF_CRM_Selftest {
 		$yr = false === $ys ? '' : substr( $door, $ys, 1200 );
 		$this->ok( '' !== $yr && false !== strpos( $yr, 'gasf_crm_door_onproperty()' ) && false === strpos( $yr, 'place_tree_public' ),
 			'door: the year-round place list is the short on-property one, not every public place' );
-		$this->ok( false !== strpos( $door, '<option value="__other">' ),
+		$this->ok( false !== strpos( $door, "'__other', 'Somewhere else'" ),
 			'door: and "somewhere else" is still there for everywhere it leaves out' );
 		$this->ok( false !== strpos( $door, 'gasf_photo_public_people()' ) && false !== strpos( $door, 'gasfPeopleMatch(q, PEOPLE, taken)' ),
 			'door: names are suggested from the public-names list, with the shared matcher' );
