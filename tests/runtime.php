@@ -3603,6 +3603,10 @@ final class GASF_CRM_Selftest {
 			'door: the year-round place list is the short on-property one, not every public place' );
 		$this->ok( false !== strpos( $door, '<option value="__other">' ),
 			'door: and "somewhere else" is still there for everywhere it leaves out' );
+		$this->ok( false !== strpos( $door, 'gasf_photo_public_people()' ) && false !== strpos( $door, 'gasfPeopleMatch(q, PEOPLE, taken)' ),
+			'door: names are suggested from the public-names list, with the shared matcher' );
+		$this->ok( false !== strpos( $door, "if (evId.value) {\n\t\t\t// Picked: the filled-in box is the answer, so the list goes." ),
+			'door: picking an occasion closes the list instead of searching on its title' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
 			'door: names are optional on both doors, and the label says so on both' );
 

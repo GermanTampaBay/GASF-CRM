@@ -882,8 +882,7 @@ function gasf_crm_door_page( $door, $notice ) {
 		 * that makes the expensive one free: pick a day and the club's own
 		 * events on it are offered, so nobody has to spell Schuhplattlerfest.
 		 */
-		echo '<p><label for="ptaken"><strong>When was it taken?</strong></label><br><input type="date" id="ptaken"></p>';
-		echo '<p class="gasf-door-fine">Date is optional.</p>';
+		echo '<p><label for="ptaken"><strong>When was it taken? (optional)</strong></label><br><input type="date" id="ptaken"></p>';
 
 		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
 		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
@@ -1011,6 +1010,14 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .pdel{flex:0 0 auto;width:44px;padding:8px 0;background:transparent;color:inherit;
 		border:1px solid currentColor;opacity:.7}
 	.gasf-door-entry .pdel:hover{opacity:1;background:rgba(127,127,127,.15)}
+	.gasf-door-entry .pwrap{position:relative}
+	.gasf-door-entry .psug{position:absolute;top:calc(100% + 2px);left:0;right:50px;z-index:40;
+		background:#fff;border:1px solid #0f6e56;border-radius:3px;box-shadow:0 10px 24px rgba(0,0,0,.25);
+		max-height:240px;overflow:auto}
+	.gasf-door-entry .psug .psugi{display:block;width:100%;text-align:left;background:#fff;color:#1d2b27;
+		border:0;border-bottom:1px solid #e3ebe8;border-radius:0;padding:11px 12px}
+	.gasf-door-entry .psug .psugi:last-child{border-bottom:0}
+	.gasf-door-entry .psug .psugi.on,.gasf-door-entry .psug .psugi:hover:not(:disabled){background:#e3f2ed;color:#0c5a46;border-color:#e3ebe8}
 	/* "Clear these" reads as part of its sentence, not as a second big button
 	   competing with Send. */
 	.gasf-door-entry .gasf-door-linkbtn{background:none;border:0;padding:0;color:inherit;
@@ -1033,6 +1040,14 @@ function gasf_crm_door_styles() {
 }
 
 function gasf_crm_door_script( $party ) {
+	// Names to suggest as the guest types: the same list and the same matcher
+	// as the tagging page - only names already printed on public photos, so
+	// nothing here is news to anybody who can open the library.
+	$people = function_exists( 'gasf_photo_public_people' ) ? gasf_photo_public_people() : array();
+	if ( function_exists( 'gasf_photo_matcher_js' ) ) {
+		echo '<script>' . gasf_photo_matcher_js() . '</script>'; // phpcs:ignore WordPress.Security.EscapeOutput
+	}
+	printf( '<script>var GASF_DOOR_PEOPLE=%s;</script>', wp_json_encode( $people ) );
 	?>
 <script>
 (function(){
@@ -1074,6 +1089,7 @@ function gasf_crm_door_script( $party ) {
 		var n = w.querySelector('input');
 		n.value = '';
 		n.removeAttribute('id'); // the label belongs to the first box only
+		var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
 		box.appendChild(w);
 		n.focus();
 	};
@@ -1092,6 +1108,59 @@ function gasf_crm_door_script( $party ) {
 		if (hadLabel && first) { first.id = 'pname0'; }
 		if (next) { next.querySelector('input').focus(); }
 	});
+
+	// Name suggestions, so a guest picks "Michael Tressler" rather than
+	// inventing "Mike Tressler" - two people to the archive.
+	(function(){
+		if (typeof gasfPeopleMatch !== 'function') { return; }
+		var PEOPLE = gasfPrepare(window.GASF_DOOR_PEOPLE || []);
+		var names = document.getElementById('pnames');
+		var open = null, items = [], sel = -1;
+
+		function close(){ if (open) { open.remove(); open = null; items = []; sel = -1; } }
+		function choose(input, p){ if (p) { input.value = p.value; } close(); }
+		function show(input){
+			close();
+			var q = input.value.trim();
+			if (q.length < 2) { return; }
+			var taken = [];
+			Array.prototype.forEach.call(names.querySelectorAll('.pname'), function(o){
+				if (o !== input && o.value.trim()) { taken.push(o.value.trim()); }
+			});
+			items = gasfPeopleMatch(q, PEOPLE, taken);
+			if (!items.length) { return; }
+			var d = document.createElement('div');
+			d.className = 'psug';
+			d.innerHTML = items.map(function(p, i){
+				return '<button type="button" class="psugi' + (i === 0 ? ' on' : '') + '" data-i="' + i + '">' + esc(p.label) + '</button>';
+			}).join('');
+			input.parentNode.appendChild(d);
+			open = d; sel = 0;
+			// mousedown, not click: blur fires first and would close the list
+			// out from under the finger.
+			d.addEventListener('mousedown', function(ev){
+				var b = ev.target.closest('.psugi');
+				if (!b) { return; }
+				ev.preventDefault();
+				choose(input, items[parseInt(b.dataset.i, 10)]);
+			});
+		}
+		function move(step){
+			if (!open) { return; }
+			sel = (sel + step + items.length) % items.length;
+			Array.prototype.forEach.call(open.querySelectorAll('.psugi'), function(b, i){ b.classList.toggle('on', i === sel); });
+		}
+
+		names.addEventListener('input', function(ev){ if (ev.target.classList.contains('pname')) { show(ev.target); } });
+		names.addEventListener('keydown', function(ev){
+			if (!open || !ev.target.classList.contains('pname')) { return; }
+			if (ev.key === 'ArrowDown') { move(1); ev.preventDefault(); }
+			else if (ev.key === 'ArrowUp') { move(-1); ev.preventDefault(); }
+			else if (ev.key === 'Enter') { choose(ev.target, items[sel]); ev.preventDefault(); }
+			else if (ev.key === 'Escape') { close(); }
+		});
+		names.addEventListener('focusout', function(){ setTimeout(close, 150); });
+	}());
 
 	function val(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 
@@ -1137,8 +1206,16 @@ function gasf_crm_door_script( $party ) {
 		var d = dateIn ? dateIn.value : '';
 		var list, note = '';
 
-		if (q.length >= 2) {
-			list = EV.filter(function(e){ return e.title.toLowerCase().indexOf(q) !== -1; }).slice(0, 8);
+		if (evId.value) {
+			// Picked: the filled-in box is the answer, so the list goes. Typing
+			// in the box again un-picks it and brings the list back.
+			list = [];
+		} else if (q.length >= 2) {
+			var hit = function(e){ return e.title.toLowerCase().indexOf(q) !== -1; };
+			// A date already given narrows it first; the whole calendar only
+			// when nothing that day matches.
+			list = d ? EV.filter(function(e){ return e.date === d && hit(e); }) : [];
+			if (!list.length) { list = EV.filter(hit).slice(0, 8); }
 		} else if (d) {
 			list = EV.filter(function(e){ return e.date === d; });
 			// Say so rather than showing an empty box. The club's calendar does
@@ -1173,7 +1250,14 @@ function gasf_crm_door_script( $party ) {
 			evT = setTimeout(evPaint, 150);
 		};
 	}
-	if (dateIn) { dateIn.onchange = function(){ evPaint(); }; }
+	if (dateIn) {
+		dateIn.onchange = function(){
+			// A different day un-picks an event that was not on it.
+			var on = EV.filter(function(e){ return String(e.id) === evId.value; })[0];
+			if (on && dateIn.value && on.date !== dateIn.value) { evId.value = ''; evIn.value = ''; }
+			evPaint();
+		};
+	}
 
 	/* -------- remembered on this device, and only on this device --------
 	   Somebody sending the club photos of an evening usually sends them in more
