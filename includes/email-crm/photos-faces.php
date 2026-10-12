@@ -164,6 +164,76 @@ function gasf_crm_faces_guard() {
 		: new WP_Error( 'gasf_crm_403', 'The scanner key is missing or wrong.', array( 'status' => 403 ) );
 }
 
+/* =====================================================================
+ * Tombstones: which photos are gone, so the scanner can forget them
+ * ================================================================== */
+
+/*
+ * The scanner learns incrementally - it only ever looks past its watermark -
+ * so a photo deleted here stayed in its database for good: the vectors it
+ * learned from that photo kept matching, the discovery board kept a face
+ * from a picture nobody could open, and a member's withdrawn photo lived on
+ * as a reference the club had agreed to remove. Nothing told the scanner.
+ *
+ * Now every deleted image is noted here with the moment it went, and the
+ * scanner asks "what has gone since I last looked?" before it learns. The
+ * list is pruned at 180 days: a scanner that has not run in half a year
+ * relearns from scratch anyway (its key will have been reissued), and the
+ * option stays a few hundred kilobytes at most.
+ */
+define( 'GASF_CRM_FACE_TOMBSTONE_DAYS', 180 );
+define( 'GASF_CRM_FACE_TOMBSTONE_MAX', 20000 );
+
+/** Note that an image attachment is being deleted. Runs on delete_attachment, before the row goes. */
+function gasf_crm_face_tombstone( $attachment_id ) {
+	global $wpdb;
+	$id = (int) $attachment_id;
+	if ( ! $id || 0 !== strpos( (string) get_post_mime_type( $id ), 'image/' ) ) { return false; }
+	// Two volunteers deleting at once must not lose each other's note: the
+	// read-modify-write is held under a named lock, as the door counters are.
+	$locked = 1 === (int) $wpdb->get_var( $wpdb->prepare( 'SELECT GET_LOCK(%s, %d)', 'gasf_face_tombstones', 3 ) );
+	wp_cache_delete( 'gasf_face_tombstones', 'options' );
+	$all = get_option( 'gasf_face_tombstones', array() );
+	if ( ! is_array( $all ) ) { $all = array(); }
+	$all[ $id ] = time();
+	update_option( 'gasf_face_tombstones', gasf_crm_face_tombstones_trim( $all ), false );
+	if ( $locked ) { $wpdb->query( $wpdb->prepare( 'SELECT RELEASE_LOCK(%s)', 'gasf_face_tombstones' ) ); }
+	return true;
+}
+add_action( 'delete_attachment', 'gasf_crm_face_tombstone', 5 );
+
+/** The list with anything older than the retention, or beyond the cap, dropped (oldest first). */
+function gasf_crm_face_tombstones_trim( array $all, $now = null ) {
+	$now   = null === $now ? time() : (int) $now;
+	$floor = $now - GASF_CRM_FACE_TOMBSTONE_DAYS * DAY_IN_SECONDS;
+	$out   = array();
+	foreach ( $all as $id => $t ) {
+		if ( (int) $t >= $floor ) { $out[ (int) $id ] = (int) $t; }
+	}
+	if ( count( $out ) > GASF_CRM_FACE_TOMBSTONE_MAX ) {
+		asort( $out );
+		$out = array_slice( $out, -GASF_CRM_FACE_TOMBSTONE_MAX, null, true );
+	}
+	return $out;
+}
+
+/**
+ * Ids deleted at or after $since (a unix time), ascending. "At or after", not
+ * "after": the scanner stores the server's clock as its next cursor, and a
+ * photo deleted in that same second must not fall between two runs. Seeing a
+ * tombstone twice costs nothing; missing one is the bug this exists to end.
+ */
+function gasf_crm_face_tombstones_since( $since ) {
+	$since = max( 0, (int) $since );
+	$all   = get_option( 'gasf_face_tombstones', array() );
+	$out   = array();
+	foreach ( is_array( $all ) ? $all : array() as $id => $t ) {
+		if ( (int) $t >= $since ) { $out[] = (int) $id; }
+	}
+	sort( $out );
+	return $out;
+}
+
 /** Percent threshold for auto-accepting scanner matches onto photo tags. */
 function gasf_crm_faces_auto_accept_threshold() {
 	$raw = get_option( 'gasf_crm_faces_auto_accept_threshold', GASF_CRM_FACES_AUTO_ACCEPT_DEFAULT );
@@ -3026,6 +3096,21 @@ add_action( 'rest_api_init', function () {
 			} while ( $again );
 
 			return array( 'photos' => $out );
+		},
+	) );
+
+	// What has been deleted since the scanner last asked - see gasf_crm_face_tombstone().
+	register_rest_route( 'gasf/v1', '/crm/photos/faces/tombstones', array(
+		'methods'             => 'GET',
+		'permission_callback' => $guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$since = max( 0, (int) $req->get_param( 'since' ) );
+			return array(
+				'since'      => $since,
+				'now'        => time(),
+				'ids'        => gasf_crm_face_tombstones_since( $since ),
+				'keeps_days' => GASF_CRM_FACE_TOMBSTONE_DAYS,
+			);
 		},
 	) );
 } );

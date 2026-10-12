@@ -145,7 +145,7 @@ face rectangles use the same orientation Edge displays.
 | Command | What it does |
 |---|---|
 | `python scan.py` | Learn if the reference set is empty, then suggest names for whatever is waiting, then stop. Names only: no photo descriptions. |
-| `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). |
+| `python scan.py --learn` | Refresh the reference set from newly tagged photos first (incremental — cheap). Every learn first asks the server which photos were deleted since the last run and forgets them (references, unknown faces, cached detections). |
 | `python scan.py --relearn` | Study every tagged photo again from the start. Run once after a server-side fix to the labels (2.91.0 corrected which picture each box was measured on). |
 | `python scan.py --describe` | Names **and** photo descriptions from the local caption model. Slow — a minute or more a photo with `qwen3-vl:30b` — so best left running. With no caption model set, it says so and does names only. The scheduled task (`run.ps1`) passes this by default. |
 | `python scan.py --label` | Open a local browser app: gallery first, click a photo to open it, navigate one-photo-at-a-time with Back/Next, Exit back to gallery, autocomplete names from library people, and save explicit box→name mappings for learning. |

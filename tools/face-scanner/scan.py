@@ -84,6 +84,7 @@ import os
 import re
 import secrets
 import sqlite3
+import types
 import subprocess
 import sys
 import sysconfig
@@ -116,7 +117,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.8.1"
+SCANNER_VERSION = "1.9.0"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -1731,6 +1732,77 @@ def refresh_reference_selection(conn, engine=None, people=None):
                     candidate["id"],
                 ),
             )
+
+
+def forget_photos(conn, ids):
+    """Drop everything this database holds about photos the server no longer has.
+
+    References, unknown faces, cached detections, dismissals - all keyed by a
+    photo id that now points at nothing. A discovery cluster whose anchor face
+    went with them is dropped too, so the board never opens on a blank.
+    People whose references shrank are re-selected, so a person who lost
+    their best example is matched from the examples that remain, not from a
+    stale pick. Returns the number of rows removed.
+    """
+    ids = sorted({int(i) for i in ids})
+    if not ids:
+        return 0
+    removed = 0
+    touched = set()
+    with conn:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            touched.update(
+                (row[0], row[1])
+                for row in conn.execute(
+                    f"SELECT DISTINCT engine, person FROM refs WHERE photo_id IN ({marks})", chunk
+                )
+            )
+            for table in ("refs", "unknown_faces", "face_detections", "unknown_dismissals"):
+                removed += conn.execute(
+                    f"DELETE FROM {table} WHERE photo_id IN ({marks})", chunk
+                ).rowcount
+        conn.execute(
+            "DELETE FROM unknown_clusters WHERE anchor_unknown_id NOT IN (SELECT id FROM unknown_faces)"
+        )
+    by_engine = {}
+    for engine, person in touched:
+        by_engine.setdefault(engine, set()).add(person)
+    for engine, people in by_engine.items():
+        refresh_reference_selection(conn, engine, people)
+    conn.commit()
+    return removed
+
+
+def forget_deleted(api, conn, verbose=True):
+    """Ask the server what it has deleted since the last run, and forget it.
+
+    Learning only ever looks past its watermark, so a photo deleted on the
+    server used to stay here for good - still matching, still on the
+    discovery board, a withdrawn photo living on as a reference. The server
+    keeps a dated list of deletions (2.100.0); the cursor it hands back is its
+    own clock, stored here as the next 'since'. An older server without the
+    route, or a server that is not answering, costs a line of output and
+    nothing else: the run goes on exactly as before.
+    """
+    since = int(state_get(conn, "tombstones_since", "0") or 0)
+    try:
+        data = api.get("/tombstones", since=since)
+    except requests.RequestException as e:
+        if verbose:
+            if _http_gone(e):
+                print("deleted photos: the server does not offer the list yet (plugin older than 2.100.0); nothing forgotten")
+            else:
+                print(f"deleted photos: could not ask ({e}); will ask again next run")
+        return 0
+    ids = [int(i) for i in (data.get("ids") or [])]
+    removed = forget_photos(conn, ids)
+    state_set(conn, "tombstones_since", int(data.get("now") or since))
+    conn.commit()
+    if verbose and ids:
+        print(f"deleted photos: {len(ids)} forgotten ({removed} local row(s) removed)")
+    return removed
 
 
 def replace_photo_references(conn, photo_id, engine, references):
@@ -4835,9 +4907,15 @@ def learn(api, conn, backend, verbose=True, full=False):
 
     def fetch_failed(exc, photo_id, before):
         """A photo could not be fetched or read. Decide whether to wait for it."""
-        nonlocal held
+        nonlocal held, removed
         transient = isinstance(exc, requests.RequestException) and not _http_gone(exc)
         note = ""
+        if _http_gone(exc):
+            # Listed a moment ago, gone now: deleted between the page and the
+            # fetch, or a record whose file is missing. Either way nothing
+            # learned from it earlier is worth keeping.
+            removed += forget_photos(conn, [photo_id])
+            note = " - gone from the server; anything learned from it is forgotten"
         if transient:
             tries = int(retry.get(str(photo_id), 0)) + 1
             if tries <= LEARN_RETRY_RUNS:
@@ -4850,6 +4928,7 @@ def learn(api, conn, backend, verbose=True, full=False):
                 note = f" - given up on after {LEARN_RETRY_RUNS} runs; edit the photo's names to have it studied again"
         if verbose:
             print(f"  #{photo_id}: {exc}{note}")
+    forget_deleted(api, conn, verbose)
     beat = _HeartbeatTicker(
         verbose,
         15,
@@ -6105,6 +6184,68 @@ def selftest():
             "migration: an old database is rebuilt with every current column, and works straight away",
         )
 
+    # Deleted photos: the server's tombstone list empties every local table of
+    # them, and a server without the list is a shrug, not a crash.
+    with sqlite3.connect(":memory:") as _tconn:
+        _migrate(_tconn)
+        _tv = np.array([1.0, 2.0, 3.0], dtype=np.float32).tobytes()
+        for _pid in (555, 556):
+            _tconn.execute(
+                "INSERT INTO refs (person, photo_id, engine, face_key, vector) VALUES (?, ?, ?, '0', ?)",
+                ("Hans", _pid, backend.name, _tv),
+            )
+            _tconn.execute(
+                "INSERT INTO unknown_faces (engine, photo_id, face_key, box_x, box_y, box_w, box_h, "
+                "image_width, image_height, vector, updated_at) VALUES (?, ?, 'k', 1, 1, 2, 2, 10, 10, ?, 1)",
+                (backend.name, _pid, _tv),
+            )
+            _tconn.execute(
+                "INSERT INTO face_detections (photo_id, engine, image_rev, width, height, faces, stored_at) "
+                "VALUES (?, ?, 'r', 10, 10, '[]', 1)",
+                (_pid, backend.name),
+            )
+        _anchor = int(_tconn.execute("SELECT id FROM unknown_faces WHERE photo_id = 555").fetchone()[0])
+        _tconn.execute(
+            "INSERT INTO unknown_clusters (cluster_id, engine, anchor_unknown_id, member_count, updated_at) "
+            "VALUES ('c555', ?, ?, 1, 1)",
+            (backend.name, _anchor),
+        )
+        _tconn.commit()
+
+        class _TombstoneApi:
+            def get(self, path, **kw):
+                if path == "/tombstones":
+                    return {"ids": [555], "now": 4242, "since": int(kw.get("since", 0))}
+                return {}
+
+        _n = forget_deleted(_TombstoneApi(), _tconn, verbose=False)
+        _left = {
+            t: [r[0] for r in _tconn.execute(f"SELECT photo_id FROM {t} ORDER BY photo_id")]
+            for t in ("refs", "unknown_faces", "face_detections")
+        }
+        check_that(
+            _n == 3 and all(v == [556] for v in _left.values()),
+            "tombstones: a deleted photo leaves every table, and its neighbour stays",
+        )
+        check_that(
+            _tconn.execute("SELECT COUNT(*) FROM unknown_clusters").fetchone()[0] == 0,
+            "tombstones: a cluster anchored on a deleted face goes with it",
+        )
+        check_that(state_get(_tconn, "tombstones_since", "0") == "4242",
+                   "tombstones: the server's clock becomes the next cursor")
+
+        class _OldServerApi:
+            def get(self, path, **_kw):
+                err = requests.HTTPError("404")
+                err.response = types.SimpleNamespace(status_code=404)
+                raise err
+
+        check_that(
+            forget_deleted(_OldServerApi(), _tconn, verbose=False) == 0
+            and state_get(_tconn, "tombstones_since", "0") == "4242",
+            "tombstones: a server without the route changes nothing and does not stop the run",
+        )
+
     # Retired names: examples under a merged-away spelling are refiled under the
     # current one, and those under a removed name are dropped.
     class _RetiredApi:
@@ -6662,6 +6803,8 @@ def selftest():
                 self.get_params = []
 
             def get(self, path, **params):
+                if path == "/tombstones":
+                    return {"ids": [], "now": 0}
                 if path != "/confirmed":
                     raise RuntimeError(f"unexpected learn path {path}")
                 self.get_params.append(params)
@@ -6747,6 +6890,8 @@ def selftest():
                 self.failures = failures
 
             def get(self, path, **params):
+                if path == "/tombstones":
+                    return {"ids": [], "now": 0}
                 if path != "/confirmed":
                     raise RuntimeError(f"unexpected learn path {path}")
                 self.get_params.append(params)

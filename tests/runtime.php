@@ -952,6 +952,36 @@ final class GASF_CRM_Selftest {
 			'upload tiles: __other is never what is sent, and clearing the form unpresses the tiles' );
 	}
 
+	/** A deleted photo leaves a dated tombstone, and the scanner can ask for those since a moment. */
+	public function test_face_tombstones() {
+		$this->snapshot_option( 'gasf_face_tombstones' );
+		$id = $this->library_photo( 'st-tombstone' );
+		$before = time();
+		$this->ok( ! in_array( $id, gasf_crm_face_tombstones_since( 0 ), true ), 'tombstones: a living photo has none' );
+		wp_delete_attachment( $id, true );
+		$this->ok( in_array( $id, gasf_crm_face_tombstones_since( 0 ), true ), 'tombstones: deleting a photo writes one' );
+		$this->ok( in_array( $id, gasf_crm_face_tombstones_since( $before ), true ), 'tombstones: a deletion in the cursor\'s own second is still reported' );
+		$this->ok( ! in_array( $id, gasf_crm_face_tombstones_since( time() + 60 ), true ), 'tombstones: a cursor after the deletion does not see it' );
+		$this->ok( false === gasf_crm_face_tombstone( 0 ) && false === gasf_crm_face_tombstone( PHP_INT_MAX ), 'tombstones: nothing is written for no photo' );
+		$old  = time() - ( GASF_CRM_FACE_TOMBSTONE_DAYS + 1 ) * DAY_IN_SECONDS;
+		$trim = gasf_crm_face_tombstones_trim( array( 7 => $old, 8 => time() ) );
+		$this->ok( array( 8 ) === array_keys( $trim ), 'tombstones: half a year on, a tombstone is let go' );
+		$big = array();
+		for ( $i = 1; $i <= GASF_CRM_FACE_TOMBSTONE_MAX + 5; $i++ ) { $big[ $i ] = 1000000 + $i; }
+		$trim = gasf_crm_face_tombstones_trim( $big, 1000000 );
+		$this->ok( GASF_CRM_FACE_TOMBSTONE_MAX === count( $trim ) && ! isset( $trim[1] ) && isset( $trim[ GASF_CRM_FACE_TOMBSTONE_MAX + 5 ] ),
+			'tombstones: over the cap, the oldest go first' );
+		$res = $this->rest_get( '/crm/photos/faces/tombstones', array( 'since' => 0 ) );
+		$this->ok( is_array( $res ) && in_array( $id, (array) ( $res['ids'] ?? array() ), true ) && abs( time() - (int) ( $res['now'] ?? 0 ) ) < 5,
+			'tombstones: the route lists the deletion and hands back the server\'s clock' );
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-faces.php' );
+		$this->ok( false !== strpos( $src, "'/crm/photos/faces/tombstones', array(\n\t\t'methods'             => 'GET',\n\t\t'permission_callback' => \$guard," ),
+			'tombstones: the route is behind the scanner key' );
+		$py = (string) file_get_contents( dirname( GASF_CRM_DIR, 2 ) . '/tools/face-scanner/scan.py' );
+		$this->ok( false !== strpos( $py, '    forget_deleted(api, conn, verbose)\n    beat = _HeartbeatTicker(' ) && false !== strpos( $py, 'removed += forget_photos(conn, [photo_id])' ),
+			'tombstones: the scanner asks before every learn, and forgets a photo that vanishes mid-learn' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
