@@ -1295,6 +1295,7 @@ function gasf_crm_door_script( $party ) {
 	function takenSync(){
 		if (!dateIn || !tY) { return; }
 		tD.disabled = !tM.value;
+		if (!tM.value) { tD.value = ''; }
 		var v = '';
 		if (tY.value) {
 			v = tY.value;
