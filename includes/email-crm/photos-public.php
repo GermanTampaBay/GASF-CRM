@@ -882,7 +882,21 @@ function gasf_crm_door_page( $door, $notice ) {
 		 * that makes the expensive one free: pick a day and the club's own
 		 * events on it are offered, so nobody has to spell Schuhplattlerfest.
 		 */
-		echo '<p><label for="ptaken"><strong>When was it taken? (optional)</strong></label><br><input type="date" id="ptaken"></p>';
+		/*
+		 * Month, day, and year as three lists rather than one date box, so an
+		 * old print can be "1974" or "March 1982" - a date box only takes a
+		 * whole day. They write YYYY, YYYY-MM, or YYYY-MM-DD into #ptaken, the
+		 * shapes gasf_crm_photo_clean_taken() keeps.
+		 */
+		$months = array( 'January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December' );
+		echo '<p><label for="ptm"><strong>When was it taken? (optional)</strong></label><br><span class="gasf-door-date">';
+		echo '<select id="ptm" aria-label="Month"><option value="">Month</option>';
+		foreach ( $months as $i => $mname ) { printf( '<option value="%02d">%s</option>', $i + 1, esc_html( $mname ) ); }
+		echo '</select><select id="ptd" aria-label="Day"><option value="">Day</option>';
+		for ( $dd = 1; $dd <= 31; $dd++ ) { printf( '<option value="%02d">%d</option>', $dd, $dd ); }
+		echo '</select><select id="pty" aria-label="Year"><option value="">Year</option>';
+		for ( $yy = (int) wp_date( 'Y' ); $yy >= 1900; $yy-- ) { printf( '<option value="%d">%d</option>', $yy, $yy ); }
+		echo '</select></span><input type="hidden" id="ptaken" value=""></p>';
 
 		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
 		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
@@ -1014,6 +1028,15 @@ function gasf_crm_door_styles() {
 		border:1px solid currentColor;opacity:.7}
 	.gasf-door-entry .pdel:hover{opacity:1;background:rgba(127,127,127,.15)}
 	.gasf-door-entry .pwrap{position:relative}
+	/* Phones. 16px is the size below which iOS Safari zooms the whole page in
+	   on every tap into a box, and 44px is a thumb. */
+	.gasf-door-entry input[type=text],.gasf-door-entry select,.gasf-door-entry textarea{font-size:16px}
+	.gasf-door-entry input[type=text],.gasf-door-entry select{min-height:44px;box-sizing:border-box}
+	.gasf-door-entry .pdel{min-height:44px}
+	.gasf-door-entry input[type=checkbox]{width:22px;height:22px;vertical-align:-5px;margin-right:6px}
+	.gasf-door-entry .gasf-door-date{display:flex;gap:6px;max-width:420px}
+	.gasf-door-entry .gasf-door-date select{flex:1 1 0;min-width:0}
+	.gasf-door-entry .gasf-door-date #ptm{flex-grow:1.6}
 	.gasf-door-entry .psug{position:absolute;top:calc(100% + 2px);left:0;right:50px;z-index:40;
 		background:#fff;border:1px solid #0f6e56;border-radius:3px;box-shadow:0 10px 24px rgba(0,0,0,.25);
 		max-height:240px;overflow:auto}
@@ -1265,13 +1288,41 @@ function gasf_crm_door_script( $party ) {
 			evT = setTimeout(evPaint, 150);
 		};
 	}
-	if (dateIn) {
-		dateIn.onchange = function(){
-			// A different day un-picks an event that was not on it.
-			var on = EV.filter(function(e){ return String(e.id) === evId.value; })[0];
-			if (on && dateIn.value && on.date !== dateIn.value) { evId.value = ''; evIn.value = ''; }
-			evPaint();
-		};
+	// The three date lists write one value into #ptaken: the year alone, the
+	// year and month, or the whole day. A day with no month means nothing, so
+	// it is not offered until there is one.
+	var tM = document.getElementById('ptm'), tD = document.getElementById('ptd'), tY = document.getElementById('pty');
+	function takenSync(){
+		if (!dateIn || !tY) { return; }
+		tD.disabled = !tM.value;
+		var v = '';
+		if (tY.value) {
+			v = tY.value;
+			if (tM.value) {
+				v += '-' + tM.value;
+				if (tD.value) {
+					// 31 February is not a day; drop the day rather than send it.
+					var dt = new Date(+tY.value, +tM.value - 1, +tD.value);
+					if (dt.getMonth() === +tM.value - 1) { v += '-' + tD.value; } else { tD.value = ''; }
+				}
+			}
+		}
+		dateIn.value = v;
+		// A different day un-picks an event that was not on it.
+		var on = EV.filter(function(e){ return String(e.id) === evId.value; })[0];
+		if (on && v && on.date !== v) { evId.value = ''; evIn.value = ''; }
+		evPaint();
+	}
+	// The other way: put a remembered or cleared #ptaken back into the lists.
+	function takenShow(){
+		if (!dateIn || !tY) { return; }
+		var p = (dateIn.value || '').split('-');
+		tY.value = p[0] || ''; tM.value = p[1] || ''; tD.value = p[2] || '';
+		tD.disabled = !tM.value;
+	}
+	if (tY) {
+		[tM, tD, tY].forEach(function(s){ s.onchange = takenSync; });
+		tD.disabled = true;
 	}
 
 	/* -------- remembered on this device, and only on this device --------
@@ -1321,6 +1372,8 @@ function gasf_crm_door_script( $party ) {
 		if (placeSel) { placeSel.selectedIndex = 0; }
 		var ow = document.getElementById('pplaceotherwrap'); if (ow) { ow.hidden = true; }
 		var n = document.getElementById('pmemnote'); if (n) { n.parentNode.removeChild(n); }
+		takenShow();
+		evPaint();
 	}
 
 	function restore(){
@@ -1370,6 +1423,7 @@ function gasf_crm_door_script( $party ) {
 		}
 	}
 	restore();
+	takenShow();
 
 	/*
 	 * Clear the form and put the answer at the top.

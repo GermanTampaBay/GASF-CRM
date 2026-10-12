@@ -3617,6 +3617,13 @@ final class GASF_CRM_Selftest {
 		}
 		$this->ok( false === strpos( $door, 'Where was it taken? (optional)' ) && false === strpos( $door, 'What was the occasion? (optional)' ),
 			'door: place and occasion are not marked optional' );
+		$this->ok( false === strpos( $door, 'type="date" id="ptaken"' ) && false !== strpos( $door, 'id="pty"' ) && false !== strpos( $door, 'id="ptm"' ),
+			'door: the date is month, day, and year lists, so a year or a month alone can be given' );
+		$this->ok( '1974' === gasf_crm_photo_clean_taken( '1974' ) && '1982-03' === gasf_crm_photo_clean_taken( '1982-03' )
+				&& '2026-10-10' === gasf_crm_photo_clean_taken( '2026-10-10' ),
+			'door: and all three shapes it sends are kept on the way in' );
+		$this->ok( false !== strpos( $door, 'font-size:16px' ),
+			'door: boxes use 16px text, so iPhones do not zoom in on every tap' );
 		$this->ok( false !== strpos( $door, 'aria-label="Remove this photo"' ) && false !== strpos( $door, "if (!b || busy) { return; }" ),
 			'door: a picked photo can be removed before sending, but not while a batch is going' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
