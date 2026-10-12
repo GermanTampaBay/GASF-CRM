@@ -845,9 +845,9 @@ function gasf_crm_door_page( $door, $notice ) {
 
 	if ( ! $party ) {
 		/*
-		 * The same hierarchical list the tagging page shows — the club's branch
-		 * first, rooms indented under the building that contains them — built by
-		 * the same helper, so the two public forms cannot drift apart.
+		 * Only the grounds: the club, its rooms, and Welton - the same short
+		 * list the party door offers. A guest should not scroll every place the
+		 * club has ever tagged; anywhere else goes in "somewhere else".
 		 *
 		 * No "not sure" option, deliberately. It was the path of least
 		 * resistance sitting above every real answer, and each shrug it
@@ -855,11 +855,7 @@ function gasf_crm_door_page( $door, $notice ) {
 		 * itself is the default: the overwhelmingly likely answer, and wrong in
 		 * a way that is cheap to correct.
 		 */
-		$rows = array();
-		if ( function_exists( 'gasf_photo_place_tree_public' ) ) {
-			$home = function_exists( 'gasf_photo_home_place' ) ? gasf_photo_home_place() : 0;
-			$rows = gasf_photo_place_tree_public( $home ? array( $home ) : array(), $home );
-		}
+		$rows = gasf_crm_door_onproperty();
 
 		echo '<p><label for="pplace"><strong>Where was it taken?</strong></label><br><select id="pplace">';
 		foreach ( $rows as $row ) {

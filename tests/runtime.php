@@ -3581,6 +3581,12 @@ final class GASF_CRM_Selftest {
 			'door: each person box carries a remove button, so cloned boxes do too' );
 		$this->ok( false !== strpos( $door, "closest('.pdel')" ) && false !== strpos( $door, 'w.remove()' ),
 			'door: the remove button is wired to take the box away' );
+		$ys = strpos( $door, "if ( ! \$party ) {\n\t\t/*\n\t\t * Only the grounds" );
+		$yr = false === $ys ? '' : substr( $door, $ys, 1200 );
+		$this->ok( '' !== $yr && false !== strpos( $yr, 'gasf_crm_door_onproperty()' ) && false === strpos( $yr, 'place_tree_public' ),
+			'door: the year-round place list is the short on-property one, not every public place' );
+		$this->ok( false !== strpos( $door, '<option value="__other">' ),
+			'door: and "somewhere else" is still there for everywhere it leaves out' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
 			'door: names are optional on both doors, and the label says so on both' );
 
