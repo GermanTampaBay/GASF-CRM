@@ -711,7 +711,9 @@ final class GASF_CRM_Selftest {
 		$im = imagecreatetruecolor( 8, 8 );
 		ob_start(); imagepng( $im ); $png = ob_get_clean(); imagedestroy( $im );
 		$iend  = strrpos( $png, 'IEND' ) - 4;
-		$data  = "Exif-ish TIFF block";
+		// A real, empty TIFF block: libpng refuses an eXIf chunk that is not one,
+		// and then Imagick cannot open the file at all.
+		$data  = "II*\0" . pack( 'V', 8 ) . pack( 'v', 0 ) . pack( 'V', 0 );
 		$chunk = pack( 'N', strlen( $data ) ) . 'eXIf' . $data . pack( 'N', crc32( 'eXIf' . $data ) );
 		$dirty = substr( $png, 0, $iend ) . $chunk . substr( $png, $iend );
 		$p = wp_tempnam( 'st-meta.png' ); file_put_contents( $p, $dirty );
