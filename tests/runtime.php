@@ -779,6 +779,14 @@ final class GASF_CRM_Selftest {
 		$this->ok( false !== strpos( $kiosk, 'static $base = null;' ), 'primed: the kiosk walks the library once per request' );
 	}
 
+	/** A decision on the review screen opens the next photo, not the one just decided. */
+	public function test_review_advances() {
+		$ui = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$this->ok( false === strpos( $ui, 'loadPhotos(); openPhoto(id);' ), 'review: approving no longer re-opens the photo just approved' );
+		$this->ok( 2 === substr_count( $ui, 'openAfter(id);' ), 'review: approve and reject both move on to the next photo' );
+		$this->ok( false !== strpos( $ui, "'That was the last one. Nothing needs you.'" ), 'review: the end of the queue is said plainly' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

@@ -2711,6 +2711,36 @@ function gasf_crm_render_inbox_script() {
 		}).catch(function(e){ pgrid.innerHTML = '<div class="pane note err">' + esc(e.message) + '</div>'; });
 	}
 
+	/*
+	 * After a decision, open what comes next: the photo that followed the one
+	 * just dealt with, in the order the grid showed; the one before it at the
+	 * end of the list; nothing, said plainly, when the queue is empty.
+	 * Re-opening the photo just approved put a volunteer back on the thing
+	 * they had finished, every single time.
+	 */
+	function gridIds(){
+		return Array.prototype.map.call(pgrid ? pgrid.querySelectorAll('.pthumbcard') : [], function(b){ return parseInt(b.dataset.photo, 10); });
+	}
+	function openAfter(id){
+		var order = gridIds();
+		var at = order.indexOf(id);
+		var reload = loadPhotos();
+		return (reload && reload.then ? reload : Promise.resolve()).then(function(){
+			var left = gridIds();
+			var next = null;
+			for (var i = at + 1; i < order.length && next === null; i++) { if (left.indexOf(order[i]) !== -1) { next = order[i]; } }
+			for (var j = at - 1; j >= 0 && next === null; j--) { if (left.indexOf(order[j]) !== -1) { next = order[j]; } }
+			if (next === null && left.length) { next = left[0]; }
+			if (next !== null) {
+				Array.prototype.forEach.call(pgrid.querySelectorAll('.pthumbcard'), function(b){ b.classList.toggle('on', parseInt(b.dataset.photo, 10) === next); });
+				openPhoto(next);
+				return;
+			}
+			pcur = null;
+			ppane.innerHTML = '<p class="muted">' + (pstate === 'review' ? 'That was the last one. Nothing needs you.' : 'Pick another photo on the left.') + '</p>';
+		});
+	}
+
 	function openPhoto(id){
 		pcur = id;
 		remember();
@@ -2783,7 +2813,7 @@ function gasf_crm_render_inbox_script() {
 					taken: v('.p-taken'), caption: v('.p-caption'),
 					revision: v('.p-rev'),
 					op_id: nextOpId('photo-save-' + id)
-				})}).then(function(){ loadPeople(true); loadPhotos(); openPhoto(id); })
+				})}).then(function(){ loadPeople(true); openAfter(id); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
 		}
@@ -2802,11 +2832,8 @@ function gasf_crm_render_inbox_script() {
 					revision: rv ? rv.value : '',
 					op_id: nextOpId('photo-reject-' + id)
 				}) })
-					.then(function(){
-						pcur = null;
-						ppane.innerHTML = '<p class="muted">Deleted. Pick another photo on the left.</p>';
-						loadPhotos();
-					}).catch(function(e){ rej.disabled = false; alert(e.message); });
+					.then(function(){ pcur = null; openAfter(id); })
+					.catch(function(e){ rej.disabled = false; alert(e.message); });
 			};
 		}
 	}
