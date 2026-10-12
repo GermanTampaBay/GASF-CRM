@@ -1428,6 +1428,15 @@ JS;
 	 * "1982-03" to a date parser turned it into "March 1, 1982" in the public
 	 * title, and a bare year into whatever the parser made of it.
 	 */
+	/** 'year', 'month', 'day', or '' - how much of a date a stored value carries. */
+	function gasf_photo_taken_precision( $taken ) {
+		$taken = trim( (string) $taken );
+		if ( preg_match( '~^\d{4}$~', $taken ) ) { return 'year'; }
+		if ( preg_match( '~^\d{4}-\d{2}$~', $taken ) ) { return 'month'; }
+		if ( preg_match( '~^\d{4}-\d{2}-\d{2}$~', $taken ) ) { return 'day'; }
+		return '';
+	}
+
 	function gasf_photo_taken_label( $taken ) {
 		$taken = trim( (string) $taken );
 		if ( preg_match( '~^(\d{4})$~', $taken ) ) { return $taken; }
@@ -1534,13 +1543,16 @@ JS;
 			'label' => __( 'Date taken', 'gasf' ),
 			'input' => 'html',
 			'html'  => sprintf(
-				'<input type="date" name="attachments[%1$d][gasf_photo_taken]" id="attachments-%1$d-gasf_photo_taken" value="%2$s" style="width:100%%">',
+				// Text, not type=date: a date input cannot hold "1974" or "1982-03",
+				// showed them as blank, and saving the modal posted that blank -
+				// which deleted the date a volunteer had typed in the CRM.
+				'<input type="text" name="attachments[%1$d][gasf_photo_taken]" id="attachments-%1$d-gasf_photo_taken" value="%2$s" placeholder="YYYY, YYYY-MM, or YYYY-MM-DD" inputmode="numeric" style="width:100%%">',
 				(int) $post->ID,
 				esc_attr( $info['taken'] )
 			),
 			'helps' => $info['taken']
-				? __( 'From the camera unless somebody changed it.', 'gasf' )
-				: __( 'The photo carried no date — most likely stripped in transit, which is normal.', 'gasf' ),
+				? sprintf( __( '%s — from the camera unless somebody changed it. A year or a month is fine.', 'gasf' ), gasf_photo_taken_label( $info['taken'] ) )
+				: __( 'The photo carried no date — most likely stripped in transit, which is normal. A year or a month is fine.', 'gasf' ),
 		);
 
 		// Read-only, because these are observations rather than opinions: they
@@ -1607,11 +1619,16 @@ JS;
 			return $post;
 		}
 
-		// Y-m-d and nothing else. checkdate rejects 2026-02-31, which the date
-		// input will happily post from a browser that has no native picker.
-		if ( preg_match( '~^(\d{4})-(\d{2})-(\d{2})$~', $d, $m )
-			&& checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ) {
-			update_post_meta( (int) $post['ID'], '_gasf_photo_taken', $d );
+		// The three precisions the CRM keeps - a year, a month, or a day - through
+		// the same cleaner the CRM editor uses, so this screen cannot store a
+		// shape the rest of the plugin does not read. Anything else is ignored
+		// rather than deleting what was there.
+		$clean = function_exists( 'gasf_crm_photo_clean_taken' ) ? gasf_crm_photo_clean_taken( $d ) : '';
+		if ( '' === $clean && preg_match( '~^(\d{4})-(\d{2})-(\d{2})$~', $d, $m ) && checkdate( (int) $m[2], (int) $m[3], (int) $m[1] ) ) {
+			$clean = $d;
+		}
+		if ( '' !== $clean ) {
+			update_post_meta( (int) $post['ID'], '_gasf_photo_taken', $clean );
 		}
 
 		return $post;

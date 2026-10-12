@@ -1964,6 +1964,9 @@ function gasf_crm_caption_context( $attachment_id ) {
 	if ( '' === $taken_at ) {
 		$taken_date = trim( (string) get_post_meta( $id, '_gasf_photo_taken', true ) );
 		$taken_time = function_exists( 'gasf_photo_taken_time' ) ? (string) gasf_photo_taken_time( $id ) : '';
+		// With no clock to go with it, the date goes out as words at its own
+		// precision - the scanner's board and the caption model both read it.
+		if ( '' === $taken_time && function_exists( 'gasf_photo_taken_label' ) ) { $taken_date = gasf_photo_taken_label( $taken_date ); }
 		$taken_at = trim( $taken_date . ' ' . $taken_time );
 	}
 	$names = function ( $taxonomy ) use ( $id ) {

@@ -1457,8 +1457,18 @@ function gasf_crm_render_inbox_script() {
 	// Date and time as one phrase, for the places that print a photo's details
 	// on a line. Either half can be missing: plenty of photos have a date from
 	// the filename and no EXIF at all.
+	// A date at the precision it was given: "1974" stays a year, "1982-03"
+	// reads "March 1982", and a full day is left as the ISO date volunteers
+	// type and compare. The same three precisions the server keeps.
+	var MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+	function takenLabel(t){
+		t = String(t || '').trim();
+		var m = /^(\d{4})-(\d{2})$/.exec(t);
+		if (m && +m[2] >= 1 && +m[2] <= 12) { return MONTHS[+m[2] - 1] + ' ' + m[1]; }
+		return t;
+	}
 	function whenOf(p){
-		return [ (p && p.taken) || '', (p && p.taken_at) || '' ].filter(Boolean).join(' ');
+		return [ takenLabel(p && p.taken), (p && p.taken_at) || '' ].filter(Boolean).join(' ');
 	}
 
 	function isFlyer(v){

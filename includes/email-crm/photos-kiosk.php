@@ -95,6 +95,9 @@ function gasf_kiosk_photo_card( $id ) {
         'caption'  => (string) get_post_field( 'post_excerpt', $id ),
         'taken'    => $taken,
         'taken_at' => function_exists( 'gasf_photo_taken_time' ) ? gasf_photo_taken_time( $id ) : '',
+        // The words for it, at its own precision: a screen on the wall should
+        // say "March 1982", not "1982-03".
+        'taken_label' => function_exists( 'gasf_photo_taken_label' ) ? gasf_photo_taken_label( $taken ) : $taken,
         'year'     => substr( $taken, 0, 4 ),
         // The public-name list. A screen on the clubhouse wall during an open
         // event is the most public surface the club operates, so somebody who

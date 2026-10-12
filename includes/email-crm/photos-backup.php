@@ -257,6 +257,11 @@ function gasf_crm_backup_sidecar( $id ) {
 		'caption'      => (string) $card['caption'],
 		'taken_date'   => (string) $card['taken'],
 		'taken_time'   => (string) $card['taken_at'],
+		// How much of a date that is, and the words for it. A sidecar is read
+		// years from now by somebody who should not have to guess whether
+		// "1982-03" is March or a typo for the third.
+		'taken_precision' => function_exists( 'gasf_photo_taken_precision' ) ? gasf_photo_taken_precision( $card['taken'] ) : '',
+		'taken_label'  => function_exists( 'gasf_photo_taken_label' ) ? gasf_photo_taken_label( $card['taken'] ) : (string) $card['taken'],
 		/*
 		 * The public-name list, and an honest count of what it leaves out.
 		 *

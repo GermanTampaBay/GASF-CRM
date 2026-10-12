@@ -982,6 +982,47 @@ final class GASF_CRM_Selftest {
 			'tombstones: the scanner asks before every learn, and forgets a photo that vanishes mid-learn' );
 	}
 
+	/** A month or a year stays a month or a year on every surface that prints or stores a date. */
+	public function test_taken_precision_everywhere() {
+		$this->ok( 'month' === gasf_photo_taken_precision( '1982-03' ) && 'year' === gasf_photo_taken_precision( '1974' ) && 'day' === gasf_photo_taken_precision( '2026-10-10' ) && '' === gasf_photo_taken_precision( 'soon' ),
+			'precision: the three shapes are named, and anything else is nothing' );
+		$id = $this->library_photo( 'st-precision' );
+		update_post_meta( $id, '_gasf_photo_taken', '1982-03' );
+		$side = gasf_crm_backup_sidecar( $id );
+		$this->ok( '1982-03' === ( $side['taken_date'] ?? '' ) && 'month' === ( $side['taken_precision'] ?? '' ) && 'March 1982' === ( $side['taken_label'] ?? '' ),
+			'precision: the archive sidecar keeps the raw value and says what it means' );
+		$ctx = gasf_crm_caption_context( $id );
+		$this->ok( 'March 1982' === ( $ctx['taken_at'] ?? '' ), 'precision: the scanner and caption model are handed the words, not "1982-03"' );
+		update_post_meta( $id, '_gasf_photo_taken_at', '14:30' );
+		$ctx = gasf_crm_caption_context( $id );
+		$this->ok( '14:30' === ( $ctx['taken_at'] ?? '' ), 'precision: a camera clock still wins where there is one' );
+		$kiosk = (string) file_get_contents( GASF_CRM_DIR . '/photos-kiosk.php' );
+		$this->ok( false !== strpos( $kiosk, "'taken_label' => function_exists( 'gasf_photo_taken_label' ) ? gasf_photo_taken_label( \$taken ) : \$taken," ),
+			'precision: the kiosk feed carries the words' );
+		$js = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$this->ok( false !== strpos( $js, 'function takenLabel(t)' ) && false !== strpos( $js, 'return [ takenLabel(p && p.taken), ' ),
+			'precision: the volunteer screens print the words on every line that shows a date' );
+		// The Media Library field, which used to be a type=date input that could
+		// not hold a month or a year - and deleted it on save.
+		$cat = (string) file_get_contents( dirname( GASF_CRM_DIR ) . '/photo-catalog.php' );
+		$this->ok( false === strpos( $cat, 'input type="date" name="attachments[' ) && false !== strpos( $cat, 'gasf_crm_photo_clean_taken( $d )' ),
+			'precision: the Media Library field is text and goes through the CRM cleaner' );
+		// The save filter asks whether the current user may edit the photo.
+		$was  = get_current_user_id();
+		$post = array( 'ID' => $id );
+		wp_set_current_user( (int) ( get_users( array( 'role' => 'administrator', 'number' => 1, 'fields' => 'ID' ) )[0] ?? 0 ) );
+		try {
+			apply_filters( 'attachment_fields_to_save', $post, array( 'gasf_photo_taken' => '1974' ) );
+			$this->ok( '1974' === get_post_meta( $id, '_gasf_photo_taken', true ), 'precision: the Media Library field keeps a year' );
+			apply_filters( 'attachment_fields_to_save', $post, array( 'gasf_photo_taken' => '1982-13' ) );
+			$this->ok( '1974' === get_post_meta( $id, '_gasf_photo_taken', true ), 'precision: a bad month leaves the date alone rather than deleting it' );
+			apply_filters( 'attachment_fields_to_save', $post, array( 'gasf_photo_taken' => '2026-02-31' ) );
+			$this->ok( '1974' === get_post_meta( $id, '_gasf_photo_taken', true ), 'precision: an impossible day leaves the date alone' );
+		} finally {
+			wp_set_current_user( $was );
+		}
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
