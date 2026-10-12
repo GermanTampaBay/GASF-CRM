@@ -14,9 +14,11 @@
  * catalogued: submissions that were approved, plus anything a volunteer has
  * tagged by hand.
  *
- * Reads only. Nothing here changes a photo, so there is no revision, no lock and
- * no state machine — the worst a bug in this file can do is show somebody the
- * wrong list, which is a different order of problem from the rest of this build.
+ * It began as reads only. It now also holds the library's writes - save,
+ * delete, bulk tag and delete, people and places, consent, the zip - every
+ * one behind the revision guard and the per-operation lock the rest of this
+ * build uses, because the worst a bug here can do is no longer just show
+ * somebody the wrong list.
  */
 if ( ! defined( 'ABSPATH' ) ) { exit; }
 
@@ -957,6 +959,32 @@ function gasf_crm_photo_has_person_term( $post_id, $term_id ) {
  *
  * @return bool True when the photo now carries $to_term_id and not $from_term_id.
  */
+/**
+ * Walk a person's photos under a wall-clock budget, and say when it stopped.
+ *
+ * The host kills any process at 120 s of CPU with no signal. A regular
+ * member is on hundreds of photos, and an opt-out, merge, or rename that
+ * walks them all in one request used to be killed partway with no word -
+ * half the titles rewritten, nothing to say which half. Every walk here is
+ * idempotent, so stopping early costs a second run, never correctness.
+ *
+ * @return array{done:int,left:int[]}
+ */
+function gasf_crm_photo_person_walk( array $ids, callable $fn, $budget = 45 ) {
+	$t0   = microtime( true );
+	$done = 0;
+	$left = array();
+	foreach ( array_values( $ids ) as $i => $pid ) {
+		if ( microtime( true ) - $t0 > $budget ) { $left = array_slice( $ids, $i ); break; }
+		$fn( (int) $pid );
+		$done++;
+	}
+	if ( $left ) {
+		gasf_crm_log( sprintf( 'Photo library: a %d-photo walk stopped after %d at its time budget; %d left for the next run', count( $ids ), $done, count( $left ) ) );
+	}
+	return array( 'done' => $done, 'left' => array_map( 'intval', $left ) );
+}
+
 function gasf_crm_photo_person_move( $post_id, $from_term_id, $to_term_id ) {
 	$post_id = (int) $post_id;
 	$from    = (int) $from_term_id;
@@ -1462,11 +1490,10 @@ add_action( 'rest_api_init', function () {
 				 */
 				$touched = 0;
 				if ( function_exists( 'gasf_photo_apply_names' ) ) {
-					foreach ( (array) get_objects_in_term( array( $term_id ), 'gasf_photo_person' ) as $pid ) {
-						if ( 'attachment' !== get_post_type( (int) $pid ) ) { continue; }
-						gasf_photo_apply_names( (int) $pid, true );
-						$touched++;
-					}
+					$pids = array_filter( array_map( 'intval', (array) get_objects_in_term( array( $term_id ), 'gasf_photo_person' ) ),
+						function ( $pid ) { return 'attachment' === get_post_type( $pid ); } );
+					$walk = gasf_crm_photo_person_walk( $pids, function ( $pid ) { gasf_photo_apply_names( $pid, true ); } );
+					$touched = (int) $walk['done'];
 				}
 
 				gasf_crm_log( sprintf(
@@ -1591,11 +1618,19 @@ add_action( 'rest_api_init', function () {
 					: 0;
 				gasf_crm_person_retire( $term->name, $to );
 
-				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s), %d face record(s) — user %d',
-					$term->name, $to, $n, $faces_moved, get_current_user_id() ) );
+				// The public titles follow the name. They never did: a corrected
+				// spelling stayed in every title until each photo was next saved.
+				$walk = function_exists( 'gasf_photo_apply_names' )
+					? gasf_crm_photo_person_walk( $posts, function ( $pid ) { gasf_photo_apply_names( $pid, true ); } )
+					: array( 'done' => 0, 'left' => array() );
+
+				gasf_crm_log( sprintf( 'Photo library: renamed “%s” to “%s” across %d photo(s), %d face record(s), %d title(s) rewritten — user %d',
+					$term->name, $to, $n, $faces_moved, (int) $walk['done'], get_current_user_id() ) );
 
 				gasf_crm_op_finish( $op, true, HOUR_IN_SECONDS );
-				return array( 'ok' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => $n );
+				return array( 'ok' => true, 'action' => 'rename', 'from' => $term->name, 'to' => $to, 'photos' => $n,
+					'titles_left' => count( $walk['left'] ),
+					'message' => $walk['left'] ? sprintf( 'Renamed. %d of %d titles still carry the old spelling; open the names panel and rename again to finish.', count( $walk['left'] ), $n ) : '' );
 			}
 
 			if ( 'merge' === $action ) {
@@ -1643,14 +1678,17 @@ add_action( 'rest_api_init', function () {
 				// name rather than losing the person (gasf_crm_photo_person_move).
 				$moved  = array();
 				$failed = array();
-				foreach ( $posts as $pid ) {
+				// Under the time budget: a walk that stops leaves the rest still
+				// carrying the old name, which the check below reports as
+				// "merge again to finish" - the same honest answer as a failure.
+				gasf_crm_photo_person_walk( $posts, function ( $pid ) use ( &$moved, &$failed, $term, $dest ) {
 					if ( gasf_crm_photo_person_move( $pid, (int) $term->term_id, (int) $dest->term_id ) ) {
 						$moved[] = $pid;
 						if ( function_exists( 'gasf_photo_apply_names' ) ) { gasf_photo_apply_names( $pid ); }
 					} else {
 						$failed[] = $pid;
 					}
-				}
+				} );
 
 				// The face records carry the name as a string, so they do not
 				// follow the term. Without this the scanner's examples of this
@@ -2086,8 +2124,8 @@ add_action( 'rest_api_init', function () {
 	 * the same photo at the same instant. Nothing about WHETHER a photo may be
 	 * deleted is decided here; only how many at a time.
 	 *
-	 * Refused above the cap rather than trimmed to it. Bulk tag trims, which for
-	 * a tag is harmless. For a delete it would mean somebody who pressed "Select
+	 * Refused above the cap rather than trimmed to it (bulk tag refuses too,
+	 * these days). Trimming a delete would mean somebody who pressed "Select
 	 * all" on three thousand photos silently lost the first hundred. The gallery
 	 * says so before it asks; this is the backstop.
 	 *

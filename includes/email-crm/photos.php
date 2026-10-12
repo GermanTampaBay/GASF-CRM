@@ -2775,12 +2775,21 @@ function gasf_crm_photo_gallery( $state = '', $recent_max = 300 ) {
  */
 add_filter( 'attachment_fields_to_edit', function ( $fields, $post ) {
 	$src = get_post_meta( $post->ID, '_gasf_photo_source', true );
-	if ( ! is_array( $src ) || empty( $src['email'] ) ) { return $fields; }
+	if ( ! is_array( $src ) ) { return $fields; }
 
+	// Door and volunteer uploads carry no email; until 2.98.0 the panel showed
+	// nothing for them, which since 2.90.0 is every new photo.
 	$who = trim( (string) ( $src['name'] ?? '' ) );
-	$out = '<span class="description">' . esc_html( $who ? $who . ' <' . $src['email'] . '>' : $src['email'] ) . '<br>';
+	if ( ! empty( $src['email'] ) ) {
+		$first = $who ? $who . ' <' . $src['email'] . '>' : $src['email'];
+	} elseif ( ! empty( $src['upload'] ) ) {
+		$first = 'Uploaded by a volunteer' . ( $who ? ' (' . $who . ')' : '' );
+	} else {
+		$first = ( $who ? $who : 'A guest' ) . ( ! empty( $src['subject'] ) ? ', through the photo door "' . $src['subject'] . '"' : ', through the photo door' );
+	}
+	$out = '<span class="description">' . esc_html( $first ) . '<br>';
 
-	if ( ! empty( $src['subject'] ) ) {
+	if ( ! empty( $src['email'] ) && ! empty( $src['subject'] ) ) {
 		$out .= '<em>' . esc_html( $src['subject'] ) . '</em><br>';
 	}
 	if ( ! empty( $src['approved_at'] ) ) {
@@ -2797,9 +2806,9 @@ add_filter( 'attachment_fields_to_edit', function ( $fields, $post ) {
 	if ( get_post_meta( $post->ID, '_gasf_photo_pending', true ) ) {
 		$out .= '<strong style="color:#b32d2e">The sender has described this, and it is waiting to be checked.</strong>';
 	} elseif ( get_post_meta( $post->ID, '_gasf_photo_confirmed', true ) ) {
-		$out .= '<strong style="color:#2c7a3f">Described by the sender and confirmed.</strong>';
+		$out .= '<strong style="color:#2c7a3f">Approved.</strong>';
 	} else {
-		$out .= 'Nobody has described it yet.';
+		$out .= 'Waiting for a volunteer to approve it.';
 	}
 
 	$fields['gasf_photo_src'] = array(

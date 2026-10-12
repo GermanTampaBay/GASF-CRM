@@ -211,6 +211,43 @@ function gasf_crm_door_split_names( $raw ) {
 	return $out;
 }
 
+/**
+ * Tell the photo volunteers that door photos are waiting - at most once
+ * every six hours, so an evening of uploads is one email, not thirty.
+ * Nobody was told at all: a held photo waited for whoever happened to open
+ * /email. The party door is not this: it auto-accepts.
+ */
+function gasf_crm_door_notify_held() {
+	if ( get_transient( 'gasf_door_notice_sent' ) ) { return false; }
+	if ( ! function_exists( 'gasf_crm_notify_recipients' ) || ! function_exists( 'gasf_crm_notify_send' ) ) { return false; }
+	set_transient( 'gasf_door_notice_sent', time(), 6 * HOUR_IN_SECONDS );
+	$to = array();
+	foreach ( gasf_crm_notify_recipients() as $addr => $streams ) {
+		if ( in_array( 'photos', (array) $streams, true ) ) { $to[] = $addr; }
+	}
+	if ( ! $to ) { return false; }
+	$waiting = count( get_posts( array(
+		'post_type'      => 'attachment',
+		'post_status'    => array( 'inherit', 'private' ),
+		'posts_per_page' => 500,
+		'fields'         => 'ids',
+		'no_found_rows'  => true,
+		'meta_query'     => array(
+			'relation' => 'AND',
+			array( 'key' => '_gasf_photo_source', 'compare' => 'EXISTS' ),
+			array( 'key' => '_gasf_photo_confirmed', 'compare' => 'NOT EXISTS' ),
+		),
+	) ) );
+	$subject = sprintf( '[GASF] %d photo%s waiting for approval', $waiting, 1 === $waiting ? '' : 's' );
+	$body    = sprintf(
+		"Guests have sent photos through the club's photo door. %d %s waiting for a volunteer to approve at %s (Photos, then \"Needs you\").\n\nThis note goes out at most once every six hours.\n\n- GASF CRM",
+		$waiting, 1 === $waiting ? 'is' : 'are', home_url( '/email' )
+	);
+	foreach ( $to as $addr ) { gasf_crm_notify_send( $addr, $subject, $body ); }
+	gasf_crm_log( sprintf( 'Door: told %d volunteer(s) that %d photo(s) are waiting', count( $to ), $waiting ) );
+	return true;
+}
+
 function gasf_crm_door_device_count( $token ) {
 	return (int) get_transient( gasf_crm_door_device_key( $token ) );
 }
@@ -603,7 +640,18 @@ add_action( 'template_redirect', function () {
 	}
 
 	$shut = gasf_crm_door_closed_because( $door );
-	if ( '' !== $shut ) { gasf_crm_door_page( $door, $shut ); exit; }
+	if ( '' !== $shut ) {
+		// A batch still in flight when the window closes gets the reason as
+		// JSON, not the whole page dressed up as "could not take that one".
+		if ( 'POST' === ( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+			status_header( 403 );
+			header( 'Content-Type: application/json; charset=utf-8' );
+			echo wp_json_encode( array( 'ok' => false, 'message' => $shut ) );
+			exit;
+		}
+		gasf_crm_door_page( $door, $shut );
+		exit;
+	}
 
 	// One photo per POST, answered as JSON: the page sends with fetch so a guest
 	// on a slow phone sees each photo land rather than watching a dead form.
@@ -830,6 +878,7 @@ function gasf_crm_door_receive( array $door ) {
 		$party ? 'accepted straight into the library' : 'held for a volunteer',
 		( '' !== $place ? ' at ' . $place : ' with no place given' ) . ( $people ? ' (named: ' . implode( ', ', $people ) . ')' : '' ),
 		gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
+	if ( ! $party ) { gasf_crm_door_notify_held(); }
 
 	echo wp_json_encode( array(
 		'ok'   => true,
@@ -1293,14 +1342,18 @@ function gasf_crm_door_script( $party ) {
 
 	document.getElementById('ppick').onclick = function(){ document.getElementById('pfile').click(); };
 	document.getElementById('pfile').onchange = function(e){
+		var skipped = 0;
 		Array.prototype.forEach.call(e.target.files, function(f){
-			if (!/^image\//.test(f.type)) { return; }
+			// By type, or by name when the phone sends no type (Android HEIC,
+			// some camera-roll exports). Anything else is left out and said so.
+			if (!/^image\//.test(f.type || '') && !/\.(jpe?g|png|gif|webp|heic|heif|avif)$/i.test(f.name || '')) { skipped++; return; }
 			// A thumbnail straight from the file: a guest should see what they
 			// picked before sending it, on a phone, with no round trip.
 			picked.push({ file: f, url: URL.createObjectURL(f), state: 'new' });
 		});
 		e.target.value = '';
 		paint();
+		if (skipped) { msg.textContent = skipped + (skipped === 1 ? ' file was not a photo and was left out.' : ' files were not photos and were left out.'); }
 	};
 
 	function addNameBox(value){
@@ -1309,6 +1362,7 @@ function gasf_crm_door_script( $party ) {
 		var n = w.querySelector('input');
 		n.value = value || '';
 		n.removeAttribute('id'); // the label belongs to the first box only
+		n.setAttribute('aria-label', 'Name');
 		var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
 		var note = w.querySelector('.pnote'); if (note) { note.remove(); }
 		box.appendChild(w);
@@ -2059,7 +2113,9 @@ add_action( 'rest_api_init', function () {
 				return $pub;
 			}
 
-			update_post_meta( $id, '_gasf_photo_confirmed', current_time( 'mysql', true ) );
+			// The same record confirm() writes, so anything reading ['by'] later
+			// finds it here too (CLAUDE.md open item 6: the shape was split).
+			update_post_meta( $id, '_gasf_photo_confirmed', array( 'from' => null, 'by' => get_current_user_id(), 'at' => current_time( 'mysql', true ) ) );
 
 			$src = (array) get_post_meta( $id, '_gasf_photo_source', true );
 			$src['approved_by'] = get_current_user_id();

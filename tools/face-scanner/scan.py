@@ -116,7 +116,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.8.0"
+SCANNER_VERSION = "1.8.1"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -7505,7 +7505,7 @@ def main():
         except (AttributeError, ValueError):
             pass
 
-    ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Suggestions only — never tags.")
+    ap = argparse.ArgumentParser(description="Suggest who is in the club's photos. Matches above the server's auto-accept threshold are applied as names; the rest wait for a volunteer.")
     ap.add_argument("--version", action="version", version=f"GASF face scanner {SCANNER_VERSION}")
     ap.add_argument("--learn", action="store_true", help="refresh the reference set from confirmed tags first")
     ap.add_argument("--relearn", action="store_true",

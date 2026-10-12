@@ -83,7 +83,7 @@ if ($WhatIf) {
 
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
     -Principal $principal -Settings $settings `
-    -Description "Polls germantampabay.com for library photos and suggests who is in them. Biometric vectors stay on this machine (faces.db). Suggestions only, never tags." `
+    -Description "Polls germantampabay.com for library photos and suggests who is in them. Biometric vectors stay on this machine (faces.db). Matches above the server's auto-accept threshold are applied as names." `
     -Force | Out-Null
 
 "Registered scheduled task '$TaskName' - every $IntervalMinutes minute(s), while '$env:USERNAME' is logged on."

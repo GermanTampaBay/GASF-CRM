@@ -1008,76 +1008,6 @@ function gasf_crm_render_inbox_script() {
 		return empty;
 	}
 
-	function faceBoxesMarkup(p){
-		var faces = (p && (p.face_boxes && p.face_boxes.length ? p.face_boxes : p.faces)) || [];
-		var iw = parseInt((p && p.w) || 0, 10), ih = parseInt((p && p.h) || 0, 10);
-		if (!faces.length || !iw || !ih) { return ''; }
-		return faces.map(function(f, i){
-			var b = (f && f.box) || [];
-			var x = parseInt(b[0] || 0, 10), y = parseInt(b[1] || 0, 10);
-			var w = Math.max(1, parseInt(b[2] || 0, 10)), h = Math.max(1, parseInt(b[3] || 0, 10));
-			var left = Math.max(0, Math.min(99.5, (x / iw) * 100));
-			var top  = Math.max(0, Math.min(99.5, (y / ih) * 100));
-			var ww   = Math.max(1, Math.min(100 - left, (w / iw) * 100));
-			var hh   = Math.max(1, Math.min(100 - top,  (h / ih) * 100));
-			return '<button type="button" class="facebox" data-face-index="' + i + '" data-name="' + esc(f.name || '') + '" ' +
-				'title="' + esc(f.name ? ('Add ' + f.name) : 'Name this face') + '" style="left:' + left.toFixed(3) + '%;top:' + top.toFixed(3) + '%;width:' + ww.toFixed(3) + '%;height:' + hh.toFixed(3) + '%">' +
-				'<span>' + (i + 1) + '</span></button>';
-		}).join('');
-	}
-
-	function faceAssignments(overlay){
-		if (!overlay) { return []; }
-		var out = [];
-		Array.prototype.forEach.call(overlay.querySelectorAll('.facebox'), function(b){
-			var name = (b.dataset.assigned || '').trim();
-			var idx = parseInt(b.dataset.faceIndex, 10);
-			if (!name || !(idx >= 0)) { return; }
-			out.push({ i: idx, name: name });
-		});
-		return out;
-	}
-
-	function wireFaceBoxes(overlay, formRoot, onNeedForm){
-		if (!overlay) { return; }
-		function markUsed(root){
-			if (!root) { return; }
-			var have = peopleValues(root).map(function(n){ return n.toLowerCase(); });
-			Array.prototype.forEach.call(overlay.querySelectorAll('.facebox'), function(b){
-				var n = (b.dataset.name || '').trim().toLowerCase();
-				b.classList.toggle('used', !!n && have.indexOf(n) !== -1);
-			});
-		}
-		markUsed(formRoot);
-		Array.prototype.forEach.call(overlay.querySelectorAll('.facebox'), function(b){
-			b.onclick = function(ev){
-				ev.preventDefault();
-				ev.stopPropagation();
-				var root = formRoot;
-				if ((!root || !root.querySelector('.p-people')) && onNeedForm) {
-					root = onNeedForm() || root;
-				}
-				if (!root) { return; }
-				var box = root.querySelector('.p-people');
-				var name = (b.dataset.name || '').trim();
-				if (!box) { return; }
-				if (!name) {
-					name = (window.prompt('Name for this face:') || '').trim();
-					if (!name) { return; }
-					b.dataset.name = name;
-				}
-				var focus = null;
-				Array.prototype.forEach.call(root.querySelectorAll('.p-person'), function(i){
-					if (!focus && i.value.trim().toLowerCase() === name.toLowerCase()) { focus = i; }
-				});
-				if (!focus) { focus = addSuggestedName(box, name); }
-				b.dataset.assigned = name;
-				markUsed(root);
-				if (focus) { focus.focus(); }
-			};
-		});
-	}
-
 	/* ============ name suggestions ============
 	 *
 	 * Everyone already named in a photo, matched as you type. The point is not
@@ -2462,68 +2392,6 @@ function gasf_crm_render_inbox_script() {
 		return run();
 	}
 
-	function upRun(){
-		if (upBusy) { return; }
-
-		upBusy = true;
-		upStop = false;
-		upEl('upstatus').textContent = '';
-		upPaint();
-
-		var added = 0, failed = 0;
-
-		var next = function(){
-			var u = upQueue.filter(function(x){ return x.state === 'waiting'; })[0];
-
-			if (!u || upStop) {
-				upBusy = false;
-				upPaint();
-				var stopped = upStop && upQueue.some(function(x){ return x.state === 'waiting'; });
-				upEl('upstatus').textContent = added
-					? added + ' file' + (added === 1 ? '' : 's') + ' added' +
-					  (failed ? ', ' + failed + ' failed' : '') +
-					  (stopped ? ', the rest left in the list' : '') +
-					  '. Tag who is in them in the photo library.'
-					: (failed ? 'Nothing was added.' : (stopped ? 'Stopped. Nothing else was sent.' : ''));
-				if (added) { loadLib(); }
-				return;
-			}
-
-			u.state = 'going'; u.msg = ''; u.sent = 0; u.total = u.size;
-			u.rate = 0; u.eta = 0;
-			var t0 = Date.now(), lastPaint = 0;
-			upPaint();
-
-			upSend(u, function(sent, total, finished){
-				u.sent = sent; u.total = total;
-
-				var secs = (Date.now() - t0) / 1000;
-				if (secs > 0.5) {
-					u.rate = sent / secs;
-					u.eta  = u.rate ? (total - sent) / u.rate : 0;
-				}
-				if (finished) { u.state = 'sending'; }
-
-				// Repainting on every progress event rebuilds the whole list
-				// dozens of times a second for no benefit anybody can see.
-				var now = Date.now();
-				if (finished || now - lastPaint > 200) { lastPaint = now; upPaint(); }
-			}).then(function(){
-				u.state = 'done'; added++;
-			}).catch(function(e){
-				u.state = 'failed';
-				// The messages read as a sentence continuing the filename.
-				u.msg = u.name + ' ' + e.message;
-				failed++;
-			}).then(function(){
-				u.xhr = null;
-				upPaint();
-				next();
-			});
-		};
-		next();
-	}
-
 	function upRunFast(){
 		if (upBusy) { return; }
 
@@ -2681,9 +2549,11 @@ function gasf_crm_render_inbox_script() {
 		});
 	}());
 
+	var lastList = [];
 	function loadPhotos(){
 		if (!pgrid) { return; }
 		return api('/photos/list?state=' + encodeURIComponent(pstate)).then(function(r){
+			lastList = r.photos || [];
 			// Counts on the tabs, so "nothing to do" is visible without clicking
 			// through all four.
 			Array.prototype.forEach.call(document.querySelectorAll('.pstates button'), function(b){
@@ -2718,13 +2588,75 @@ function gasf_crm_render_inbox_script() {
 	 * Re-opening the photo just approved put a volunteer back on the thing
 	 * they had finished, every single time.
 	 */
+	/*
+	 * One guest's evening arrives as twenty photos with the same place, event,
+	 * date, and people, and used to be approved one at a time. After one is
+	 * approved, the others from the same sender on the same day are offered:
+	 * approve them all with these tags, in one go, each with its own revision.
+	 */
+	function offerBatch(id, payload){
+		var old = document.getElementById('pbatch'); if (old) { old.remove(); }
+		if (pstate !== 'review' || !ppane) { return; }
+		var me = null;
+		lastList.forEach(function(p){ if (p.id === id) { me = p; } });
+		if (!me || !me.from) { return; }
+		var key = function(p){ return String(p.from || '').toLowerCase() + '|' + String(p.taken || '').slice(0, 10); };
+		var others = lastList.filter(function(p){ return p.id !== id && key(p) === key(me); }).map(function(p){ return p.id; });
+		if (!others.length) { return; }
+		var bar = document.createElement('div');
+		bar.id = 'pbatch'; bar.className = 'note ok';
+		bar.innerHTML = '<strong>' + others.length + ' more photo' + (others.length === 1 ? '' : 's') + ' from ' + esc(me.from) + ' on the same day.</strong> ' +
+			'<button type="button" class="btn" id="pbatchgo">Approve ' + (others.length === 1 ? 'it' : 'all ' + others.length) + ' with these tags</button> ' +
+			'<button type="button" class="btn sec" id="pbatchno">No, one at a time</button> <span class="muted" id="pbatchmsg"></span>';
+		ppane.parentNode.insertBefore(bar, ppane);
+		document.getElementById('pbatchno').onclick = function(){ bar.remove(); };
+		document.getElementById('pbatchgo').onclick = function(){
+			var go = document.getElementById('pbatchgo'), m = document.getElementById('pbatchmsg');
+			go.disabled = true;
+			var done = 0, failed = 0, queue = others.slice();
+			var next = function(){
+				var pid = queue.shift();
+				if (pid === undefined) {
+					m.textContent = 'Approved ' + done + (failed ? ', ' + failed + ' could not be (open them to see why)' : '') + '.';
+					loadPeople(true); loadPhotos();
+					setTimeout(function(){ bar.remove(); }, 4000);
+					return;
+				}
+				m.textContent = 'Approving ' + (done + failed + 1) + ' of ' + others.length + '\u2026';
+				// Each with its own revision, so a photo somebody else is editing
+				// right now is refused rather than overwritten.
+				api('/photos/detail?photo=' + pid).then(function(p){
+					return api('/photos/save', { method:'POST', body: JSON.stringify(Object.assign({ photo: pid, revision: p.revision, op_id: nextOpId('photo-save-' + pid) }, payload)) });
+				}).then(function(){ done++; }, function(){ failed++; }).then(next);
+			};
+			next();
+		};
+	}
 	function gridIds(){
 		return Array.prototype.map.call(pgrid ? pgrid.querySelectorAll('.pthumbcard') : [], function(b){ return parseInt(b.dataset.photo, 10); });
 	}
-	function openAfter(id){
+	function bumpCount(state, by){
+		var b = document.querySelector('.pstates button[data-pstate="' + state + '"]');
+		if (!b) { return; }
+		var m = /\((\d+)\)$/.exec(b.textContent);
+		var n = Math.max(0, (m ? parseInt(m[1], 10) : 0) + by);
+		b.textContent = b.textContent.replace(/\s*\(\d+\)$/, '') + (n ? ' (' + n + ')' : '');
+	}
+	function openAfter(id, dropped){
 		var order = gridIds();
 		var at = order.indexOf(id);
-		var reload = loadPhotos();
+		var reload = null;
+		if (dropped && at !== -1) {
+			// The photo has left this list: take its tile out and move on, rather
+			// than rebuilding the whole list on the server for every decision.
+			var tile = pgrid.querySelector('.pthumbcard[data-photo="' + id + '"]');
+			if (tile) { tile.remove(); }
+			bumpCount(pstate, -1);
+			lastList = lastList.filter(function(p){ return p.id !== id; });
+			if (!gridIds().length) { reload = loadPhotos(); }
+		} else {
+			reload = loadPhotos();
+		}
 		return (reload && reload.then ? reload : Promise.resolve()).then(function(){
 			var left = gridIds();
 			var next = null;
@@ -2803,17 +2735,16 @@ function gasf_crm_render_inbox_script() {
 				var msg = ppane.querySelector('.p-msg');
 				ok.disabled = true; msg.textContent = 'Saving…';
 				var v = function(s){ var el = ppane.querySelector(s); return el ? el.value : ''; };
-				api('/photos/save', { method:'POST', body: JSON.stringify({
-					photo: id,
+				var payload = {
 					people: peopleValues(ppane),
 					groups: groupValues(ppane),
 					place: placeValue(ppane), event: v('.p-event'),
 					flyer: !!(ppane.querySelector('.p-flyer') && ppane.querySelector('.p-flyer').checked),
 					event_id: parseInt(v('.p-evid'), 10) || 0,
-					taken: v('.p-taken'), caption: v('.p-caption'),
-					revision: v('.p-rev'),
-					op_id: nextOpId('photo-save-' + id)
-				})}).then(function(){ loadPeople(true); openAfter(id); })
+					taken: v('.p-taken'), caption: v('.p-caption')
+				};
+				var body = Object.assign({ photo: id, revision: v('.p-rev'), op_id: nextOpId('photo-save-' + id) }, payload);
+				api('/photos/save', { method:'POST', body: JSON.stringify(body)}).then(function(){ loadPeople(true); offerBatch(id, payload); openAfter(id, pstate === 'review'); })
 				  .catch(function(e){ ok.disabled = false; msg.textContent = e.message; });
 			};
 		}
@@ -2832,7 +2763,7 @@ function gasf_crm_render_inbox_script() {
 					revision: rv ? rv.value : '',
 					op_id: nextOpId('photo-reject-' + id)
 				}) })
-					.then(function(){ pcur = null; openAfter(id); })
+					.then(function(){ pcur = null; openAfter(id, true); })
 					.catch(function(e){ rej.disabled = false; alert(e.message); });
 			};
 		}
@@ -3260,63 +3191,6 @@ function gasf_crm_render_inbox_script() {
 		};
 	}
 
-	/* ===================== guest photos awaiting a volunteer ===================== */
-	(function(){
-		var box = document.getElementById('lheld');
-		if (!box) { return; }
-		var list = document.getElementById('lheldlist');
-
-		function draw(held){
-			document.getElementById('lheld').hidden = !held.length;
-			list.innerHTML = held.map(function(h){
-				var said = [];
-				if (h.people.length) { said.push('<strong>' + h.people.map(esc).join(', ') + '</strong>'); }
-				if (h.place) { said.push(esc(h.place)); }
-				else if (h.place_said) { said.push(esc(h.place_said) + ' <em>(not a place we have yet)</em>'); }
-				if (h.event)   { said.push(esc(h.event)); }
-				return '<div class="card pad hrow" data-rv="' + h.revision + '" style="margin:8px 0;display:flex;gap:12px;align-items:flex-start">' +
-					'<img src="' + esc(h.url) + '" alt="" style="width:120px;height:120px;object-fit:cover;border:3px solid var(--print);flex:0 0 auto">' +
-					'<div style="flex:1 1 auto;min-width:0">' +
-					'<div>' + (said.length ? said.join(' &middot; ') : '<span class="muted">nothing said about it</span>') + '</div>' +
-					(h.caption ? '<p style="margin:4px 0">' + esc(h.caption) + '</p>' : '') +
-					'<p class="muted" style="margin:4px 0 8px">' +
-						(h.from ? 'From ' + esc(h.from) + ' &middot; ' : '') + esc(h.door) + '</p>' +
-					'<div class="actions">' +
-					'<button class="btn hkeep" data-id="' + h.id + '" type="button">Keep it</button>' +
-					'<button class="btn sec hdrop" data-id="' + h.id + '" type="button">Delete</button>' +
-					'<span class="muted hmsg"></span>' +
-					'</div></div></div>';
-			}).join('');
-		}
-
-		function load(){
-			api('/photos/held').then(function(r){ draw(r.held || []); }).catch(function(){});
-		}
-		window.loadHeld = load;
-
-		list.addEventListener('click', function(ev){
-			var b = ev.target.closest('.hkeep, .hdrop');
-			if (!b) { return; }
-			var keep = b.classList.contains('hkeep');
-			var row  = b.closest('.hrow');
-			if (!keep && !confirm('Delete this photo? It is not kept anywhere else.')) { return; }
-			row.querySelectorAll('button').forEach(function(x){ x.disabled = true; });
-			row.querySelector('.hmsg').textContent = keep ? 'Keeping\u2026' : 'Deleting\u2026';
-			api('/photos/held/decide', { method: 'POST', body: JSON.stringify({
-				id: parseInt(b.dataset.id, 10), approve: keep,
-				revision: parseInt(row.dataset.rv, 10) || 0,
-				op_id: nextOpId('held-decide-' + parseInt(b.dataset.id, 10) + '-' + (keep ? 'keep' : 'drop'))
-			}) }).then(function(){
-				load();
-				if (keep) { loadLib(); loadPeople(true); }
-			}).catch(function(e){
-				row.querySelectorAll('button').forEach(function(x){ x.disabled = false; });
-				row.querySelector('.hmsg').textContent = e.message;
-			});
-		});
-
-		load();
-	}());
 
 	/* ===================== bulk tagging ===================== */
 	/* At most this many at once. The server refuses more rather than quietly
@@ -4154,20 +4028,14 @@ function gasf_crm_render_inbox_script() {
 		// A video has no full-size still to show, so the viewer swaps element.
 		var lbi = document.getElementById('lbimg'), lbv = document.getElementById('lbvid');
 		var lbstage = lbi ? lbi.parentNode : null;
-		var lbfaces = document.getElementById('lbfaces');
 		if (p.kind === 'video') {
 			lbi.hidden = true; lbi.src = '';
 			if (lbstage) { lbstage.hidden = true; }
-			if (lbfaces) { lbfaces.hidden = true; lbfaces.innerHTML = ''; }
 			lbv.hidden = false; lbv.src = p.url;
 		} else {
 			lbv.hidden = true; lbv.removeAttribute('src'); lbv.load();
 			lbi.hidden = false; lbi.src = p.full || p.url;
 			if (lbstage) { lbstage.hidden = false; }
-			if (lbfaces) {
-				lbfaces.innerHTML = '';
-				lbfaces.hidden = true;
-			}
 		}
 
 		// Two collections, because they want opposite layouts. Facts stack, one

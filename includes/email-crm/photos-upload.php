@@ -484,11 +484,12 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	/*
 	 * This request is allowed to take a while.
 	 *
-	 * The site registers sixteen image sizes, so one photo means sixteen resizes
-	 * before anything else happens, and a modern phone camera makes that real
-	 * work. The default sixty seconds killed it mid-resize — PHP printed a fatal
-	 * error page, the browser tried to read it as JSON, and the volunteer saw
-	 * "Unexpected token '<'", which tells them nothing at all.
+	 * Resizing is deferred to the sweep and capped at four sizes these days,
+	 * but the conversion, the scrub, and a modern phone camera's file are still
+	 * real work. The default sixty seconds once killed it mid-resize — PHP
+	 * printed a fatal error page, the browser tried to read it as JSON, and the
+	 * volunteer saw "Unexpected token '<'", which tells them nothing at all.
+	 * The host's own 120 s CPU kill is the limit nothing here can lift.
 	 *
 	 * Raised rather than worked around: the resizing is legitimate and there is
 	 * no version of this that is fast enough to fit in a minute on every photo.

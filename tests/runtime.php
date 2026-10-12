@@ -857,6 +857,64 @@ final class GASF_CRM_Selftest {
 		$this->ok( 1 === $n, 'scanner feeds: a prediction and its outcome match across picture sizes' );
 	}
 
+	/** A walk over a person's photos stops at its budget and says what is left. */
+	public function test_person_walk_budget() {
+		$seen = array();
+		$r = gasf_crm_photo_person_walk( array( 1, 2, 3, 4, 5 ), function ( $pid ) use ( &$seen ) { $seen[] = $pid; usleep( 120000 ); }, 0.25 );
+		$this->ok( $r['done'] >= 1 && $r['done'] < 5 && count( $r['left'] ) === 5 - $r['done'] && $seen === array_slice( array( 1, 2, 3, 4, 5 ), 0, $r['done'] ),
+			'person walk: stops at the budget, in order, and reports exactly what it did not reach' );
+		$r = gasf_crm_photo_person_walk( array( 7, 8 ), function ( $pid ) {}, 5 );
+		$this->ok( 2 === $r['done'] && array() === $r['left'], 'person walk: a short walk finishes' );
+		$lib = (string) file_get_contents( GASF_CRM_DIR . '/photos-library.php' );
+		$this->ok( false !== strpos( $lib, 'gasf_crm_photo_person_walk( $posts, function ( $pid ) { gasf_photo_apply_names( $pid, true ); } )' ),
+			'person walk: a rename rewrites the public titles, under the budget' );
+		$this->ok( 3 === substr_count( $lib, 'gasf_crm_photo_person_walk(' ) - 1, 'person walk: rename, opt-out, and merge all walk under it' );
+	}
+
+	/** The door's smaller refusals say what happened. */
+	public function test_door_small_refusals() {
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false !== strpos( $door, 'echo wp_json_encode( array( \'ok\' => false, \'message\' => $shut ) );' ),
+			'door refusals: a photo sent after the window closed is answered as JSON with the reason' );
+		$this->ok( false !== strpos( $door, "/\\.(jpe?g|png|gif|webp|heic|heif|avif)$/i.test(f.name || '')" ) && false !== strpos( $door, "was not a photo and was left out." ),
+			'door refusals: a file with no type is judged by its name, and a skipped file is said' );
+		$this->ok( false !== strpos( $door, "n.setAttribute('aria-label', 'Name');" ), 'door refusals: a cloned name box keeps a name for screen readers' );
+	}
+
+	/** Volunteers are told when door photos land, once per six hours. */
+	public function test_door_notice() {
+		$sent = array();
+		$catch = function ( $handled, $to, $subject, $body ) use ( &$sent ) { $sent[] = array( $to, $subject ); return true; };
+		add_filter( 'gasf_crm_notify_send', $catch, 10, 4 );
+		$was = get_transient( 'gasf_door_notice_sent' );
+		try {
+			delete_transient( 'gasf_door_notice_sent' );
+			$first  = gasf_crm_door_notify_held();
+			$second = gasf_crm_door_notify_held();
+			$this->ok( true === $first && count( $sent ) >= 1 && false !== strpos( $sent[0][1], 'waiting for approval' ),
+				'door notice: the first held photo tells the photo volunteers' );
+			$this->ok( false === $second && count( $sent ) === count( array_unique( array_map( function ( $s ) { return $s[0]; }, $sent ) ) ),
+				'door notice: the next one within six hours does not, and each volunteer heard once' );
+		} finally {
+			remove_filter( 'gasf_crm_notify_send', $catch, 10 );
+			if ( $was ) { set_transient( 'gasf_door_notice_sent', $was, 6 * HOUR_IN_SECONDS ); } else { delete_transient( 'gasf_door_notice_sent' ); }
+		}
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false !== strpos( $door, 'if ( ! $party ) { gasf_crm_door_notify_held(); }' ), 'door notice: wired to the year-round door only' );
+	}
+
+	/** The review screen updates in place, offers a sender's batch, and carries no dead panels. */
+	public function test_review_screen_tidy() {
+		$ui = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$this->ok( false !== strpos( $ui, "openAfter(id, pstate === 'review')" ) && false !== strpos( $ui, 'openAfter(id, true)' ) && false !== strpos( $ui, 'function bumpCount(' ),
+			'review tidy: a decision takes its tile out and moves on without rebuilding the list' );
+		$this->ok( false !== strpos( $ui, 'offerBatch(id, payload)' ) && false !== strpos( $ui, "Approve ' + (others.length === 1 ? 'it' : 'all ' + others.length) + ' with these tags" ),
+			'review tidy: the rest of a sender\'s day is offered for approval with the same tags' );
+		foreach ( array( 'function faceBoxesMarkup', 'function wireFaceBoxes', 'function upRun()', "getElementById('lheld')", "getElementById('lbfaces')" ) as $dead ) {
+			$this->ok( false === strpos( $ui, $dead ), "review tidy: $dead is gone" );
+		}
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
@@ -2295,6 +2353,8 @@ final class GASF_CRM_Selftest {
 			array( 'id' => $id, 'approve' => true, 'revision' => gasf_crm_photo_revision( $id ) ) );
 		if ( ! $this->ok( ! is_wp_error( $r ), 'approve: held decide succeeds' ) ) { return; }
 		$this->ok( (bool) get_post_meta( $id, '_gasf_photo_confirmed', true ), 'approve: confirmed stamp applied' );
+		$this->ok( is_array( get_post_meta( $id, '_gasf_photo_confirmed', true ) ) && isset( get_post_meta( $id, '_gasf_photo_confirmed', true )['by'] ),
+			'approve: in the same shape confirm() writes, with who did it' );
 		$this->ok( ! gasf_crm_photo_is_private( $id ), 'approve: photo published out of the review store' );
 		$p = get_attached_file( $id );
 		$this->ok( $p && is_file( $p ), 'approve: the published file is where the metadata says' );
