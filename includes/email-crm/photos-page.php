@@ -19,6 +19,32 @@ if ( ! defined( 'ABSPATH' ) ) { exit; }
  * @param array|null $invite
  * @param string     $notice
  */
+/**
+ * The tagging page's place list: the grounds - the club, its rooms, and
+ * Welton, as on the photo door - plus wherever the camera put one of THESE
+ * photos, so a geofenced answer off the grounds is still there to be
+ * preselected. Anywhere else goes in "Somewhere else".
+ *
+ * @param int[] $candidates Places this batch geofenced to, and the club.
+ * @param int   $first      The place to lift to the top.
+ */
+function gasf_crm_photo_page_places( array $candidates, $first = 0 ) {
+	if ( ! function_exists( 'gasf_photo_place_tree_public' ) ) { return array(); }
+	$tree = gasf_photo_place_tree_public( $candidates, $first );
+	if ( ! function_exists( 'gasf_crm_door_onproperty' ) ) { return $tree; }
+
+	$keep = array();
+	foreach ( gasf_crm_door_onproperty() as $row ) { $keep[ (int) $row['term']->term_id ] = true; }
+	foreach ( array_filter( array_map( 'intval', $candidates ) ) as $c ) {
+		$keep[ $c ] = true;
+		foreach ( (array) get_ancestors( $c, 'gasf_photo_place', 'taxonomy' ) as $a ) { $keep[ (int) $a ] = true; }
+		foreach ( (array) get_term_children( $c, 'gasf_photo_place' ) as $k ) { $keep[ (int) $k ] = true; }
+	}
+	return array_values( array_filter( $tree, function ( $row ) use ( $keep ) {
+		return isset( $keep[ (int) $row['term']->term_id ] );
+	} ) );
+}
+
 function gasf_crm_photo_page( $state, $invite = null, $notice = '' ) {
 	$org = gasf_crm_cfg()['signature_org'];
 
@@ -187,7 +213,7 @@ function gasf_crm_photo_page( $state, $invite = null, $notice = '' ) {
 	}
 	if ( function_exists( 'gasf_photo_home_place' ) ) { $candidates[ gasf_photo_home_place() ] = true; }
 
-	$tree = function_exists( 'gasf_photo_place_tree_public' ) ? gasf_photo_place_tree_public( array_keys( $candidates ), $suggest_place ) : array();
+	$tree = gasf_crm_photo_page_places( array_keys( $candidates ), $suggest_place );
 
 	// Parent names travel with the list so the form can tell a REFINEMENT of the
 	// geofence ("the grounds" -> "the Bierstube") from a contradiction of it

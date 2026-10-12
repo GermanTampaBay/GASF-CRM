@@ -1916,6 +1916,22 @@ final class GASF_CRM_Selftest {
 		foreach ( gasf_crm_door_onproperty() as $row ) { $on[] = html_entity_decode( $row['term']->name, ENT_QUOTES ); }
 		$this->ok( in_array( 'Welton Brewing Co & Oyster Bar', $on, true ), 'places: Welton is on-property for parties' );
 		$this->ok( ! in_array( 'England Brothers Park', $on, true ), 'places: England Brothers Park is not' );
+
+		// The tagging page offers the same short list, plus wherever the camera
+		// put one of the photos - read-only use of real terms, no writes.
+		$names = function ( $rows ) {
+			return array_map( function ( $r ) { return html_entity_decode( $r['term']->name, ENT_QUOTES ); }, $rows );
+		};
+		$home  = (int) gasf_photo_home_place();
+		$plain = $names( gasf_crm_photo_page_places( array( $home ), 0 ) );
+		$this->ok( in_array( 'Welton Brewing Co & Oyster Bar', $plain, true ) && ! in_array( 'England Brothers Park', $plain, true ),
+			'tagging page: the place list is the grounds and Welton, not every public place' );
+		$park = get_term_by( 'name', 'England Brothers Park', 'gasf_photo_place' );
+		if ( $park ) {
+			$geo = $names( gasf_crm_photo_page_places( array( $home, (int) $park->term_id ), (int) $park->term_id ) );
+			$this->ok( in_array( 'England Brothers Park', $geo, true ),
+				'tagging page: but a place the camera put a photo at stays offered, so it can be preselected' );
+		}
 	}
 
 	/**
