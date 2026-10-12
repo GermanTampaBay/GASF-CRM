@@ -1853,10 +1853,37 @@ function gasf_crm_photo_clean_time( $raw ) {
 }
 
 /** De-duplicate person names with the same canonical identity. */
+/**
+ * One box, several names: "John, Mary and Bob" is three people, not one.
+ *
+ * People type a whole party into one box whatever the label says, and the
+ * archive then holds a person called "Lydia Laurel Hickey and Laura
+ * Puckett". Split on the separators people actually use - commas, slashes,
+ * ampersands, plus signs, line breaks, and the words "and"/"und" standing
+ * alone (Brand and Anderson are left whole). The same rule runs in every
+ * browser that offers a name box; this is for what arrives regardless.
+ */
+function gasf_crm_photo_split_names( $raw ) {
+	$parts = preg_split( '~\s*(?:[,;/&+\r\n]|\b(?:and|und)\b)\s*~iu', (string) $raw );
+	$out   = array();
+	foreach ( (array) $parts as $p ) {
+		$p = trim( preg_replace( '~\s+~u', ' ', (string) $p ) );
+		if ( '' === $p ) { continue; }
+		if ( ! in_array( strtolower( $p ), array_map( 'strtolower', $out ), true ) ) { $out[] = $p; }
+	}
+	return $out;
+}
+
 function gasf_crm_photo_unique_people( array $names, $limit = GASF_CRM_PHOTO_MAX_PEOPLE ) {
 	$out = array();
 	$seen = array();
+	// Every box is split first, so a volunteer's "John and Mary" is two
+	// people on the way through the editor as well as the door.
+	$split = array();
 	foreach ( $names as $name ) {
+		foreach ( gasf_crm_photo_split_names( $name ) as $one ) { $split[] = $one; }
+	}
+	foreach ( $split as $name ) {
 		$name = trim( sanitize_text_field( (string) $name ) );
 		if ( '' === $name ) { continue; }
 		$keys = function_exists( 'gasf_photo_person_keys' )

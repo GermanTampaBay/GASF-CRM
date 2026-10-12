@@ -665,6 +665,17 @@ input:focus,select:focus,textarea:focus,.edbody:focus{
    position:relative only inside .p-people elsewhere in this sheet. */
 .lf .pwrap{display:block;position:relative}
 .lf-ev{flex:1 1 300px;min-width:0}
+/* The upload form's place tiles: the door's, in the app's colours. */
+.lf-where{flex:1 0 100%}
+.lf-where .gasf-door-places{display:flex;flex-wrap:wrap;gap:6px;margin:2px 0 4px}
+.lf-where .ptile{flex:0 0 auto;min-height:32px;padding:5px 12px;border-radius:16px;font:inherit;font-size:13px;
+	background:var(--gasf-surface);color:var(--gasf-text);border:1px solid var(--gasf-border);cursor:pointer}
+.lf-where .ptile.any{border-style:dashed;opacity:.8}
+.lf-where .ptile:hover:not([aria-pressed="true"]){background:rgba(127,127,127,.15)}
+.lf-where .ptile[aria-pressed="true"]{background:#0f6e56;border-color:#0f6e56;color:#fff;opacity:1}
+.lf-where select{margin-top:4px}
+/* "One name per box, please" under a name box that holds several. */
+.pnote{display:block;font-size:11px;color:#b3261e;margin:2px 0 0 2px}
 .lf-ev input{width:100%}
 /* What the calendar just did, said out loud. Filling a date field silently is
    how a whole evening ends up filed under the wrong day unnoticed. */

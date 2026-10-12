@@ -734,7 +734,20 @@ function gasf_crm_render_inbox() {
 		<div class="lfrow">
 			<label class="lf"><span>Date or year</span><input type="text" id="update" inputmode="numeric" placeholder="YYYY or YYYY-MM-DD"></label>
 			<label class="lf"><span>Group (optional)</span><select id="upgroup"><option value="">&mdash; none &mdash;</option></select></label>
-			<label class="lf"><span>Where</span><select id="upplace"><option value="">&mdash; not sure &mdash;</option></select></label>
+			<?php
+			/*
+			 * The place, as tiles - the same ones the public door shows, for the
+			 * same reason: a menu that already shows an answer reads as answered.
+			 * "Somewhere else" opens the full list, which is where the places off
+			 * the grounds live. Nothing is pressed to begin with; the hidden
+			 * #upplace is what the upload sends, as it always was.
+			 */
+			$up_rows = function_exists( 'gasf_crm_door_onproperty' ) ? gasf_crm_door_onproperty() : array();
+			?>
+			<div class="lf lf-where"><span>Where</span>
+				<?php echo gasf_crm_door_place_tiles( $up_rows, '', true, 'upplace', '' ); // phpcs:ignore WordPress.Security.EscapeOutput -- escaped inside ?>
+				<select id="upplacelist" hidden aria-label="Somewhere else"><option value="">&mdash; not sure &mdash;</option></select>
+			</div>
 			<?php
 			/*
 			 * The event finds the date, not the other way round.

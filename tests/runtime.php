@@ -915,6 +915,43 @@ final class GASF_CRM_Selftest {
 		}
 	}
 
+	/** "John, Mary and Bob" is three people on every path that takes a name, not just the door. */
+	public function test_people_split_everywhere() {
+		$this->ok( array( 'John', 'Mary', 'Bob' ) === gasf_crm_photo_split_names( 'John, Mary and Bob' ), 'people split: the rule lives with the photo code' );
+		$this->ok( gasf_crm_door_split_names( 'A & B' ) === gasf_crm_photo_split_names( 'A & B' ), 'people split: the door still answers by its old name' );
+		$this->ok( array( 'John', 'Mary', 'Bob', 'Sue' ) === gasf_crm_photo_unique_people( array( 'John, Mary and Bob', 'bob', 'Sue' ) ),
+			'people split: the editor funnel splits every box, then drops the repeat' );
+		$this->ok( array( 'Hans Brand' ) === gasf_crm_photo_unique_people( array( 'Hans Brand' ) ), 'people split: Brand stays whole' );
+		$this->ok( 2 === count( gasf_crm_photo_unique_people( array( 'A, B, C, D' ), 2 ) ), 'people split: the cap still holds after splitting' );
+		$ui = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$this->ok( false !== strpos( $ui, 'function splitNames(v)' ) && false !== strpos( $ui, "One name per box, please" ),
+			'people split: the volunteer editor warns as it is typed' );
+		$this->ok( false !== strpos( $ui, "if (ev.target && ev.target.classList && ev.target.classList.contains('p-person')) { splitBox(ev.target); }" ),
+			'people split: leaving an editor box splits it' );
+		$this->ok( false !== strpos( $ui, 'splitNames(v).forEach(function(n){' ) && false !== strpos( $ui, "var people = peopleValues(document.getElementById('btpeople'));" ),
+			'people split: the editor and the bulk tagger both send one name per entry' );
+	}
+
+	/** The volunteer upload form asks where with the door's tiles, under its own ids. */
+	public function test_upload_place_tiles() {
+		$row = function ( $name, $depth, $kids ) { $t = new stdClass(); $t->name = $name; return array( 'term' => $t, 'depth' => $depth, 'haskids' => $kids ); };
+		$rows = array( $row( 'Club', 0, true ), $row( 'Hall', 1, false ) );
+		$html = gasf_crm_door_place_tiles( $rows, '', true, 'upplace', '' );
+		$this->ok( false !== strpos( $html, 'id="upplaces"' ) && false !== strpos( $html, 'id="upplace" value=""' ) && false === strpos( $html, 'pplace' ),
+			'upload tiles: the group and the hidden answer carry the upload form\'s ids, not the door\'s' );
+		$this->ok( false === strpos( $html, '<p><strong' ) && false === strpos( $html, 'aria-labelledby' ), 'upload tiles: no question above them - the field has its own label' );
+		$this->ok( false !== strpos( $html, 'data-place="__other"' ) && false === strpos( $html, 'aria-pressed="true"' ), 'upload tiles: somewhere else is offered, nothing is pressed' );
+		$door = gasf_crm_door_place_tiles( $rows, '', true );
+		$this->ok( false !== strpos( $door, 'id="pplaces" role="group" aria-labelledby="pplacelabel"' ) && false !== strpos( $door, '>Which part of the club?<' ),
+			'upload tiles: the door is unchanged by the new parameters' );
+		$ui = (string) file_get_contents( GASF_CRM_DIR . '/ui.php' );
+		$this->ok( false !== strpos( $ui, "gasf_crm_door_place_tiles( \$up_rows, '', true, 'upplace', '' )" ) && false !== strpos( $ui, 'id="upplacelist" hidden' ) && false === strpos( $ui, '<select id="upplace"' ),
+			'upload tiles: the form renders tiles and keeps the full list behind somewhere else' );
+		$js = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
+		$this->ok( false !== strpos( $js, "hid.value = upOther ? (list ? list.value : '') : (v || '');" ) && false !== strpos( $js, 'upPlaceSet(upDefaults.place);' ),
+			'upload tiles: __other is never what is sent, and clearing the form unpresses the tiles' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

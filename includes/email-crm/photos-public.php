@@ -201,14 +201,9 @@ function gasf_crm_door_stamp_spend( $stamp ) {
  * guest's browser; this is for what arrives regardless.
  */
 function gasf_crm_door_split_names( $raw ) {
-	$parts = preg_split( '~\s*(?:[,;/&+\r\n]|\b(?:and|und)\b)\s*~iu', (string) $raw );
-	$out   = array();
-	foreach ( (array) $parts as $p ) {
-		$p = trim( preg_replace( '~\s+~u', ' ', (string) $p ) );
-		if ( '' === $p ) { continue; }
-		if ( ! in_array( strtolower( $p ), array_map( 'strtolower', $out ), true ) ) { $out[] = $p; }
-	}
-	return $out;
+	// The rule lives with the photo code now (2.99.0), because the volunteer
+	// editor's boxes needed it too; the door's name is kept for its callers.
+	return gasf_crm_photo_split_names( $raw );
 }
 
 /**
@@ -459,8 +454,12 @@ function gasf_crm_door_onproperty() {
  * @param array  $rows       gasf_crm_door_onproperty() rows: {term, depth, haskids}.
  * @param string $default    The place to show pressed ('' for none).
  * @param bool   $with_other Offer "Somewhere else" (the year-round door).
+ * @param string $id         The hidden input's id; the group is "{$id}s" and the
+ *                           label "{$id}label". The volunteer form uses 'upplace'.
+ * @param string $label      The question above the tiles, or '' for none (the
+ *                           volunteer form has its own field label).
  */
-function gasf_crm_door_place_tiles( array $rows, $default = '', $with_other = false ) {
+function gasf_crm_door_place_tiles( array $rows, $default = '', $with_other = false, $id = 'pplace', $label = 'Which part of the club?' ) {
 	$rooms = array();
 	$roots = array();
 	$any   = array();
@@ -473,8 +472,9 @@ function gasf_crm_door_place_tiles( array $rows, $default = '', $with_other = fa
 	$tiles = array_merge( $rooms, $any, $roots );
 	if ( $with_other ) { $tiles[] = array( '__other', 'Somewhere else', ' any' ); }
 
-	$out  = '<p><strong id="pplacelabel">Which part of the club?</strong></p>';
-	$out .= '<div class="gasf-door-places" id="pplaces" role="group" aria-labelledby="pplacelabel">';
+	$id   = preg_replace( '~[^a-z0-9_-]~i', '', (string) $id );
+	$out  = '' !== $label ? '<p><strong id="' . $id . 'label">' . esc_html( $label ) . '</strong></p>' : '';
+	$out .= '<div class="gasf-door-places" id="' . $id . 's" role="group"' . ( '' !== $label ? ' aria-labelledby="' . $id . 'label"' : '' ) . '>';
 	foreach ( $tiles as $t ) {
 		$out .= sprintf(
 			'<button type="button" class="ptile%s" data-place="%s" aria-pressed="%s">%s</button>',
@@ -485,7 +485,7 @@ function gasf_crm_door_place_tiles( array $rows, $default = '', $with_other = fa
 		);
 	}
 	$out .= '</div>';
-	$out .= '<input type="hidden" id="pplace" value="' . esc_attr( $default ) . '" data-default="' . esc_attr( $default ) . '">';
+	$out .= '<input type="hidden" id="' . $id . '" value="' . esc_attr( $default ) . '" data-default="' . esc_attr( $default ) . '">';
 	return $out;
 }
 

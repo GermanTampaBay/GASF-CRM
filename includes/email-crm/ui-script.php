@@ -1077,7 +1077,51 @@ function gasf_crm_render_inbox_script() {
 		return out;
 	}
 
-	function peopleValues(root){ return termValues(root, '.p-person'); }
+	// "John, Mary and Bob" in one box is three people, not one - the same
+	// rule the public door applies, and the server applies again regardless.
+	function splitNames(v){
+		return String(v || '').split(/\s*(?:[,;\/&+\r\n]|\b(?:and|und)\b)\s*/i)
+			.map(function(s){ return s.replace(/\s+/g, ' ').trim(); })
+			.filter(function(s, i, a){ return s && a.map(function(x){ return x.toLowerCase(); }).indexOf(s.toLowerCase()) === i; });
+	}
+	function peopleValues(root){
+		var out = [], seen = [];
+		termValues(root, '.p-person').forEach(function(v){
+			splitNames(v).forEach(function(n){
+				if (seen.indexOf(n.toLowerCase()) === -1) { seen.push(n.toLowerCase()); out.push(n); }
+			});
+		});
+		return out;
+	}
+	// A note under a box that holds several names, and the split itself:
+	// leaving the box or pressing Enter keeps the first name there and gives
+	// the rest boxes of their own.
+	function noteFor(input){
+		var w = input.closest('.pwrap');
+		if (!w) { return; }
+		var note = w.querySelector('.pnote');
+		var parts = splitNames(input.value);
+		if (parts.length > 1) {
+			if (!note) { note = document.createElement('span'); note.className = 'pnote'; w.appendChild(note); }
+			note.textContent = 'One name per box, please — these will go into ' + parts.length + ' boxes.';
+		} else if (note) { note.remove(); }
+	}
+	function splitBox(input){
+		var parts = splitNames(input.value);
+		if (parts.length < 2) { noteFor(input); return null; }
+		var w = input.closest('.pwrap');
+		if (!w) { return null; }
+		input.value = parts[0];
+		input.dispatchEvent(new Event('input', { bubbles: true }));
+		var after = w, last = null;
+		for (var i = 1; i < parts.length; i++) {
+			after.insertAdjacentHTML('afterend', personBox(parts[i]));
+			after = after.nextElementSibling;
+			last = after.querySelector('.p-person');
+		}
+		noteFor(input);
+		return last;
+	}
 	function groupValues(root){ return termValues(root, '.p-group'); }
 
 	// Clones a box onto the end and puts the cursor in it, so adding three
@@ -1097,8 +1141,19 @@ function gasf_crm_render_inbox_script() {
 		root.addEventListener('input', function(ev){
 			var input = ev.target && ev.target.classList && ev.target.classList.contains('p-person') ? ev.target : null;
 			if (!input) { return; }
+			noteFor(input);
 			clearTimeout(faceTimer);
 			faceTimer = setTimeout(function(){ updateFaceRef(input); }, 350);
+		});
+		root.addEventListener('focusout', function(ev){
+			if (ev.target && ev.target.classList && ev.target.classList.contains('p-person')) { splitBox(ev.target); }
+		});
+		root.addEventListener('keydown', function(ev){
+			var input = ev.target && ev.target.classList && ev.target.classList.contains('p-person') ? ev.target : null;
+			if (!input || ev.key !== 'Enter' || splitNames(input.value).length < 2) { return; }
+			ev.preventDefault();
+			var last = splitBox(input);
+			if (last) { last.focus(); }
 		});
 		// And on the way in, for boxes that already carry a name.
 		Array.prototype.forEach.call(root.querySelectorAll('.p-person'), updateFaceRef);
@@ -2035,6 +2090,29 @@ function gasf_crm_render_inbox_script() {
 
 	function upEl(id){ return document.getElementById(id); }
 
+	/* The place tiles. The hidden #upplace carries the answer the upload sends;
+	   a tile presses itself and writes it. "Somewhere else" (__other) is never
+	   sent: it reveals the full list, and the list writes the answer. */
+	var upOther = false;
+	function upPlaceSet(v){
+		var hid = upEl('upplace'), list = upEl('upplacelist');
+		if (!hid) { return; }
+		upOther = (v === '__other');
+		hid.value = upOther ? (list ? list.value : '') : (v || '');
+		if (list) { list.hidden = !upOther; if (!upOther) { list.value = ''; } }
+		Array.prototype.forEach.call(document.querySelectorAll('#upplaces .ptile'), function(b){
+			b.setAttribute('aria-pressed', (upOther ? b.dataset.place === '__other' : (v && b.dataset.place === v)) ? 'true' : 'false');
+		});
+		if (upOther && list) { list.focus(); }
+	}
+	document.addEventListener('click', function(ev){
+		var b = ev.target.closest ? ev.target.closest('#upplaces .ptile') : null;
+		if (b) { upPlaceSet(b.dataset.place); }
+	});
+	document.addEventListener('change', function(ev){
+		if (ev.target && ev.target.id === 'upplacelist' && upOther) { upEl('upplace').value = ev.target.value; }
+	});
+
 	function upRememberDefaults(){
 		if (upDefaults) { return; }
 		upDefaults = {
@@ -2058,7 +2136,7 @@ function gasf_crm_render_inbox_script() {
 		if (upEl('upnote'))    { upEl('upnote').value = upDefaults.note; }
 		if (upEl('update'))    { upEl('update').value = upDefaults.date; }
 		if (upEl('upgroup'))   { upEl('upgroup').value = upDefaults.group; }
-		if (upEl('upplace'))   { upEl('upplace').value = upDefaults.place; }
+		upPlaceSet(upDefaults.place);
 		if (upEl('upevent'))   { upEl('upevent').value = upDefaults.event; }
 		if (upEl('upeventid')) { upEl('upeventid').value = upDefaults.eventId; }
 		if (upEl('upflyer'))   { upEl('upflyer').checked = !!upDefaults.flyer; }
@@ -2083,8 +2161,9 @@ function gasf_crm_render_inbox_script() {
 			});
 		}
 
-		// Places, from the same list the rest of the app already holds.
-		var sel = upEl('upplace');
+		// Places, from the same list the rest of the app already holds - behind
+		// the "Somewhere else" tile; the tiles themselves are the grounds.
+		var sel = upEl('upplacelist');
 		if (sel && sel.options.length < 2) {
 			PLACES.forEach(function(pl){
 				var pad = '';
@@ -3274,6 +3353,10 @@ function gasf_crm_render_inbox_script() {
 			var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
 			box.appendChild(w); i.focus();
 		};
+		// Several names in one box get the note; Go splits them regardless.
+		document.getElementById('btpeople').addEventListener('input', function(ev){
+			if (ev.target && ev.target.classList && ev.target.classList.contains('p-person')) { noteFor(ev.target); }
+		});
 
 		var ev = document.getElementById('btevent');
 		bindEventPicker({
@@ -3286,10 +3369,7 @@ function gasf_crm_render_inbox_script() {
 
 		document.getElementById('btgo').onclick = function(){
 			var ids = Object.keys(lsel).map(Number);
-			var people = [];
-			Array.prototype.forEach.call(document.querySelectorAll('#btpeople input'), function(i){
-				if (i.value.trim()) { people.push(i.value.trim()); }
-			});
+			var people = peopleValues(document.getElementById('btpeople'));
 			var msg = document.getElementById('btmsg');
 			// Ticking more with the panel already open is still caught here.
 			if (ids.length > BULK_TAG_MAX) {
