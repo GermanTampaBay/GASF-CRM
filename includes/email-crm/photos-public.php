@@ -1058,6 +1058,21 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .gasf-door-send{text-align:center;margin-top:20px}
 	.gasf-door-entry .gasf-door-send button{min-width:220px}
 	.gasf-door-entry .gasf-door-msg{text-align:center;min-height:1.4em}
+	/* The dancing bratwurst: on screen while a batch uploads, so a guest can
+	   see something is happening. Outside .gasf-door-entry because it covers
+	   the whole page. */
+	.gasf-wurst{position:fixed;inset:0;z-index:99999;display:flex;flex-direction:column;align-items:center;
+		justify-content:center;gap:14px;background:rgba(15,25,22,.82);color:#fff;font-size:18px;text-align:center;padding:16px}
+	.gasf-wurst svg{width:150px;height:auto;overflow:visible}
+	.gasf-wurst .w-dance{transform-origin:60px 140px;animation:wurst-hop .7s ease-in-out infinite}
+	.gasf-wurst .w-arm-l{transform-origin:28px 70px;animation:wurst-wave .35s ease-in-out infinite alternate}
+	.gasf-wurst .w-arm-r{transform-origin:92px 70px;animation:wurst-wave .35s ease-in-out infinite alternate-reverse}
+	.gasf-wurst .w-leg-l{transform-origin:48px 128px;animation:wurst-kick .7s ease-in-out infinite}
+	.gasf-wurst .w-leg-r{transform-origin:72px 128px;animation:wurst-kick .7s ease-in-out infinite .35s}
+	@keyframes wurst-hop{0%,100%{transform:translateY(0) rotate(-8deg)}50%{transform:translateY(-18px) rotate(8deg)}}
+	@keyframes wurst-wave{from{transform:rotate(-35deg)}to{transform:rotate(25deg)}}
+	@keyframes wurst-kick{0%,100%{transform:rotate(0)}50%{transform:rotate(-30deg)}}
+	@media (prefers-reduced-motion:reduce){.gasf-wurst *{animation:none!important}}
 	@media (max-width:480px){
 		.gasf-door-entry .gasf-door-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}
 	}
@@ -1458,7 +1473,40 @@ function gasf_crm_door_script( $party ) {
 	 * somebody deliberately cleared would quietly widen the permission on
 	 * everything they send next.
 	 */
+	/* The dancing bratwurst, while a batch is sending. Built here rather than
+	   in the page, because it only ever exists between Submit and finish(). */
+	var wurst = null;
+	function wurstOn(total){
+		if (wurst) { return; }
+		wurst = document.createElement('div');
+		wurst.className = 'gasf-wurst';
+		wurst.setAttribute('role', 'status');
+		wurst.setAttribute('aria-live', 'polite');
+		wurst.innerHTML =
+			'<svg viewBox="0 0 120 160" aria-hidden="true"><g class="w-dance">' +
+			'<g class="w-leg-l"><path d="M48 128 L42 150 L32 152" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-leg-r"><path d="M72 128 L78 150 L88 152" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-arm-l"><path d="M28 70 L10 56 L6 46" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<g class="w-arm-r"><path d="M92 70 L110 56 L114 46" stroke="#3a2416" stroke-width="5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></g>' +
+			'<rect x="26" y="8" width="68" height="126" rx="34" fill="#b8642c" stroke="#7a3d17" stroke-width="3"/>' +
+			'<path d="M38 96 L82 84 M38 112 L82 100 M40 80 L80 68" stroke="#7a3d17" stroke-width="3" stroke-linecap="round" opacity=".55"/>' +
+			'<path d="M44 20 Q52 28 46 36 Q40 44 50 52 Q60 60 52 68" stroke="#f2c230" stroke-width="5" fill="none" stroke-linecap="round"/>' +
+			'<circle cx="48" cy="42" r="7" fill="#fff"/><circle cx="72" cy="42" r="7" fill="#fff"/>' +
+			'<circle cx="50" cy="43" r="3.5" fill="#1d1d1d"/><circle cx="74" cy="43" r="3.5" fill="#1d1d1d"/>' +
+			'<path d="M48 58 Q60 70 72 58" stroke="#3a2416" stroke-width="3.5" fill="none" stroke-linecap="round"/>' +
+			'</g></svg><div class="w-say"></div>';
+		document.body.appendChild(wurst);
+		wurstSay(1, total);
+	}
+	function wurstSay(n, total){
+		if (!wurst) { return; }
+		wurst.querySelector('.w-say').textContent = total > 1
+			? 'Sending photo ' + n + ' of ' + total + '…' : 'Sending your photo…';
+	}
+	function wurstOff(){ if (wurst) { wurst.remove(); wurst = null; } }
+
 	function finish(ok, bad, held, why){
+		wurstOff();
 		var banner = document.getElementById('pdone');
 
 		// Before the boxes are emptied below, and from what was SENT.
@@ -1523,6 +1571,8 @@ function gasf_crm_door_script( $party ) {
 
 		var queue = picked.filter(function(p){ return p.state === 'new'; });
 		var ok = 0, bad = 0, held = false, why = '';
+		var total = queue.length;
+		wurstOn(total);
 
 		var next = function(){
 			var p = queue.shift();
@@ -1531,6 +1581,7 @@ function gasf_crm_door_script( $party ) {
 				finish(ok, bad, held, why);
 				return;
 			}
+			wurstSay(total - queue.length, total);
 			p.state = 'going'; paint();
 
 			var fd = new FormData();

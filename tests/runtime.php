@@ -3626,6 +3626,10 @@ final class GASF_CRM_Selftest {
 			'door: the date starts at today, set in the browser (the page itself carries none), after any remembered visit' );
 		$this->ok( false !== strpos( $door, 'font-size:16px' ),
 			'door: boxes use 16px text, so iPhones do not zoom in on every tap' );
+		$this->ok( false !== strpos( $door, "wurstOn(total);" ) && false !== strpos( $door, "function finish(ok, bad, held, why){\n\t\twurstOff();" ),
+			'door: the bratwurst dances from Submit until the batch finishes, then goes before the result is shown' );
+		$this->ok( false !== strpos( $door, '@media (prefers-reduced-motion:reduce){.gasf-wurst *{animation:none!important}}' ),
+			'door: and stands still for anyone who has asked for less motion' );
 		$this->ok( false !== strpos( $door, 'aria-label="Remove this photo"' ) && false !== strpos( $door, "if (!b || busy) { return; }" ),
 			'door: a picked photo can be removed before sending, but not while a batch is going' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
