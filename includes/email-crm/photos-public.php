@@ -925,7 +925,7 @@ function gasf_crm_door_page( $door, $notice ) {
 		}
 		printf( '<script>var GASF_DOOR_EVENTS=%s;</script>', wp_json_encode( $ev_list ) );
 
-		echo '<p><label for="pcaption"><strong>Anything you want to tell us?</strong></label><br>';
+		echo '<p><label for="pcaption"><strong>Anything you want to tell us? (optional)</strong></label><br>';
 		echo '<textarea id="pcaption" rows="3" maxlength="600" placeholder="Who, what, why it matters &mdash; anything at all."></textarea></p>';
 
 		echo '<p><label for="pfrom"><strong>Your name (optional)</strong></label><br>';

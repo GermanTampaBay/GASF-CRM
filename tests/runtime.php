@@ -3607,6 +3607,13 @@ final class GASF_CRM_Selftest {
 			'door: names are suggested from the public-names list, with the shared matcher' );
 		$this->ok( false !== strpos( $door, "if (evId.value) {\n\t\t\t// Picked: the filled-in box is the answer, so the list goes." ),
 			'door: picking an occasion closes the list instead of searching on its title' );
+		// Place and occasion carry no "(optional)", so they read as expected
+		// answers; nothing enforces them. Every other question says optional.
+		foreach ( array( 'When was it taken?', 'Anything you want to tell us?', 'Your name' ) as $q ) {
+			$this->ok( false !== strpos( $door, $q . ' (optional)</strong>' ), "door: \"$q\" is marked optional" );
+		}
+		$this->ok( false === strpos( $door, 'Where was it taken? (optional)' ) && false === strpos( $door, 'What was the occasion? (optional)' ),
+			'door: place and occasion are not marked optional' );
 		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
 			'door: names are optional on both doors, and the label says so on both' );
 
