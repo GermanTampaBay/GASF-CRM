@@ -971,7 +971,7 @@ final class GASF_CRM_Selftest {
 		$trim = gasf_crm_face_tombstones_trim( $big, 1000000 );
 		$this->ok( GASF_CRM_FACE_TOMBSTONE_MAX === count( $trim ) && ! isset( $trim[1] ) && isset( $trim[ GASF_CRM_FACE_TOMBSTONE_MAX + 5 ] ),
 			'tombstones: over the cap, the oldest go first' );
-		$res = $this->rest_get( '/crm/photos/faces/tombstones', array( 'since' => 0 ) );
+		$res = $this->rest_get( '/gasf/v1/crm/photos/faces/tombstones', array( 'since' => 0 ) );
 		$this->ok( is_array( $res ) && in_array( $id, (array) ( $res['ids'] ?? array() ), true ) && abs( time() - (int) ( $res['now'] ?? 0 ) ) < 5,
 			'tombstones: the route lists the deletion and hands back the server\'s clock' );
 		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-faces.php' );
