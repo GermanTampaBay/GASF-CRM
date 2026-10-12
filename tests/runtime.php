@@ -432,9 +432,16 @@ final class GASF_CRM_Selftest {
 		wp_set_object_terms( $b, array( 'Selftest Thumbface' ), 'gasf_photo_person', false );
 		$key = 'gasf_face_ref2_' . md5( strtolower( gasf_crm_face_canonical_key( 'Selftest Thumbface' ) ?: 'Selftest Thumbface' ) );
 		delete_transient( $key );
+		// A second photo of the same person whose label cannot be placed: past
+		// every size on record, with no original to read. Its numbers are
+		// bigger, and it must not win.
+		$c = $this->library_photo( 'st-boxspace-stray' );
+		update_post_meta( $c, '_wp_attachment_metadata', array( 'width' => 1024, 'height' => 576 ) );
+		update_post_meta( $c, '_gasf_face_labels', array( array( 'name' => 'Selftest Thumbface', 'box' => array( 3275, 682, 2550, 3200 ) ) ) );
+		wp_set_object_terms( $c, array( 'Selftest Thumbface' ), 'gasf_photo_person', false );
 		$shot = gasf_crm_face_reference_shot( 'Selftest Thumbface' );
 		$this->ok( $shot && $b === $shot['photo'] && 2400 === $shot['iw'],
-			'box space: the reference shot says which picture its box is on' );
+			'box space: the reference shot says which picture its box is on, and a label that lands outside its picture does not win' );
 		$bytes = gasf_crm_face_reference_thumb( 'Selftest Thumbface' );
 		delete_transient( $key );
 		$this->ok( is_string( $bytes ) && strlen( $bytes ) > 0,

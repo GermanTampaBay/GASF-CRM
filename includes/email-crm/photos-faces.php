@@ -647,6 +647,11 @@ function gasf_crm_face_reference_shot( $person ) {
 		foreach ( gasf_crm_face_rows_in( $pid, $mine, $on[0], $on[1] ) as $label ) {
 			$box = $label['box'];
 			if ( $box[2] <= 0 || $box[3] <= 0 ) { continue; }
+			// A box that lands outside the picture was placed on the wrong size
+			// (a legacy label whose original could not be found). Its inflated
+			// numbers would win "biggest face" and crop nothing; skip it, and a
+			// correctly placed label on another photo wins instead.
+			if ( $box[0] + $box[2] > $on[0] + 2 || $box[1] + $box[3] > $on[1] + 2 ) { continue; }
 			$a = $box[2] * $box[3];
 			if ( $a > $area ) {
 				$area = $a;
