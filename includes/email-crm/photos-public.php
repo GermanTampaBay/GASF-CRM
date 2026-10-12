@@ -814,8 +814,8 @@ function gasf_crm_door_page( $door, $notice ) {
 
 	echo '<div id="pform" hidden>';
 
-	echo '<p><label for="pname0"><strong>Who is in them?' . ( $party ? ' (optional)' : '' ) . '</strong></label></p>';
-	echo '<div id="pnames"><p class="pwrap"><input type="text" id="pname0" class="pname" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"></p></div>';
+	echo '<p><label for="pname0"><strong>Who is in them? (optional)</strong></label></p>';
+	echo '<div id="pnames"><p class="pwrap"><input type="text" id="pname0" class="pname" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="pdel" aria-label="Remove this person">&times;</button></p></div>';
 	echo '<p><button type="button" id="paddp">+ Add another person</button></p>';
 	echo '<p class="gasf-door-fine">One name per box. Leave blank if you would rather not say.</p>';
 
@@ -887,13 +887,12 @@ function gasf_crm_door_page( $door, $notice ) {
 		 * events on it are offered, so nobody has to spell Schuhplattlerfest.
 		 */
 		echo '<p><label for="ptaken"><strong>When was it taken?</strong></label><br><input type="date" id="ptaken"></p>';
-		echo '<p class="gasf-door-fine">Leave this alone if the photo knows its own date &mdash; most phone photos do.</p>';
+		echo '<p class="gasf-door-fine">Date is optional.</p>';
 
 		echo '<p><label for="pevent"><strong>What was the occasion?</strong></label><br>';
 		echo '<input type="text" id="pevent" maxlength="120" placeholder="Oktoberfest, a Stammtisch, a wedding&hellip;" autocomplete="off"></p>';
 		echo '<div id="pevlist" class="gasf-door-evlist"></div>';
 		echo '<input type="hidden" id="peventid" value="">';
-		echo '<p class="gasf-door-fine">A name is plenty &mdash; a volunteer will match it to the club calendar.</p>';
 
 		/*
 		 * The calendar travels with the page rather than behind an endpoint.
@@ -1011,7 +1010,11 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .gasf-door-pick{width:100%;padding:18px;font-size:1.05em}
 	.gasf-door-entry .pname,.gasf-door-entry #pevent,.gasf-door-entry #pfrom,
 	.gasf-door-entry #pcaption,.gasf-door-entry #pplace{width:100%;max-width:420px}
-	.gasf-door-entry .pwrap{margin:0 0 6px}
+	.gasf-door-entry .pwrap{margin:0 0 6px;display:flex;align-items:center;gap:6px;max-width:420px}
+	.gasf-door-entry .pwrap .pname{flex:1 1 auto;min-width:0}
+	.gasf-door-entry .pdel{flex:0 0 auto;width:44px;padding:8px 0;background:transparent;color:inherit;
+		border:1px solid currentColor;opacity:.7}
+	.gasf-door-entry .pdel:hover{opacity:1;background:rgba(127,127,127,.15)}
 	/* "Clear these" reads as part of its sentence, not as a second big button
 	   competing with Send. */
 	.gasf-door-entry .gasf-door-linkbtn{background:none;border:0;padding:0;color:inherit;
@@ -1072,10 +1075,27 @@ function gasf_crm_door_script( $party ) {
 	document.getElementById('paddp').onclick = function(){
 		var box = document.getElementById('pnames');
 		var w = box.querySelector('.pwrap').cloneNode(true);
-		w.querySelector('input').value = '';
+		var n = w.querySelector('input');
+		n.value = '';
+		n.removeAttribute('id'); // the label belongs to the first box only
 		box.appendChild(w);
-		w.querySelector('input').focus();
+		n.focus();
 	};
+	// "×" takes a box away again. The last one is emptied rather than removed,
+	// so there is always one to type into.
+	document.getElementById('pnames').addEventListener('click', function(e){
+		var d = e.target.closest ? e.target.closest('.pdel') : null;
+		if (!d) { return; }
+		var box = this, w = d.closest('.pwrap');
+		var rows = box.querySelectorAll('.pwrap');
+		if (rows.length <= 1) { var only = w.querySelector('input'); only.value = ''; only.focus(); return; }
+		var next = w.nextElementSibling || w.previousElementSibling;
+		var hadLabel = w.querySelector('#pname0');
+		w.remove();
+		var first = box.querySelector('.pname');
+		if (hadLabel && first) { first.id = 'pname0'; }
+		if (next) { next.querySelector('input').focus(); }
+	});
 
 	function val(id){ var e = document.getElementById(id); return e ? e.value : ''; }
 

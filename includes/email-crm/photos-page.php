@@ -363,7 +363,7 @@ function gasf_crm_photo_page( $state, $invite = null, $notice = '' ) {
 
 		echo '<div class="f"><span>Who is in it?</span>';
 		echo '<div class="people" data-id="' . (int) $id . '">';
-		printf( '<span class="pwrap"><input type="text" name="photo[%d][people][]" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"></span>', (int) $id );
+		printf( '<span class="pwrap"><input type="text" name="photo[%d][people][]" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="delp" aria-label="Remove this person">&times;</button></span>', (int) $id );
 		echo '</div>';
 		echo '<button type="button" class="addp" data-id="' . (int) $id . '">+ Add another person</button>';
 		echo '<em>One name per box. Leave blank if you would rather not say, or if it is a picture of the building.</em></div>';
@@ -656,8 +656,15 @@ select{
 .f-evsearch{margin:8px 0}
 
 /* ---- people ---- */
-.people .pwrap{display:block;position:relative;margin-bottom:9px}
-.people input{width:100%;margin:0}
+.people .pwrap{display:flex;align-items:center;gap:6px;position:relative;margin-bottom:9px}
+.people input{flex:1 1 auto;min-width:0;width:100%;margin:0}
+/* Sized for a thumb, like everything else on this form. */
+.delp{
+	flex:0 0 auto; width:40px; height:40px; padding:0;
+	font:400 1.4rem/1 var(--body); color:var(--ink-2); background:none;
+	border:1px solid var(--rule); border-radius:var(--r); cursor:pointer;
+}
+.delp:hover{color:var(--stamp);border-color:var(--stamp)}
 .addp{
 	padding:9px 15px;
 	font:700 .68rem/1 var(--slug); text-transform:uppercase; letter-spacing:.14em;
@@ -774,6 +781,24 @@ function gasf_crm_photo_script() {
 		var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
 		box.appendChild(w);
 		n.focus();
+	});
+	// "×" takes a box away again, for the name typed by mistake or the box
+	// added one too many. The last box is emptied rather than removed, so there
+	// is always one to type into.
+	document.addEventListener('click', function(e){
+		var d = e.target.closest ? e.target.closest('.delp') : null;
+		if(!d) return;
+		var w = d.closest('.pwrap');
+		var box = w ? w.closest('.people') : null;
+		if(!box) return;
+		var sug = w.querySelector('.psug'); if (sug) { sug.remove(); }
+		var rows = box.querySelectorAll('.pwrap');
+		if(rows.length <= 1) { var only = w.querySelector('input'); only.value = ''; only.focus(); return; }
+		var next = w.nextElementSibling || w.previousElementSibling;
+		w.remove();
+		var add = document.querySelector('.addp[data-id="' + box.dataset.id + '"]');
+		if (add) { add.disabled = false; }
+		if (next) { next.querySelector('input').focus(); }
 	});
 
 	/* ============ name suggestions ============

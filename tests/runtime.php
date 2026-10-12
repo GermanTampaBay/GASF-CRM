@@ -3573,6 +3573,24 @@ final class GASF_CRM_Selftest {
 		$this->ok( false !== strpos( $fin, 'pnames' ), 'door: but who is in them is emptied after each batch' );
 	}
 
+	/** Both public forms that can add a person box can also take one away. */
+	public function test_person_boxes_can_be_removed() {
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		preg_match( '~<p class="pwrap">.*?</p>~', $door, $row );
+		$this->ok( isset( $row[0] ) && false !== strpos( $row[0], 'class="pdel"' ),
+			'door: each person box carries a remove button, so cloned boxes do too' );
+		$this->ok( false !== strpos( $door, "closest('.pdel')" ) && false !== strpos( $door, 'w.remove()' ),
+			'door: the remove button is wired to take the box away' );
+		$this->ok( false !== strpos( $door, 'Who is in them? (optional)</strong>' ),
+			'door: names are optional on both doors, and the label says so on both' );
+
+		$page = (string) file_get_contents( GASF_CRM_DIR . '/photos-page.php' );
+		$this->ok( false !== strpos( $page, 'class="delp" aria-label="Remove this person"' ),
+			'tagging page: each person box carries a remove button' );
+		$this->ok( false !== strpos( $page, "closest('.delp')" ) && false !== strpos( $page, 'add.disabled = false' ),
+			'tagging page: removing a box frees the add button if the limit had been reached' );
+	}
+
 	/**
 	 * Publishing never moves a photo onto a name another file already has.
 	 *
