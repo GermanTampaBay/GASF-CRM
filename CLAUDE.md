@@ -112,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 695 assertions in 87 tests, run on the server against live
+- **`tests/runtime.php`** — 696 assertions in 87 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -427,12 +427,12 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.91.2** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.91.3** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
 The face scanner has its own: `SCANNER_VERSION` near the top of
-`tools/face-scanner/scan.py` (1.7.0 as of boxes carrying the size they were measured on), shown at the
+`tools/face-scanner/scan.py` (1.7.1 as of --relearn learning on its own), shown at the
 top of the launcher's *Advanced settings* and by `scan.py --version`. Bump it
 with every change to that folder; it is the only way to tell from the scanning
 PC which copy is running. The `1.3` in its `USER_AGENT` is a fixed string
