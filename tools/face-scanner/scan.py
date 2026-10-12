@@ -115,7 +115,7 @@ DB_PATH = HERE / "faces.db"
 # (without importing this file), so keep it a plain string literal on one line.
 # Numbering starts at 1.4.0 so it never looks older than the "1.3" in
 # USER_AGENT below -- which is NOT a version, just a string mod_security allows.
-SCANNER_VERSION = "1.7.0"
+SCANNER_VERSION = "1.7.1"
 
 # A browser-shaped User-Agent on purpose. The host (Bluehost) runs mod_security,
 # which answers the default python-requests agent — and anything with "scanner"
@@ -4623,7 +4623,7 @@ def local_label(
 LEARN_RETRY_RUNS = 3
 
 
-def learn(api, conn, backend, verbose=True):
+def learn(api, conn, backend, verbose=True, full=False):
     """
     Grow the reference set from photos volunteers have actually tagged.
 
@@ -4655,7 +4655,10 @@ def learn(api, conn, backend, verbose=True):
     wk_id = state_key(backend.name, "learned_id")
     since_mod = state_get(conn, wk_mod, "")
     since_id = int(state_get(conn, wk_id, "0") or 0)
-    include_empty = bool(since_mod)
+    # Past the watermark, photos with no labels and no people are fetched too,
+    # so references learned from labels since removed are dropped. A full
+    # relearn needs that from photo 0, or those stale references survive it.
+    include_empty = bool(since_mod) or bool(full)
     added = removed = skipped = processed = 0
     learned_ids = set()
     retry_key = state_key(backend.name, "learn_retry")
@@ -7480,16 +7483,20 @@ def main():
         # so it costs nothing when no new photos have been tagged and it lets the
         # reference set grow as volunteers work. One-shot runs only learn when
         # asked, or when there is nothing to compare against yet.
-        if args.relearn:
+        relearn = bool(getattr(args, "relearn", False))
+        if relearn:
             # Back to photo 0 for this engine. Relearning is idempotent per
-            # photo, so this costs time, never correctness.
+            # photo, so this costs time, never correctness. Once only: in
+            # --watch mode later passes are incremental again.
             for base in ("learned_modified", "learned_id"):
                 state_set(conn, state_key(backend.name, base), "")
             if verbose:
                 print("Relearning every tagged photo from the beginning...", flush=True)
             args.relearn = False
-        if args.learn or args.watch or not load_references(conn, backend.name):
-            learn(api, conn, backend, verbose)
+        # --relearn learns on its own; it used to clear the watermark and then
+        # wait for a --learn that nobody had been told to add.
+        if args.learn or relearn or args.watch or not load_references(conn, backend.name):
+            learn(api, conn, backend, verbose, full=relearn)
         scan(
             api, conn, backend, tolerance, cfg, verbose, uploaded_after, uploaded_before,
             include_captions=describe,
