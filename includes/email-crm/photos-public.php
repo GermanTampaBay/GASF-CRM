@@ -54,6 +54,23 @@ define( 'GASF_CRM_DOOR_MAX_TOTAL', 600 );
 /** How long a phone's counter is remembered after its last upload. */
 define( 'GASF_CRM_DOOR_DEVICE_TTL', 12 * HOUR_IN_SECONDS );
 
+/*
+ * Two ceilings above the per-phone budget (2.95.0).
+ *
+ * The per-phone key includes the browser's User-Agent, deliberately: a
+ * party's guests all sit behind the club wifi's one address, and keying on
+ * the address alone would hand forty of them one shared budget. But a script
+ * that changes its User-Agent per request mints a fresh budget every time,
+ * and the speed-floor stamp was good for a day of unlimited posts from one
+ * page fetch. So: a ceiling per address per hour, generous enough for a
+ * table of guests, and a bounded number of uses per served page, generous
+ * enough for the biggest batch one phone may send. Neither is an identity;
+ * both are fuses.
+ */
+define( 'GASF_CRM_DOOR_MAX_PER_IP_HOUR', 120 );       // the year-round door
+define( 'GASF_CRM_DOOR_MAX_PER_IP_HOUR_PARTY', 400 ); // a party, behind one wifi
+define( 'GASF_CRM_DOOR_STAMP_MAX_USES', 60 );
+
 /**
  * The doors. An option rather than a table: there are a handful a year, they
  * are edited by hand, and a table would be three migrations for something that
@@ -142,6 +159,35 @@ function gasf_crm_door_device_key( $token ) {
 	$ua = isset( $_SERVER['HTTP_USER_AGENT'] )
 		? substr( sanitize_text_field( wp_unslash( $_SERVER['HTTP_USER_AGENT'] ) ), 0, 120 ) : '';
 	return 'gasf_door_' . md5( $token . '|' . $ip . '|' . $ua );
+}
+
+function gasf_crm_door_ip_key() {
+	$ip = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
+	return 'gasf_door_ip_' . md5( $ip );
+}
+function gasf_crm_door_ip_count() { return (int) get_transient( gasf_crm_door_ip_key() ); }
+function gasf_crm_door_ip_bump() {
+	// The hour runs from the first upload; the count simply expires.
+	$k = gasf_crm_door_ip_key();
+	$n = (int) get_transient( $k );
+	if ( $n ) { set_transient( $k, $n + 1, HOUR_IN_SECONDS ); } else { set_transient( $k, 1, HOUR_IN_SECONDS ); }
+}
+function gasf_crm_door_ip_drop() {
+	$k = gasf_crm_door_ip_key();
+	$n = (int) get_transient( $k );
+	if ( $n > 0 ) { set_transient( $k, $n - 1, HOUR_IN_SECONDS ); }
+}
+
+/**
+ * Spend one use of a served page's stamp. False once it is used up: a page
+ * fetched once may send a batch, not a day of them.
+ */
+function gasf_crm_door_stamp_spend( $stamp ) {
+	$k = 'gasf_door_stamp_' . md5( (string) $stamp );
+	$n = (int) get_transient( $k );
+	if ( $n >= GASF_CRM_DOOR_STAMP_MAX_USES ) { return false; }
+	set_transient( $k, $n + 1, DAY_IN_SECONDS );
+	return true;
 }
 
 function gasf_crm_door_device_count( $token ) {
@@ -238,8 +284,19 @@ function gasf_crm_door_reserve_slot( $token ) {
 			array( 'status' => 429 ) );
 	}
 
+	// The per-address ceiling: see GASF_CRM_DOOR_MAX_PER_IP_HOUR.
+	$ip_cap = empty( $door['permanent'] ) ? GASF_CRM_DOOR_MAX_PER_IP_HOUR_PARTY : GASF_CRM_DOOR_MAX_PER_IP_HOUR;
+	if ( gasf_crm_door_ip_count() >= $ip_cap ) {
+		gasf_crm_door_lock_release( $token );
+		gasf_crm_log( sprintf( 'Door "%s": per-address ceiling of %d an hour reached %s', (string) ( $door['label'] ?? $token ), $ip_cap, gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
+		return new WP_Error( 'gasf_crm_quota_ip',
+			'That is a great many photos from this connection in one hour. Please try again a little later, or find a volunteer.',
+			array( 'status' => 429 ) );
+	}
+
 	gasf_crm_door_device_bump( $token );
 	gasf_crm_door_total_bump( $token );
+	gasf_crm_door_ip_bump();
 	gasf_crm_door_lock_release( $token );
 	return true;
 }
@@ -251,6 +308,7 @@ function gasf_crm_door_release_slot( $token ) {
 		return false;
 	}
 	gasf_crm_door_device_drop( $token );
+	gasf_crm_door_ip_drop();
 	gasf_crm_door_total_drop( $token );
 	gasf_crm_door_lock_release( $token );
 	return true;
@@ -597,7 +655,15 @@ function gasf_crm_door_receive( array $door ) {
 		if ( $age < 5 || $age > DAY_IN_SECONDS ) {
 			gasf_crm_log( sprintf( 'Door "%s": speed floor refused a submission aged %ds %s',
 				$door['label'], $age, gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
-			return $fail( 'That arrived faster than a person could send it. Give the page a moment and try again.' );
+			// Two different facts, two different sentences: a stale tab is not a bot.
+			return $fail( $age > DAY_IN_SECONDS
+				? 'This page has been open for more than a day. Reload it and try again; nothing you picked has been sent.'
+				: 'That arrived faster than a person could send it. Give the page a moment and try again.' );
+		}
+		if ( ! gasf_crm_door_stamp_spend( (string) ( $_POST['stamp'] ?? '' ) ) ) {
+			gasf_crm_log( sprintf( 'Door "%s": a served page was used for its %dth photo %s',
+				$door['label'], GASF_CRM_DOOR_STAMP_MAX_USES, gasf_crm_photo_origin_line( gasf_crm_photo_origin() ) ) );
+			return $fail( 'This page has sent as many photos as it can. Reload it to send more.' );
 		}
 
 		// Turnstile, when configured. One token clears a batch: the first

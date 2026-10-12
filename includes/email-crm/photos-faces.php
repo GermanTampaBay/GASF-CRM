@@ -2003,7 +2003,20 @@ function gasf_crm_faces_photo_state( $attachment_id ) {
 	);
 }
 
+/**
+ * The metrics, held for a minute. They walk the whole library, and were
+ * built afresh on every admin Photos render and every /metrics call.
+ */
 function gasf_crm_faces_metrics( $sample_limit = 150 ) {
+	$key = 'gasf_faces_metrics_' . (int) $sample_limit;
+	$hit = get_transient( $key );
+	if ( is_array( $hit ) ) { return $hit; }
+	$out = gasf_crm_faces_metrics_build( $sample_limit );
+	set_transient( $key, $out, MINUTE_IN_SECONDS );
+	return $out;
+}
+
+function gasf_crm_faces_metrics_build( $sample_limit = 150 ) {
 	$ids = get_posts( array(
 		'post_type'      => 'attachment',
 		'post_status'    => array( 'inherit', 'private' ),
@@ -2015,6 +2028,10 @@ function gasf_crm_faces_metrics( $sample_limit = 150 ) {
 			array( 'key' => '_gasf_photo_confirmed', 'compare' => 'EXISTS' ),
 		),
 	) );
+	if ( $ids ) {
+		update_meta_cache( 'post', $ids );
+		update_object_term_cache( $ids, 'attachment' );
+	}
 	$out = array(
 		'total' => 0,
 		'states' => array(),
@@ -3094,6 +3111,13 @@ function gasf_crm_faces_unscanned_count( $after = '', $before = '', $caption_key
 		'meta_query'     => gasf_crm_faces_queue_meta_query( $caption_key ),
 		'date_query'     => $date_query,
 	) );
+	// Asked on every scanner poll. ids-only queries prime nothing, so each
+	// photo below used to cost its own meta and term queries - tens of
+	// thousands after a rescan. Two queries prime the lot.
+	if ( $ids ) {
+		update_meta_cache( 'post', $ids );
+		update_object_term_cache( $ids, 'attachment' );
+	}
 	$left = 0;
 	foreach ( $ids as $id ) {
 		if ( ! get_post_meta( (int) $id, '_gasf_photo_flyer', true ) && gasf_crm_photo_in_library( $id ) ) { $left++; }

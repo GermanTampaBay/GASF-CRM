@@ -705,6 +705,78 @@ final class GASF_CRM_Selftest {
 		$this->ok( false !== strpos( $door, "' with no place given'" ), 'place tiles: the log says which tile was tapped, or that none was' );
 	}
 
+	/** PNG and WebP carry metadata in their own chunks, and the scan knows their names. */
+	public function test_metadata_scan_knows_png_and_webp() {
+		// A PNG with an eXIf chunk spliced in before IEND.
+		$im = imagecreatetruecolor( 8, 8 );
+		ob_start(); imagepng( $im ); $png = ob_get_clean(); imagedestroy( $im );
+		$iend  = strrpos( $png, 'IEND' ) - 4;
+		$data  = "Exif-ish TIFF block";
+		$chunk = pack( 'N', strlen( $data ) ) . 'eXIf' . $data . pack( 'N', crc32( 'eXIf' . $data ) );
+		$dirty = substr( $png, 0, $iend ) . $chunk . substr( $png, $iend );
+		$p = wp_tempnam( 'st-meta.png' ); file_put_contents( $p, $dirty );
+		$c = wp_tempnam( 'st-clean.png' ); file_put_contents( $c, $png );
+		$this->ok( gasf_crm_photo_has_metadata( $p ), 'metadata scan: a PNG eXIf chunk is seen' );
+		$this->ok( ! gasf_crm_photo_has_metadata( $c ), 'metadata scan: a plain PNG is not flagged' );
+		if ( class_exists( 'Imagick' ) ) {
+			$r = gasf_crm_photo_scrub( $p );
+			$this->ok( ! is_wp_error( $r ) && ! gasf_crm_photo_has_metadata( $p ), 'metadata scan: and the scrub removes it from a PNG' );
+		}
+		@unlink( $p ); @unlink( $c ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		// A WebP header with an EXIF chunk name in it, and one without.
+		$w = wp_tempnam( 'st-meta.webp' ); file_put_contents( $w, 'RIFF' . pack( 'V', 40 ) . 'WEBPVP8 ' . str_repeat( "\0", 12 ) . 'EXIF' . pack( 'V', 4 ) . 'abcd' );
+		$v = wp_tempnam( 'st-plain.webp' ); file_put_contents( $v, 'RIFF' . pack( 'V', 24 ) . 'WEBPVP8 ' . str_repeat( "\0", 16 ) );
+		$this->ok( gasf_crm_photo_has_metadata( $w ), 'metadata scan: a WebP EXIF chunk is seen' );
+		$this->ok( ! gasf_crm_photo_has_metadata( $v ), 'metadata scan: a WebP without one is not flagged' );
+		// The short chunk names are looked for only in their own format.
+		$j = wp_tempnam( 'st-plain.jpg' ); file_put_contents( $j, $this->jpeg_bytes() . 'EXIF eXIf' );
+		$this->ok( ! gasf_crm_photo_has_metadata( $j ), 'metadata scan: those names mean nothing in a JPEG' );
+		@unlink( $w ); @unlink( $v ); @unlink( $j ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
+	/** The door's two ceilings: per address per hour, and uses per served page. */
+	public function test_door_ceilings() {
+		delete_transient( gasf_crm_door_ip_key() );
+		$this->ok( 0 === gasf_crm_door_ip_count(), 'door ceilings: an address starts at nothing' );
+		gasf_crm_door_ip_bump(); gasf_crm_door_ip_bump(); gasf_crm_door_ip_drop();
+		$this->ok( 1 === gasf_crm_door_ip_count(), 'door ceilings: a reserved then released slot nets one' );
+		delete_transient( gasf_crm_door_ip_key() );
+		$this->ok( GASF_CRM_DOOR_MAX_PER_IP_HOUR >= 2 * GASF_CRM_DOOR_MAX_PER_DEVICE && GASF_CRM_DOOR_MAX_PER_IP_HOUR_PARTY > GASF_CRM_DOOR_MAX_PER_IP_HOUR,
+			'door ceilings: the address ceiling sits above the phone budget, and a party gets more' );
+
+		$stamp = gasf_crm_door_stamp();
+		$ok = 0;
+		for ( $i = 0; $i < GASF_CRM_DOOR_STAMP_MAX_USES; $i++ ) { if ( gasf_crm_door_stamp_spend( $stamp ) ) { $ok++; } }
+		$this->ok( GASF_CRM_DOOR_STAMP_MAX_USES === $ok, 'door ceilings: a served page is good for a whole batch' );
+		$this->ok( ! gasf_crm_door_stamp_spend( $stamp ), 'door ceilings: and not for a day of them' );
+		delete_transient( 'gasf_door_stamp_' . md5( $stamp ) );
+
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false !== strpos( $door, 'gasf_crm_door_ip_bump();' ) && false !== strpos( $door, 'gasf_crm_door_ip_drop();' )
+				&& false !== strpos( $door, 'gasf_crm_door_stamp_spend( (string) ( $_POST[\'stamp\'] ?? \'\' ) )' ),
+			'door ceilings: both are wired into reserve, release, and receive' );
+	}
+
+	/** The library-wide walks prime their caches and the metrics are held for a minute. */
+	public function test_library_walks_are_primed() {
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos.php' );
+		$this->ok( false !== strpos( $src, "_prime_post_caches( \$ids, false, true );\n\t\tupdate_object_term_cache( \$ids, 'attachment' );" ),
+			'primed: the review list primes post, meta, and term caches before building cards' );
+		$this->ok( false === strpos( $src, "wp_get_object_terms( \$id, 'gasf_photo_person', array( 'fields' => 'names' ) ) )," ),
+			'primed: cards read saved names from the term cache' );
+		$faces = (string) file_get_contents( GASF_CRM_DIR . '/photos-faces.php' );
+		$this->ok( 2 === substr_count( $faces, "update_meta_cache( 'post', \$ids );\n\t\tupdate_object_term_cache( \$ids, 'attachment' );" ),
+			'primed: the scanner poll count and the metrics prime their caches' );
+		delete_transient( 'gasf_faces_metrics_5' );
+		$a = gasf_crm_faces_metrics( 5 );
+		$this->ok( is_array( $a ) && is_array( get_transient( 'gasf_faces_metrics_5' ) ), 'primed: the metrics are held in a transient' );
+		$this->ok( $a === gasf_crm_faces_metrics( 5 ), 'primed: and the second ask within the minute is the same answer' );
+		delete_transient( 'gasf_faces_metrics_5' );
+		$kiosk = (string) file_get_contents( GASF_CRM_DIR . '/photos-kiosk.php' );
+		$this->ok( false !== strpos( $kiosk, 'static $base = null;' ), 'primed: the kiosk walks the library once per request' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

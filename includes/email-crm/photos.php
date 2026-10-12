@@ -1112,7 +1112,21 @@ function gasf_crm_photo_has_metadata( $path ) {
 	$head = fread( $fh, 256 * 1024 ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 	fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 
-	foreach ( array( "Exif\0\0", '<x:xmpmeta', 'http://ns.adobe.com/xap', 'Photoshop 3.0', 'ICC_PROFILE', 'GPSLatitude', 'GPSLongitude' ) as $marker ) {
+	$markers = array( "Exif\0\0", '<x:xmpmeta', 'http://ns.adobe.com/xap', 'Photoshop 3.0', 'ICC_PROFILE', 'GPSLatitude', 'GPSLongitude' );
+	/*
+	 * Those are JPEG's words for it. A PNG carries EXIF as a bare TIFF block
+	 * in an eXIf chunk and XMP in an iTXt chunk; a WebP carries them as RIFF
+	 * chunks named EXIF and "XMP ". None of the JPEG markers appear in
+	 * either, so until 2.95.0 a PNG or WebP with GPS in it was "nothing to
+	 * strip" - and then "verified clean" by the same scan. The chunk names are
+	 * short, so they are looked for only in the format that uses them.
+	 */
+	if ( 0 === strpos( $head, "\x89PNG" ) ) {
+		$markers = array_merge( $markers, array( 'eXIf', 'iCCP', 'XML:com.adobe.xmp' ) );
+	} elseif ( 0 === strpos( $head, 'RIFF' ) && 'WEBP' === substr( $head, 8, 4 ) ) {
+		$markers = array_merge( $markers, array( 'EXIF', 'XMP ', 'ICCP' ) );
+	}
+	foreach ( $markers as $marker ) {
 		if ( false !== strpos( $head, $marker ) ) { return true; }
 	}
 	return false;
@@ -2517,6 +2531,13 @@ add_action( 'rest_api_init', function () {
  * Returns null for anything that did not arrive through a submission, which is
  * what keeps the routes above from reaching arbitrary Media Library items.
  */
+/** A photo's term names exactly as stored, from the object term cache. */
+function gasf_crm_photo_raw_term_names( $attachment_id, $taxonomy ) {
+	$terms = get_the_terms( (int) $attachment_id, $taxonomy );
+	if ( ! is_array( $terms ) ) { return array(); }
+	return array_values( array_map( 'strval', wp_list_pluck( $terms, 'name' ) ) );
+}
+
 function gasf_crm_photo_card( $attachment_id ) {
 	$id = (int) $attachment_id;
 	if ( ! $id || 'attachment' !== get_post_type( $id ) ) { return null; }
@@ -2607,11 +2628,13 @@ function gasf_crm_photo_card( $attachment_id ) {
 		 * &amp; and it matches nothing, falls through to "Somewhere else", and
 		 * saving mints a duplicate term that looks identical on screen.
 		 */
+		// Raw names from the term cache (primed by the gallery), not four
+		// uncached wp_get_object_terms() queries per card.
 		'saved'     => array(
-			'people'   => array_map( 'strval', (array) wp_get_object_terms( $id, 'gasf_photo_person', array( 'fields' => 'names' ) ) ),
-			'groups'   => array_map( 'strval', (array) wp_get_object_terms( $id, 'gasf_photo_group', array( 'fields' => 'names' ) ) ),
-			'place'    => (string) ( wp_get_object_terms( $id, 'gasf_photo_place', array( 'fields' => 'names' ) )[0] ?? '' ),
-			'event'    => (string) ( wp_get_object_terms( $id, 'gasf_photo_event', array( 'fields' => 'names' ) )[0] ?? '' ),
+			'people'   => gasf_crm_photo_raw_term_names( $id, 'gasf_photo_person' ),
+			'groups'   => gasf_crm_photo_raw_term_names( $id, 'gasf_photo_group' ),
+			'place'    => (string) ( gasf_crm_photo_raw_term_names( $id, 'gasf_photo_place' )[0] ?? '' ),
+			'event'    => (string) ( gasf_crm_photo_raw_term_names( $id, 'gasf_photo_event' )[0] ?? '' ),
 			'event_id' => (int) get_post_meta( $id, '_gasf_photo_event_id', true ),
 			'caption'  => (string) get_post_field( 'post_excerpt', $id ),
 			'taken'    => (string) get_post_meta( $id, '_gasf_photo_taken', true ),
@@ -2709,6 +2732,15 @@ function gasf_crm_photo_gallery( $state = '', $recent_max = 300 ) {
 
 	$ids = array_values( array_unique( array_map( 'intval', array_merge( $recent->posts, $open->posts ) ) ) );
 	rsort( $ids );
+
+	// Both queries ask for ids only, which primes nothing: every card below
+	// then paid its own post, meta, and term queries - a dozen a card, up to
+	// 1,300 cards, on the volunteers' main screen. Three queries now cover
+	// the lot.
+	if ( $ids ) {
+		_prime_post_caches( $ids, false, true );
+		update_object_term_cache( $ids, 'attachment' );
+	}
 
 	$out    = array();
 	$counts = array( 'review' => 0, 'done' => 0, 'all' => 0 );

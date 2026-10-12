@@ -49,11 +49,17 @@ function gasf_kiosk_guard( WP_REST_Request $req ) {
  * automatically reaches the kiosk. Never re-interpret consent here.
  */
 function gasf_kiosk_photo_ids( array $f = array() ) {
-    $ids = gasf_crm_photo_library_ids();                 // approved library, newest-first
-    $ids = array_values( array_filter( $ids, function ( $id ) {
-        return gasf_crm_photo_may( $id, 'kiosk' );       // the existing consent matrix
-    } ) );
-    return gasf_crm_photo_library_filter( $ids, $f );    // person/place/event/year/q
+    // The eligible set once per request: the list route asked for it twice,
+    // once for the page and once for the facets, and each time that was the
+    // whole library walked and the consent matrix asked 5,000 times.
+    static $base = null;
+    if ( null === $base ) {
+        $ids  = gasf_crm_photo_library_ids();                 // approved library, newest-first
+        $base = array_values( array_filter( $ids, function ( $id ) {
+            return gasf_crm_photo_may( $id, 'kiosk' );       // the existing consent matrix
+        } ) );
+    }
+    return gasf_crm_photo_library_filter( $base, $f );    // person/place/event/year/q
 }
 
 /**
