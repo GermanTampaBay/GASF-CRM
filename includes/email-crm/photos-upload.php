@@ -1231,6 +1231,9 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 			'from'    => (string) ( $anon['from'] ?? '' ),
 			'place'   => (string) $meta['place'],
 			'people'  => (array) $meta['people'],
+			// True when the guest adjusted who is in THIS photo on the form,
+			// rather than naming the batch - a volunteer can trust it more.
+			'people_own' => ! empty( $in['people_own'] ),
 			'groups'  => (array) $meta['groups'],
 			'at'      => current_time( 'mysql', true ),
 		) );

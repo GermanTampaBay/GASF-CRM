@@ -1098,6 +1098,45 @@ final class GASF_CRM_Selftest {
 			'near: the review screen and the library editor both show the note' );
 	}
 
+	/** Five or more door photos carry the batch's names as chips; a photo tapped off sends its own list. */
+	public function test_door_per_photo_people() {
+		$door = (string) file_get_contents( GASF_CRM_DIR . '/photos-public.php' );
+		$this->ok( false !== strpos( $door, 'var PER_PHOTO_MIN = 5;' ) && false !== strpos( $door, 'function perPhoto(names){ return picked.length >= PER_PHOTO_MIN && names.length > 0; }' ),
+			'per-photo people: the chips appear at five photos and a name, not before' );
+		$this->ok( false !== strpos( $door, "if (!cp.own) { cp.own = batchNames().map(lc).filter(function(k){ return k !== key; }); }" ),
+			'per-photo people: the first tap off a following photo makes it its own, minus that name' );
+		$this->ok( false !== strpos( $door, 'function onPhoto(p, n){ return !p.own || p.own.indexOf(lc(n)) !== -1; }' ),
+			'per-photo people: a name typed later lands on following photos and not on adjusted ones' );
+		$this->ok( false !== strpos( $door, "if (sp) { sp.own = null; paint(); }" ) && false !== strpos( $door, '>same as the rest<' ),
+			'per-photo people: same as the rest puts a photo back on the batch' );
+		$this->ok( false !== strpos( $door, "var mine = (perEach && p.own) ? people.filter(function(n){ return p.own.indexOf(lc(n)) !== -1; }) : people;" ) && false !== strpos( $door, "if (perEach && p.own) { fd.append('people_own', '1'); }" ),
+			'per-photo people: each upload sends that photo\'s own names, and says they are its own' );
+		$this->ok( false !== strpos( $door, "'people_own' => \$people_own," ) && false !== strpos( $door, "\$people_own = ! empty( \$_POST['people_own'] );" ),
+			'per-photo people: the door passes the flag through' );
+		// And the record: a held guest photo remembers whether its names were its own.
+		$bytes = $this->jpeg_bytes();
+		$tmp   = wp_tempnam( 'st-own.jpg' ); file_put_contents( $tmp, $bytes );
+		$r = gasf_crm_photo_upload_one(
+			array( 'name' => 'st-own.jpg', 'type' => 'image/jpeg', 'tmp_name' => $tmp, 'error' => 0, 'size' => strlen( $bytes ) ),
+			array( 'note' => 'selftest', 'consent_scope' => 'full', 'sideload' => 1, 'hold' => true, 'people' => array( 'Selftest Person' ), 'people_own' => 1,
+				'anon' => array( 'label' => 'selftest door', 'from' => 'Selftest' ) ) );
+		$id = is_array( $r ) ? (int) ( $r['id'] ?? 0 ) : 0;
+		if ( $id ) { $this->made[] = $id; }
+		$g = $id ? get_post_meta( $id, '_gasf_photo_guest', true ) : null;
+		$this->ok( is_array( $g ) && ! empty( $g['people_own'] ) && array( 'Selftest Person' ) === array_values( (array) $g['people'] ),
+			'per-photo people: the held photo records its names as its own' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
+		$tmp2 = wp_tempnam( 'st-batch.jpg' ); file_put_contents( $tmp2, $this->jpeg_bytes() );
+		$r2 = gasf_crm_photo_upload_one(
+			array( 'name' => 'st-batch.jpg', 'type' => 'image/jpeg', 'tmp_name' => $tmp2, 'error' => 0, 'size' => filesize( $tmp2 ) ),
+			array( 'note' => 'selftest', 'consent_scope' => 'full', 'sideload' => 1, 'hold' => true, 'people' => array( 'Selftest Person' ),
+				'anon' => array( 'label' => 'selftest door', 'from' => 'Selftest' ) ) );
+		$id2 = is_array( $r2 ) ? (int) ( $r2['id'] ?? 0 ) : 0;
+		if ( $id2 ) { $this->made[] = $id2; }
+		$g2 = $id2 ? get_post_meta( $id2, '_gasf_photo_guest', true ) : null;
+		$this->ok( is_array( $g2 ) && empty( $g2['people_own'] ), 'per-photo people: a batch answer is recorded as the batch\'s' );
+		foreach ( array( $tmp, $tmp2 ) as $t ) { @unlink( $t ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

@@ -777,6 +777,9 @@ function gasf_crm_door_receive( array $door ) {
 		return $fail( $reserve->get_error_message(), ( $code >= 400 && $code < 600 ) ? $code : 503 );
 	}
 
+	// Set when the guest took somebody off THIS photo on the form (2.103.0):
+	// the names below are then this photo's own answer, not the batch's.
+	$people_own = ! empty( $_POST['people_own'] );
 	$people = array();
 	foreach ( (array) ( $_POST['people'] ?? array() ) as $n ) {
 		$n = trim( sanitize_text_field( wp_unslash( (string) $n ) ) );
@@ -845,6 +848,7 @@ function gasf_crm_door_receive( array $door ) {
 		'event_id' => $event_id,
 		'caption'  => $caption,
 		'people'   => array_slice( $people, 0, 10 ),
+		'people_own' => $people_own,
 		'note'          => $party
 			? sprintf( 'Shared by a guest at %s through the QR code, %s', (string) $door['label'],
 				$full_consent
@@ -1004,6 +1008,9 @@ function gasf_crm_door_page( $door, $notice ) {
 	echo '<div id="pnames"><p class="pwrap"><input type="text" id="pname0" class="pname" maxlength="80" placeholder="Name" autocomplete="off" spellcheck="false"><button type="button" class="pdel" aria-label="Remove this person">&times;</button></p></div>';
 	echo '<p><button type="button" id="paddp">+ Add another person</button></p>';
 	echo '<p class="gasf-door-fine">One name per box. Leave blank if you would rather not say.</p>';
+	// Shown once there are five or more photos and a name: every name is on
+	// every photo until the guest taps one off a photo - see paint().
+	echo '<p class="gasf-door-fine" id="pperphoto" hidden>Everyone is on every photo. Tap a name under a photo to take them off that one; tap it again to put them back.</p>';
 
 	if ( $party ) {
 		/*
@@ -1166,6 +1173,18 @@ function gasf_crm_door_styles() {
 	.gasf-door-entry .gasf-door-grid .gdel{position:absolute;top:4px;right:4px;width:32px;height:32px;padding:0;
 		border-radius:50%;border:2px solid #fff;background:rgba(0,0,0,.65);color:#fff;font-size:20px;line-height:1}
 	.gasf-door-entry .gasf-door-grid .gdel:hover:not(:disabled){background:rgba(150,40,30,.95);border-color:#fff}
+	.gasf-door-entry .gasf-door-grid .gimg{position:relative;display:block}
+	/* Five or more photos with a name: the grid widens and each photo carries
+	   the batch's names as chips, all on; a tapped-off name reads struck out. */
+	.gasf-door-entry .gasf-door-grid.people{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+	.gasf-door-entry .gasf-door-grid.people img{aspect-ratio:4/3}
+	.gasf-door-entry .gasf-door-grid.people figure.own .gimg{outline:2px solid #dba617;outline-offset:1px;border-radius:3px}
+	.gasf-door-entry .gchips{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px}
+	.gasf-door-entry .gchip{font:inherit;font-size:12px;line-height:1.2;padding:5px 9px;border-radius:12px;min-height:28px;
+		border:1px solid currentColor;background:transparent;color:inherit;opacity:.55;text-decoration:line-through;cursor:pointer}
+	.gasf-door-entry .gchip[aria-pressed="true"]{background:#0f6e56;border-color:#0f6e56;color:#fff;opacity:1;text-decoration:none}
+	.gasf-door-entry .gchip:disabled{cursor:default}
+	.gasf-door-entry .gsame{font:inherit;font-size:11px;background:none;border:0;color:inherit;opacity:.75;text-decoration:underline;padding:4px 2px;cursor:pointer}
 	.gasf-door-entry .gasf-door-box{border:1px solid rgba(128,128,128,.35);border-radius:4px;padding:14px 16px;margin:18px 0}
 	.gasf-door-entry .gasf-door-box h2{margin-top:0}
 	.gasf-door-entry .gasf-door-fine{font-size:.88em;opacity:.75;margin-top:-.4em}
@@ -1256,6 +1275,7 @@ function gasf_crm_door_styles() {
 	.gasf-door-pop .pop-ok:hover{background:#0c5a46}
 	@media (max-width:480px){
 		.gasf-door-entry .gasf-door-grid{grid-template-columns:repeat(auto-fill,minmax(84px,1fr))}
+		.gasf-door-entry .gasf-door-grid.people{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))}
 	}
 </style>
 	<?php
@@ -1290,7 +1310,36 @@ function gasf_crm_door_script( $party ) {
 	var msg  = document.getElementById('pmsg');
 	var busy = false;
 
+	/*
+	 * Who is in WHICH photo, without asking fourteen times.
+	 *
+	 * The names box describes the batch, and that is right for most of a
+	 * batch and wrong for the rest: the archive held "these seven people" on
+	 * eleven photos, and a volunteer trimmed them by hand to 3/2/1/0/5. So
+	 * once there are five or more photos and a name, every photo shows the
+	 * batch's names as chips, all on. Tapping a name off a photo makes that
+	 * photo its OWN answer (p.own, lower-cased names): names typed later go
+	 * onto every photo still following the batch and not onto one already
+	 * adjusted, and "same as the rest" puts it back. Nothing is asked; a
+	 * guest who ignores the chips is exactly where they were before.
+	 */
+	var PER_PHOTO_MIN = 5;
+	function lc(n){ return String(n).toLowerCase(); }
+	function batchNames(){
+		var out = [];
+		Array.prototype.forEach.call(document.querySelectorAll('#pnames .pname'), function(i){
+			splitNames(i.value).forEach(function(n){ if (out.map(lc).indexOf(lc(n)) === -1) { out.push(n); } });
+		});
+		return out;
+	}
+	function perPhoto(names){ return picked.length >= PER_PHOTO_MIN && names.length > 0; }
+	function onPhoto(p, n){ return !p.own || p.own.indexOf(lc(n)) !== -1; }
+	function gesc(t){ return String(t).replace(/[&<>"]/g, function(c){ return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+
 	function paint(){
+		var names = batchNames(), per = perPhoto(names);
+		grid.classList.toggle('people', per);
+		var hint = document.getElementById('pperphoto'); if (hint) { hint.hidden = !per; }
 		grid.innerHTML = picked.map(function(p, i){
 			var s = p.state === 'done' ? 'sent'
 				: p.state === 'err' ? 'failed'
@@ -1299,8 +1348,14 @@ function gasf_crm_door_script( $party ) {
 			// sending, nothing is, so the queue cannot shift under it.
 			var del = (!busy && (p.state === 'new' || p.state === 'err'))
 				? '<button type="button" class="gdel" data-i="' + i + '" aria-label="Remove this photo">&times;</button>' : '';
-			return '<figure><img src="' + p.url + '" alt="">' + del +
-				'<span class="st' + (p.state === 'done' ? ' done' : (p.state === 'err' ? ' err' : '')) + '">' + s + '</span></figure>';
+			var chips = '';
+			if (per && p.state !== 'done') {
+				chips = '<div class="gchips">' + names.map(function(n){
+					return '<button type="button" class="gchip" data-i="' + i + '" data-name="' + gesc(n) + '" aria-pressed="' + (onPhoto(p, n) ? 'true' : 'false') + '"' + (busy ? ' disabled' : '') + '>' + gesc(n) + '</button>';
+				}).join('') + (p.own && !busy ? '<button type="button" class="gsame" data-i="' + i + '">same as the rest</button>' : '') + '</div>';
+			}
+			return '<figure' + (per && p.own ? ' class="own"' : '') + '><span class="gimg"><img src="' + p.url + '" alt="">' + del +
+				'<span class="st' + (p.state === 'done' ? ' done' : (p.state === 'err' ? ' err' : '')) + '">' + s + '</span></span>' + chips + '</figure>';
 		}).join('');
 		document.getElementById('pform').hidden = !picked.length;
 		var waiting = picked.filter(function(p){ return p.state === 'new' || p.state === 'err'; }).length;
@@ -1313,6 +1368,22 @@ function gasf_crm_door_script( $party ) {
 	}
 
 	grid.addEventListener('click', function(e){
+		var c = e.target.closest ? e.target.closest('.gchip') : null;
+		if (c && !busy) {
+			var cp = picked[parseInt(c.dataset.i, 10)], key = lc(c.dataset.name);
+			if (!cp) { return; }
+			if (!cp.own) { cp.own = batchNames().map(lc).filter(function(k){ return k !== key; }); }
+			else if (cp.own.indexOf(key) !== -1) { cp.own = cp.own.filter(function(k){ return k !== key; }); }
+			else { cp.own.push(key); }
+			paint();
+			return;
+		}
+		var sm = e.target.closest ? e.target.closest('.gsame') : null;
+		if (sm && !busy) {
+			var sp = picked[parseInt(sm.dataset.i, 10)];
+			if (sp) { sp.own = null; paint(); }
+			return;
+		}
 		var b = e.target.closest ? e.target.closest('.gdel') : null;
 		if (!b || busy) { return; }
 		var p = picked.splice(parseInt(b.dataset.i, 10), 1)[0];
@@ -1400,8 +1471,11 @@ function gasf_crm_door_script( $party ) {
 	function splitAllBoxes(){
 		Array.prototype.forEach.call(document.querySelectorAll('#pnames .pname'), function(i){ splitBox(i); });
 	}
-	document.getElementById('pnames').addEventListener('input', function(e){ if (e.target.classList.contains('pname')) { noteFor(e.target); } });
-	document.getElementById('pnames').addEventListener('focusout', function(e){ if (e.target.classList.contains('pname')) { splitBox(e.target); } });
+	document.getElementById('pnames').addEventListener('input', function(e){ if (e.target.classList.contains('pname')) { noteFor(e.target); paint(); } });
+	document.getElementById('pnames').addEventListener('focusout', function(e){ if (e.target.classList.contains('pname')) { splitBox(e.target); paint(); } });
+	// A box taken away, or Enter splitting one: the chips under the photos follow.
+	document.getElementById('pnames').addEventListener('click', function(){ setTimeout(paint, 0); });
+	document.getElementById('pnames').addEventListener('keydown', function(e){ if (e.key === 'Enter') { setTimeout(paint, 0); } });
 	document.getElementById('pnames').addEventListener('keydown', function(e){
 		if (e.key === 'Enter' && e.target.classList.contains('pname') && splitNames(e.target.value).length > 1) {
 			e.preventDefault();
@@ -1864,6 +1938,9 @@ function gasf_crm_door_script( $party ) {
 		// Failed photos go again. They used to stay in the grid with Submit
 		// disabled for them, so one wifi blip meant tapping × and finding
 		// them in the camera roll a second time.
+		// Chips are only an answer while they are on screen: under five photos,
+		// or with no names, every photo gets the batch's list as before.
+		var perEach = perPhoto(people);
 		var queue = picked.filter(function(p){ return p.state === 'new' || p.state === 'err'; });
 		queue.forEach(function(p){ p.state = 'new'; });
 		var ok = 0, bad = 0, held = false, why = '';
@@ -1893,7 +1970,9 @@ function gasf_crm_door_script( $party ) {
 			} else if (typeof gasfTsToken !== 'undefined' && gasfTsToken) {
 				fd.append('cf_token', gasfTsToken);
 			}
-			people.forEach(function(n){ fd.append('people[]', n); });
+			var mine = (perEach && p.own) ? people.filter(function(n){ return p.own.indexOf(lc(n)) !== -1; }) : people;
+			mine.forEach(function(n){ fd.append('people[]', n); });
+			if (perEach && p.own) { fd.append('people_own', '1'); }
 			if (extra) { Object.keys(extra).forEach(function(k){ fd.append(k, extra[k]); }); }
 
 			// Text first, then JSON: a phone on club wifi meets gateway error
