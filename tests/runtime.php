@@ -4186,6 +4186,49 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The three reviewer forms are handled before the page renders.
+	 *
+	 * The /email app is drawn, and the request ended with exit, at
+	 * template_redirect priority 1 (ui.php, where it has to beat
+	 * redirect_canonical). The countersign, payment, and settings handlers were
+	 * hooked at 4, so a POST to /email/contracts/ was answered with the page it
+	 * came from: nothing written, nothing logged, nothing failed. The test above
+	 * never saw it because it writes what the handler writes rather than
+	 * posting to the handler. This pins the ORDER, the primitive the fix relies
+	 * on, rather than a scenario that passes either way.
+	 */
+	public function test_vendor_forms_run_before_the_page_renders() {
+		global $wp_filter;
+
+		// Where the app renders and exits: the one closure ui.php hangs on this hook.
+		$ui = null;
+		if ( isset( $wp_filter['template_redirect'] ) ) {
+			foreach ( $wp_filter['template_redirect']->callbacks as $prio => $cbs ) {
+				foreach ( $cbs as $cb ) {
+					if ( ! ( $cb['function'] instanceof Closure ) ) { continue; }
+					$file = (string) ( new ReflectionFunction( $cb['function'] ) )->getFileName();
+					if ( 'ui.php' === basename( $file ) && 'email-crm' === basename( dirname( $file ) ) ) {
+						$ui = (int) $prio;
+					}
+				}
+			}
+		}
+		$this->ok( null !== $ui, 'vendor forms: the app renderer is found on template_redirect' );
+		if ( null === $ui ) { return; }
+
+		$forms = array(
+			'gasf_crm_vendor_handle_settings',
+			'gasf_crm_vendor_handle_payment',
+			'gasf_crm_vendor_handle_countersign',
+		);
+		foreach ( $forms as $fn ) {
+			$p = has_action( 'template_redirect', $fn );
+			$this->ok( false !== $p && (int) $p < $ui,
+				'vendor forms: ' . $fn . ' runs before the page renders (' . var_export( $p, true ) . ' vs ' . $ui . ')' );
+		}
+	}
+
+	/**
 	 * The fee follows the pitch, and the vendor cannot set it.
 	 *
 	 * This is the one number on the page somebody has an obvious motive to

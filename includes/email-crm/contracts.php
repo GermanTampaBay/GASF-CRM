@@ -1960,7 +1960,19 @@ function gasf_crm_vendor_handle_settings() {
 	wp_safe_redirect( home_url( '/email/contracts/' ) );
 	exit;
 }
-add_action( 'template_redirect', 'gasf_crm_vendor_handle_settings', 4 );
+/*
+ * Priority 0, and the two handlers below it likewise.
+ *
+ * The /email app is rendered -- and the request ENDED with exit -- by ui.php
+ * at template_redirect priority 1, where it has to sit to beat
+ * redirect_canonical. These three were hooked at 4, so a reviewer's POST to
+ * /email/contracts/ was answered with the page it came from: nothing
+ * written, nothing logged, nothing failed. Every click of "Countersign this
+ * agreement" handed back an agreement still awaiting one, and the money
+ * record and the event settings went the same way. The order is pinned by
+ * test_vendor_forms_run_before_the_page_renders.
+ */
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_settings', 0 );
 
 /** The event settings, at the top of the Contracts pane. */
 function gasf_crm_vendor_render_settings() {
@@ -2147,7 +2159,7 @@ function gasf_crm_vendor_handle_payment() {
 	wp_safe_redirect( home_url( '/email/contracts/' ) );
 	exit;
 }
-add_action( 'template_redirect', 'gasf_crm_vendor_handle_payment', 4 );
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_payment', 0 );
 
 /**
  * The Society's half of the signing, at the end of the document.
@@ -2261,7 +2273,7 @@ function gasf_crm_vendor_handle_countersign() {
 	wp_safe_redirect( home_url( '/email/contracts/' ) );
 	exit;
 }
-add_action( 'template_redirect', 'gasf_crm_vendor_handle_countersign', 4 );
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_countersign', 0 );
 
 /**
  * The Contracts pane.
