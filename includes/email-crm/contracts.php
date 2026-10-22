@@ -2945,7 +2945,8 @@ function gasf_crm_vendor_admin_styles() {
 .gva small{font-size:12px;color:var(--gva-muted);font-weight:400}
 .gva .btn{background:var(--s-ink,var(--gva-dark));border-color:var(--s-ink,var(--gva-dark));color:#fff;transition:transform .18s,box-shadow .18s,filter .18s}
 .gva .btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px -6px rgba(36,29,21,.6)}
-.gva .btn.sec{background:var(--gva-surface);color:var(--s-ink,var(--gva-ink));border-color:var(--gva-border)}
+.gva .btn.sec{background:#fff;color:var(--s-ink,var(--gva-ink));border-color:var(--gva-ink);box-shadow:inset 0 0 0 1px rgba(36,29,21,.15)}
+.gva .btn.sec:hover{background:var(--gva-chip)}
 @keyframes gva-rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes gva-slide{from{opacity:0;transform:translateX(26px)}to{opacity:1;transform:none}}
 @keyframes gva-pulse{0%,100%{box-shadow:0 0 0 0 rgba(183,121,31,.45)}60%{box-shadow:0 0 0 7px rgba(183,121,31,0)}}
