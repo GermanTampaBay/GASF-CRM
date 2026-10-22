@@ -2943,6 +2943,9 @@ function gasf_crm_vendor_admin_styles() {
 .gva h4{margin:0 0 12px;font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--gva-muted)}
 .gva a{color:var(--gva-accent)}
 .gva small{font-size:12px;color:var(--gva-muted);font-weight:400}
+.gva .btn{background:var(--s-ink,var(--gva-dark));border-color:var(--s-ink,var(--gva-dark));color:#fff;transition:transform .18s,box-shadow .18s,filter .18s}
+.gva .btn:hover{transform:translateY(-1px);box-shadow:0 4px 12px -6px rgba(36,29,21,.6)}
+.gva .btn.sec{background:var(--gva-surface);color:var(--s-ink,var(--gva-ink));border-color:var(--gva-border)}
 @keyframes gva-rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
 @keyframes gva-slide{from{opacity:0;transform:translateX(26px)}to{opacity:1;transform:none}}
 @keyframes gva-pulse{0%,100%{box-shadow:0 0 0 0 rgba(183,121,31,.45)}60%{box-shadow:0 0 0 7px rgba(183,121,31,0)}}
@@ -2961,7 +2964,7 @@ function gasf_crm_vendor_admin_styles() {
 .gva-table{background:var(--gva-surface);border:1px solid var(--gva-border);border-radius:6px;overflow:hidden;box-shadow:0 1px 2px rgba(36,29,21,.06),0 8px 24px -18px rgba(36,29,21,.35)}
 .gva-th,.gva-row{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(0,1.4fr) 7.5rem minmax(0,2.4fr) 2rem;gap:12px;align-items:center;padding:12px 16px}
 .gva-th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--gva-muted);background:var(--gva-chip);border-bottom:1px solid var(--gva-border)}
-.gva-row{color:inherit;text-decoration:none;border-bottom:1px solid var(--gva-border);border-left:4px solid transparent;position:relative;animation:gva-rise .4s var(--gva-ease) both;animation-delay:calc(var(--i,1) * 38ms);transition:background .18s,border-color .18s,transform .18s,box-shadow .18s}
+.gva .gva-row{color:var(--gva-ink);text-decoration:none;border-bottom:1px solid var(--gva-border);border-left:4px solid transparent;position:relative;animation:gva-rise .4s var(--gva-ease) both;animation-delay:calc(var(--i,1) * 38ms);transition:background .18s,border-color .18s,transform .18s,box-shadow .18s}
 .gva-row:last-of-type{border-bottom:0}
 .gva-row:hover{background:#fff;border-left-color:var(--gva-accent);transform:translateX(2px);box-shadow:0 6px 18px -12px rgba(36,29,21,.5);z-index:1}
 .gva-row[data-action="1"]{border-left-color:rgba(183,121,31,.55)}
@@ -2980,6 +2983,8 @@ function gasf_crm_vendor_admin_styles() {
 .gva-chip.muted{background:#eee8dc;color:var(--gva-muted)}
 .gva-go{color:var(--gva-muted);font-size:18px;text-align:right;transition:transform .18s,color .18s}
 .gva-row:hover .gva-go{transform:translateX(4px);color:var(--gva-accent)}
+.gva-row:hover .gva-who strong{color:var(--gva-accent)}
+.gva-who strong,.gva-go{transition:color .18s}
 .gva-empty{padding:28px 16px;text-align:center;color:var(--gva-muted);margin:0}
 .gva-settings{margin:18px 0 0;border:1px dashed var(--gva-border);border-radius:6px;background:transparent}
 .gva-settings summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13px;list-style:none;display:flex;align-items:center;gap:10px;color:var(--gva-muted);transition:color .18s}
