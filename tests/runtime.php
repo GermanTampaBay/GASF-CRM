@@ -4463,6 +4463,141 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * Where an agreement stands is read off its row, as chips a person can act on.
+	 */
+	public function test_vendor_state_chips() {
+		global $wpdb;
+		$id = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest State', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Market' ) );
+		if ( ! $this->ok( is_int( $id ) && $id > 0, 'state: the fixture inserts' ) ) { return; }
+		try {
+			$keys = function ( array $st ) { return array_map( function ( $c ) { return $c[0]; }, $st['chips'] ); };
+
+			$st = gasf_crm_vendor_state( gasf_crm_vendor_get( $id ) );
+			$this->ok( array( 'await', 'coi', 'deposit' ) === $keys( $st ), 'state: a fresh agreement awaits a countersignature, insurance, and a deposit (' . implode( ',', $keys( $st ) ) . ')' );
+			$this->ok( $st['needs_action'] && 1 === $st['done'], 'state: and needs a reviewer, one step of four done' );
+
+			$paid = array( 'sign_gas' => 'An Officer', 'gas_officer' => 'An Officer', 'sign_gas_date' => '1 October 2026', 'deposit_amount' => '50', 'poi_date' => '2 October 2026' );
+			$wpdb->update( gasf_crm_vendor_table(), array( 'paid_json' => wp_json_encode( $paid ), 'status' => 'countersigned' ), array( 'id' => $id ), array( '%s', '%s' ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+			$st = gasf_crm_vendor_state( gasf_crm_vendor_get( $id ) );
+			$this->ok( array( 'force' ) === $keys( $st ), 'state: countersigned, paid, and insured is simply in force' );
+			$this->ok( ! $st['needs_action'] && 4 === $st['done'], 'state: nothing left for a reviewer, four of four done' );
+
+			$this->ok( gasf_crm_vendor_set_aside( $id, true ), 'aside: an agreement can be set aside' );
+			$st = gasf_crm_vendor_state( gasf_crm_vendor_get( $id ) );
+			$this->ok( array( 'aside' ) === $keys( $st ) && ! $st['needs_action'], 'aside: a set-aside agreement carries one chip and asks nothing of anybody' );
+			$this->ok( gasf_crm_vendor_set_aside( $id, false ) && 'countersigned' === gasf_crm_vendor_get( $id )['status'], 'aside: bringing a countersigned agreement back restores in force, not awaiting' );
+
+			$wpdb->update( gasf_crm_vendor_table(), array( 'paid_json' => '', 'status' => 'new' ), array( 'id' => $id ), array( '%s', '%s' ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+			gasf_crm_vendor_set_aside( $id, true );
+			$this->ok( gasf_crm_vendor_set_aside( $id, false ) && 'new' === gasf_crm_vendor_get( $id )['status'], 'aside: and an unsigned one comes back awaiting' );
+			$this->ok( false === gasf_crm_vendor_set_aside( 0, true ), 'aside: a row that is not there is refused' );
+		} finally {
+			$wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); // phpcs:ignore WordPress.DB
+		}
+	}
+
+	/**
+	 * Every reviewer form sends you back to the agreement you were on, with a word
+	 * that becomes a confirmation.
+	 *
+	 * They all redirected to the bare list: save a deposit on the sixth
+	 * agreement and you were at the top of the page with every panel closed
+	 * and no sign the save had happened. The helper is pinned, and so is the
+	 * fact that each handler uses it rather than its own redirect.
+	 */
+	public function test_vendor_forms_return_where_you_were() {
+		$u = gasf_crm_vendor_return_url( 42, 'record' );
+		$this->ok( false !== strpos( $u, 'agreement=42' ) && false !== strpos( $u, 'saved=record' ) && false !== strpos( $u, '/email/contracts/' ), 'return: the address carries the agreement and what was saved' );
+		$this->ok( false === strpos( gasf_crm_vendor_return_url(), 'agreement=' ), 'return: the list has no agreement on it' );
+		$this->ok( '' !== gasf_crm_vendor_saved_notice( 'record' ) && '' !== gasf_crm_vendor_saved_notice( 'sign' ) && '' !== gasf_crm_vendor_saved_notice( 'aside' ), 'return: every note this code writes has words' );
+		$this->ok( '' === gasf_crm_vendor_saved_notice( 'anything-else' ), 'return: a note this code never wrote shows nothing' );
+
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/contracts.php' );
+		foreach ( array( 'handle_settings', 'handle_payment', 'handle_countersign', 'handle_aside' ) as $fn ) {
+			$at   = strpos( $src, 'function gasf_crm_vendor_' . $fn . '(' );
+			$end  = $at ? strpos( $src, "\nadd_action(", $at ) : false;
+			$body = ( false !== $at && false !== $end ) ? substr( $src, $at, $end - $at ) : '';
+			$this->ok( '' !== $body && false !== strpos( $body, 'gasf_crm_vendor_back(' ) && false === strpos( $body, "wp_safe_redirect( home_url( '/email/contracts/' ) )" ),
+				'return: ' . $fn . ' goes back through the helper, never to the bare list' );
+		}
+	}
+
+	/**
+	 * The list leads, says where each agreement stands, and one agreement at a
+	 * time is a focused view the address picks.
+	 */
+	public function test_vendor_list_leads_and_one_agreement_focuses() {
+		global $wpdb;
+		$rand = wp_generate_password( 8, false );
+		$uid  = wp_insert_user( array(
+			'user_login' => 'gasf-selftest-' . $rand,
+			'user_pass'  => wp_generate_password( 24 ),
+			'user_email' => 'selftest-' . $rand . '@invalid.local',
+			'role'       => '',
+		) );
+		if ( is_wp_error( $uid ) ) { $this->ok( false, 'screen: could not make a reviewer' ); return; }
+		$was  = get_current_user_id();
+		$get  = $_GET;
+		$ids  = array();
+		try {
+			update_user_meta( $uid, 'gasf_crm_provider', 'google' );
+			update_user_meta( $uid, 'gasf_crm_status', 'approved' );
+			gasf_crm_set_user_areas( $uid, array( 'contracts' ) );
+			wp_set_current_user( $uid );
+			$this->ok( gasf_crm_vendor_may_read(), 'screen: the synthetic reviewer may read' );
+
+			$ids[] = $a = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Screen', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair', 'vendor_type' => 'craft' ) );
+			$ids[] = $b = gasf_crm_vendor_insert( array( 'vendor_name' => 'selftest  screen', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair', 'vendor_type' => 'craft' ) );
+			$ids[] = $c = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Aside', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair' ) );
+			gasf_crm_vendor_set_aside( $c, true );
+
+			unset( $_GET['agreement'], $_GET['saved'] );
+			ob_start();
+			gasf_crm_vendor_render_section( false );
+			$html = ob_get_clean();
+
+			$list_at = strpos( $html, 'class="gva-list' );
+			$set_at  = strpos( $html, 'class="gva-settings' );
+			$this->ok( false !== $list_at && false !== $set_at && $list_at < $set_at, 'screen: the list comes before the event settings' );
+			$this->ok( false !== strpos( $html, '<details class="gva-settings"' ) && false === strpos( $html, '<details class="gva-settings" open' ), 'screen: the settings are closed unless something was just saved there' );
+			$this->ok( false !== strpos( $html, 'name="notify_to"' ), 'screen: the settings form is still on the page' );
+			$this->ok( false !== strpos( $html, 'data-agreement="' . $a . '"' ) && false !== strpos( $html, 'agreement=' . $a ), 'screen: a row links to its agreement' );
+			$this->ok( false !== strpos( $html, 'Awaiting countersignature' ) && false !== strpos( $html, 'Insurance missing' ), 'screen: a row says what is still owed' );
+			$this->ok( false !== strpos( $html, 'Possible duplicate' ), 'screen: two submissions by one name for one event are flagged' );
+			$this->ok( false !== strpos( $html, 'data-state="archived"' ), 'screen: a set-aside row is marked' );
+			$this->ok( preg_match( '~<section class="gva-list[^>]*>~', $html, $m ) && false === strpos( $m[0], 'hidden' ), 'screen: with no agreement asked for, the list shows' );
+			$this->ok( preg_match( '~<section class="gva-detail" data-id="' . $a . '" hidden~', $html ) === 1, 'screen: and the agreements are hidden' );
+
+			$_GET['agreement'] = (string) $a;
+			$_GET['saved']     = 'record';
+			ob_start();
+			gasf_crm_vendor_render_section( false );
+			$one = ob_get_clean();
+			$this->ok( preg_match( '~<section class="gva-list[^>]*hidden~', $one ) === 1, 'screen: asked for one agreement, the list steps aside' );
+			$this->ok( preg_match( '~<section class="gva-detail gva-in" data-id="' . $a . '" >~', $one ) === 1, 'screen: and that agreement shows' );
+			$this->ok( preg_match( '~<section class="gva-detail" data-id="' . $b . '" hidden~', $one ) === 1, 'screen: the others stay hidden' );
+			$this->ok( false !== strpos( $one, 'Record saved.' ), 'screen: the saved note is shown once' );
+			$act = strpos( $one, 'Countersign this agreement' );
+			$doc = strpos( $one, 'Show the signed agreement' );
+			$this->ok( false !== $act && false !== $doc && $act < $doc, 'screen: the countersign button comes before the contract text' );
+			$this->ok( false !== strpos( $one, 'Looks like a second copy' ), 'screen: the duplicate is named on the agreement itself' );
+			$this->ok( false !== strpos( $one, 'name="gasf_vendor_aside"' ) && false !== strpos( $one, 'Set this one aside' ), 'screen: set aside is offered, with no delete' );
+
+			$_GET['agreement'] = '999999999';
+			ob_start();
+			gasf_crm_vendor_render_section( false );
+			$none = ob_get_clean();
+			$this->ok( preg_match( '~<section class="gva-list[^>]*>~', $none, $m2 ) && false === strpos( $m2[0], 'hidden' ), 'screen: an agreement that is not there falls back to the list' );
+		} finally {
+			$_GET = $get;
+			wp_set_current_user( $was );
+			foreach ( $ids as $id ) { if ( is_int( $id ) ) { $wpdb->delete( gasf_crm_vendor_table(), array( 'id' => $id ), array( '%d' ) ); } } // phpcs:ignore WordPress.DB
+			require_once ABSPATH . 'wp-admin/includes/user.php';
+			wp_delete_user( $uid );
+		}
+	}
+
+	/**
 	 * The fee follows the pitch, and the vendor cannot set it.
 	 *
 	 * This is the one number on the page somebody has an obvious motive to

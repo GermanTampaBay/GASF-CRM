@@ -2950,10 +2950,12 @@ function gasf_crm_render_inbox_script() {
 			var q = new URLSearchParams(window.location.search || '');
 			q.delete('thread');
 			q.delete('photo');
+			q.delete('agreement');
 			q.set('status', status || 'open');
 			if (stream) { q.set('stream', stream); } else { q.delete('stream'); }
 			if (status === 'open' && queue && queue !== 'all') { q.set('queue', queue); } else { q.delete('queue'); }
 			var uv = document.getElementById('uploadview');
+			var cv = document.getElementById('contractsview');
 			if (!document.getElementById('photoview').hidden) {
 				path = routePathForView('photos');
 				if (pcur) { q.set('photo', String(pcur)); }
@@ -2961,6 +2963,12 @@ function gasf_crm_render_inbox_script() {
 				path = routePathForView('library');
 			} else if (uv && !uv.hidden) {
 				path = routePathForView('upload');
+			} else if (cv && !cv.hidden) {
+				// The contracts pane had no branch here, so switching to it
+				// wrote the inbox's address over it and a reload lost the view.
+				path = routePathForView('contracts');
+				var od = cv.querySelector('.gva-detail:not([hidden])');
+				if (od && od.getAttribute('data-id')) { q.set('agreement', od.getAttribute('data-id')); }
 			} else if (current) {
 				q.set('thread', String(current));
 			}

@@ -1933,8 +1933,7 @@ function gasf_crm_vendor_handle_settings() {
 
 	if ( ! isset( $_POST['gasf_vendor_settings_nonce'] )
 		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_settings_nonce'] ) ), 'gasf_vendor_settings' ) ) {
-		wp_safe_redirect( home_url( '/email/contracts/' ) );
-		exit;
+		gasf_crm_vendor_back( 0, '' );
 	}
 
 	// Read, modify, write the whole option. A form carrying four keys must not be
@@ -1976,8 +1975,7 @@ function gasf_crm_vendor_handle_settings() {
 	update_option( 'gasf_crm_vendor', $cfg, false );
 	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' updated the event settings' );
 
-	wp_safe_redirect( home_url( '/email/contracts/' ) );
-	exit;
+	gasf_crm_vendor_back( 0, 'settings' );
 }
 /*
  * Priority 0, and the two handlers below it likewise.
@@ -2146,14 +2144,12 @@ function gasf_crm_vendor_handle_payment() {
 	$id = (int) $_POST['gasf_vendor_pay'];
 	if ( ! isset( $_POST['gasf_vendor_pay_nonce'] )
 		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_pay_nonce'] ) ), 'gasf_vendor_pay_' . $id ) ) {
-		wp_safe_redirect( home_url( '/email/contracts/' ) );
-		exit;
+		gasf_crm_vendor_back( $id, '' );
 	}
 
 	$row = gasf_crm_vendor_get( $id );
 	if ( ! $row ) {
-		wp_safe_redirect( home_url( '/email/contracts/' ) );
-		exit;
+		gasf_crm_vendor_back( 0, '' );
 	}
 
 	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
@@ -2175,54 +2171,52 @@ function gasf_crm_vendor_handle_payment() {
 
 	gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' updated the payment record for agreement ' . $id );
 
-	wp_safe_redirect( home_url( '/email/contracts/' ) );
-	exit;
+	gasf_crm_vendor_back( $id, 'record' );
 }
 add_action( 'template_redirect', 'gasf_crm_vendor_handle_payment', 0 );
 
 /**
- * The Society's half of the signing, at the end of the document.
+ * The Society's half of the signing.
  *
- * Placement is the whole point. These fields existed before this, inside a form
- * headed "Money and paperwork" and saved by a button reading "Save the money
- * record" -- so the one person looking for how to accept an agreement read the
- * entire contract, reached the bottom, and found nothing. A control nobody can
- * find is not a feature; it is a feature-shaped absence.
+ * It had its own form at the foot of the contract, after the application and
+ * the full agreement text, because the fields had once been buried inside the
+ * money record and nobody could find them. Putting them last fixed "where" and
+ * broke "how far": a reviewer scrolled four thousand pixels past a document
+ * they had already read to reach the one button the screen exists for. It now
+ * sits in the action card at the top of the agreement, before anything that is
+ * only there to be read.
  *
- * Signing is also not bookkeeping, and it now has its own form and its own
- * verb. The deposit can be edited fifty times; this happens once and changes
- * whether the agreement binds anybody.
+ * Signing is still not bookkeeping: its own form, its own verb, its own
+ * handler. The deposit can be edited fifty times; this happens once and
+ * changes whether the agreement binds anybody.
  */
 function gasf_crm_vendor_render_countersign( array $r, array $paid ) {
 	$signed = ! empty( $paid['sign_gas'] );
 	$me     = wp_get_current_user();
 	$name   = function_exists( 'gasf_crm_display_name' ) ? gasf_crm_display_name( $me->ID ) : $me->display_name;
 	?>
-	<form method="post" class="gv-pay gv-sign-form">
-		<h4>Countersignature</h4>
+	<form method="post" class="gva-sign<?php echo $signed ? ' is-signed' : ''; ?>">
 		<?php wp_nonce_field( 'gasf_vendor_sign_' . (int) $r['id'], 'gasf_vendor_sign_nonce' ); ?>
 		<input type="hidden" name="gasf_vendor_sign" value="<?php echo (int) $r['id']; ?>">
 
 		<?php if ( $signed ) : ?>
-			<p><strong>Countersigned by <?php echo esc_html( $paid['gas_officer'] ? $paid['gas_officer'] : $paid['sign_gas'] ); ?></strong>
-				<?php if ( ! empty( $paid['sign_gas_date'] ) ) : ?>on <?php echo esc_html( $paid['sign_gas_date'] ); ?><?php endif; ?>.
-				This agreement is in force.</p>
-			<p class="muted">Signed in error? Removing the countersignature puts the agreement back to awaiting
-				one. It does not touch the vendor's signed copy above, which never changes.</p>
-			<p><button class="btn" name="undo" value="1">Remove the countersignature</button></p>
-		<?php else : ?>
-			<p class="muted">The vendor has signed. The agreement does not bind either party until an officer of
-				the Society signs it too. Recorded here rather than written into the copy above, which must stay
-				exactly as the vendor submitted it.</p>
-			<div class="gv-paygrid">
-				<label>Officer signing
-					<input type="text" name="gas_officer" value="<?php echo esc_attr( $name ); ?>"></label>
-				<label>Signature
-					<input type="text" name="sign_gas" value="<?php echo esc_attr( $name ); ?>"></label>
-				<label>Date
-					<input type="text" name="sign_gas_date" value="<?php echo esc_attr( wp_date( 'j F Y' ) ); ?>"></label>
+			<div class="gva-signed">
+				<span class="gva-seal" aria-hidden="true">&#10003;</span>
+				<div>
+					<strong>This agreement is in force.</strong> Countersigned by <?php echo esc_html( $paid['gas_officer'] ? $paid['gas_officer'] : $paid['sign_gas'] ); ?>
+					<?php if ( ! empty( $paid['sign_gas_date'] ) ) : ?>on <?php echo esc_html( $paid['sign_gas_date'] ); ?><?php endif; ?>.
+					<span class="gva-hint">Signed in error? Removing it puts the agreement back to awaiting a countersignature. The vendor's signed copy never changes.</span>
+				</div>
+				<button class="btn sec gva-undo" name="undo" value="1">Remove the countersignature</button>
 			</div>
-			<p><button class="btn gv-go">Countersign this agreement</button></p>
+		<?php else : ?>
+			<div class="gva-signrow">
+				<label>Officer signing<input type="text" name="gas_officer" value="<?php echo esc_attr( $name ); ?>"></label>
+				<label>Signature<input type="text" name="sign_gas" value="<?php echo esc_attr( $name ); ?>" class="gva-script"></label>
+				<label>Date<input type="text" name="sign_gas_date" value="<?php echo esc_attr( wp_date( 'j F Y' ) ); ?>"></label>
+				<button class="gva-cta">Countersign this agreement</button>
+			</div>
+			<p class="gva-hint">The vendor has signed. Nothing binds either party until an officer of the Society signs too. The signature is recorded beside the agreement, never written into the vendor's copy.</p>
 		<?php endif; ?>
 	</form>
 	<?php
@@ -2246,14 +2240,12 @@ function gasf_crm_vendor_handle_countersign() {
 	$id = (int) $_POST['gasf_vendor_sign'];
 	if ( ! isset( $_POST['gasf_vendor_sign_nonce'] )
 		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_sign_nonce'] ) ), 'gasf_vendor_sign_' . $id ) ) {
-		wp_safe_redirect( home_url( '/email/contracts/' ) );
-		exit;
+		gasf_crm_vendor_back( $id, '' );
 	}
 
 	$row = gasf_crm_vendor_get( $id );
 	if ( ! $row ) {
-		wp_safe_redirect( home_url( '/email/contracts/' ) );
-		exit;
+		gasf_crm_vendor_back( 0, '' );
 	}
 
 	$paid = json_decode( (string) $row['paid_json'], true );
@@ -2273,8 +2265,7 @@ function gasf_crm_vendor_handle_countersign() {
 		}
 		if ( '' === trim( (string) $paid['sign_gas'] ) ) {
 			// A countersignature with no name on it is not one.
-			wp_safe_redirect( home_url( '/email/contracts/' ) );
-			exit;
+			gasf_crm_vendor_back( $id, '' );
 		}
 		$status = 'countersigned';
 		gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ' countersigned agreement ' . $id . ' as ' . $paid['sign_gas'] );
@@ -2289,198 +2280,389 @@ function gasf_crm_vendor_handle_countersign() {
 		array( '%d' )
 	);
 
-	wp_safe_redirect( home_url( '/email/contracts/' ) );
-	exit;
+	gasf_crm_vendor_back( $id, $undo ? 'unsign' : 'sign' );
 }
 add_action( 'template_redirect', 'gasf_crm_vendor_handle_countersign', 0 );
 
+/* --------------------------------------------------------------------------
+ * Where a save takes you back to
+ * -------------------------------------------------------------------------- */
+
 /**
- * The Contracts pane.
+ * The agreement being looked at, from the address, or 0 for the list.
  *
- * Shows each agreement AS THE AGREEMENT -- the stored snapshot of the contract
- * with that vendor's blanks filled in -- rather than a table of the values
- * pulled out of it. A reviewer's job is to read what somebody signed, and a
- * field list is not that document however complete it is.
+ * A query parameter rather than a path segment, like ?thread= and ?photo= in
+ * the rest of the app: the rewrite rules stay as they are, and the inbox's
+ * own "where you were" code carries it across view switches.
+ */
+function gasf_crm_vendor_requested_id() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- which agreement to show; nothing is acted on.
+	return isset( $_GET['agreement'] ) ? (int) $_GET['agreement'] : 0;
+}
+
+/** The address of one agreement, or of the list, with a "saved" note to show once. */
+function gasf_crm_vendor_return_url( $id = 0, $saved = '' ) {
+	$args = array();
+	if ( (int) $id > 0 ) { $args['agreement'] = (int) $id; }
+	if ( '' !== (string) $saved ) { $args['saved'] = (string) $saved; }
+	return add_query_arg( $args, home_url( '/email/contracts/' ) );
+}
+
+/**
+ * Send the reviewer back to the agreement they were working on.
  *
- * Rendered server-side rather than fetched. Everything here is already gated by
- * the area grant that let the page render at all; a REST route would mean a
- * second, separately-maintained answer to the same permission question.
+ * Every one of the reviewer forms used to redirect to the bare list. Save a
+ * deposit on the sixth agreement and you landed at the top of the page, with
+ * the settings form in your face and every panel closed again, and nothing
+ * saying whether the save had happened. Now the address carries the agreement
+ * and a one-word note the page turns into a confirmation.
+ */
+function gasf_crm_vendor_back( $id, $saved ) {
+	wp_safe_redirect( gasf_crm_vendor_return_url( $id, $saved ) );
+	exit;
+}
+
+/** The confirmation for a ?saved= note, or '' for one this code never wrote. */
+function gasf_crm_vendor_saved_notice( $key ) {
+	$notes = array(
+		'record'   => 'Record saved.',
+		'sign'     => 'Countersigned. This agreement is now in force.',
+		'unsign'   => 'Countersignature removed. The agreement is awaiting one again.',
+		'settings' => 'Event settings saved.',
+		'aside'    => 'Set aside. It is kept under the Set aside filter.',
+		'restore'  => 'Back in the list.',
+	);
+	return $notes[ (string) $key ] ?? '';
+}
+
+/* --------------------------------------------------------------------------
+ * What state an agreement is in
+ * -------------------------------------------------------------------------- */
+
+/** The club's record on an agreement (payments, paperwork, countersignature), as an array. */
+function gasf_crm_vendor_record( array $r ) {
+	$paid = json_decode( (string) ( $r['paid_json'] ?? '' ), true );
+	return is_array( $paid ) ? $paid : array();
+}
+
+/**
+ * Everything the list and the detail say about where an agreement stands.
+ *
+ * Read off the row rather than stored, so a deposit typed into the record or
+ * a certificate arriving changes the chips with no second write to forget.
+ * The status column holds three words - new, countersigned, archived - and
+ * this is the only place they are turned into anything a person reads.
+ */
+function gasf_crm_vendor_state( array $r ) {
+	$paid    = gasf_crm_vendor_record( $r );
+	$aside   = 'archived' === (string) ( $r['status'] ?? '' );
+	$signed  = '' !== trim( (string) ( $r['agreed_name'] ?? '' ) );
+	$counter = '' !== trim( (string) ( $paid['sign_gas'] ?? '' ) );
+	$insured = '' !== trim( (string) ( $r['coi_path'] ?? '' ) ) || '' !== trim( (string) ( $paid['poi_date'] ?? '' ) );
+	$deposit = '' !== trim( (string) ( $paid['deposit_amount'] ?? '' ) );
+
+	$chips = array();
+	if ( $aside ) {
+		$chips[] = array( 'aside', 'Set aside', 'muted' );
+	} elseif ( $counter ) {
+		$chips[] = array( 'force', 'In force', 'ok' );
+	} else {
+		$chips[] = array( 'await', 'Awaiting countersignature', 'warn' );
+	}
+	if ( ! $aside ) {
+		if ( ! $insured ) { $chips[] = array( 'coi', 'Insurance missing', 'danger' ); }
+		if ( ! $deposit ) { $chips[] = array( 'deposit', 'No deposit yet', 'info' ); }
+	}
+
+	// The four stations of an agreement, in the order they happen.
+	$steps = array(
+		array( 'Signed', $signed ),
+		array( 'Countersigned', $counter ),
+		array( 'Deposit', $deposit ),
+		array( 'Insurance', $insured ),
+	);
+	$done = 0;
+	foreach ( $steps as $st ) { if ( $st[1] ) { $done++; } }
+
+	return array(
+		'aside'        => $aside,
+		'signed'       => $signed,
+		'countersigned' => $counter,
+		'insured'      => $insured,
+		'deposit'      => $deposit,
+		'needs_action' => ! $aside && ( ! $counter || ! $insured || ! $deposit ),
+		'chips'        => $chips,
+		'steps'        => $steps,
+		'done'         => $done,
+	);
+}
+
+/** One key for "the same vendor applying for the same event", case and spacing aside. */
+function gasf_crm_vendor_dup_key( array $r ) {
+	$fold = static function ( $s ) {
+		return strtolower( trim( (string) preg_replace( '/\s+/', ' ', (string) $s ) ) );
+	};
+	return $fold( $r['vendor_name'] ?? '' ) . '|' . $fold( $r['event_text'] ?? '' );
+}
+
+/**
+ * Which agreements look like a second copy of another.
+ *
+ * Matched on the vendor's name and the event, folded for case and spacing:
+ * "Jason budgin" and "Jason Budgin" for the same market are one person who
+ * pressed Submit twice, which the list could not show. Set-aside rows do not
+ * take part, so setting one copy aside clears the flag on the other.
+ *
+ * @return array<int, int[]> id => the ids it looks like a copy of
+ */
+function gasf_crm_vendor_duplicates( array $rows ) {
+	$by = array();
+	foreach ( $rows as $r ) {
+		if ( 'archived' === (string) ( $r['status'] ?? '' ) ) { continue; }
+		$by[ gasf_crm_vendor_dup_key( $r ) ][] = (int) $r['id'];
+	}
+	$out = array();
+	foreach ( $by as $ids ) {
+		if ( count( $ids ) < 2 ) { continue; }
+		foreach ( $ids as $id ) {
+			$out[ $id ] = array_values( array_diff( $ids, array( $id ) ) );
+		}
+	}
+	return $out;
+}
+
+/**
+ * Set an agreement aside, or bring it back.
+ *
+ * There is no delete here, on purpose: a signed agreement is a record. Aside
+ * is a status the list hides by default, for the test submissions and the
+ * double-clicks. Bringing one back restores the status its own record
+ * implies, so a countersigned agreement set aside by mistake comes back in
+ * force rather than awaiting a signature it already has.
+ */
+function gasf_crm_vendor_set_aside( $id, $aside ) {
+	global $wpdb;
+	$row = gasf_crm_vendor_get( (int) $id );
+	if ( ! $row ) { return false; }
+
+	if ( $aside ) {
+		$status = 'archived';
+	} else {
+		$paid   = gasf_crm_vendor_record( $row );
+		$status = '' !== trim( (string) ( $paid['sign_gas'] ?? '' ) ) ? 'countersigned' : 'new';
+	}
+	$n = $wpdb->update( // phpcs:ignore WordPress.DB.DirectDatabaseQuery
+		gasf_crm_vendor_table(),
+		array( 'status' => $status ),
+		array( 'id' => (int) $id ),
+		array( '%s' ),
+		array( '%d' )
+	);
+	return false !== $n;
+}
+
+function gasf_crm_vendor_handle_aside() {
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified immediately below.
+	if ( empty( $_POST['gasf_vendor_aside'] ) ) { return; }
+
+	if ( ! gasf_crm_vendor_may_read() ) {
+		status_header( 403 );
+		wp_die( esc_html__( 'You do not have access to that.', 'gasf' ), '', array( 'response' => 403 ) );
+	}
+
+	$id = (int) $_POST['gasf_vendor_aside'];
+	if ( ! isset( $_POST['gasf_vendor_aside_nonce'] )
+		|| ! wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['gasf_vendor_aside_nonce'] ) ), 'gasf_vendor_aside_' . $id ) ) {
+		gasf_crm_vendor_back( $id, '' );
+	}
+
+	// phpcs:ignore WordPress.Security.NonceVerification -- verified above.
+	$restore = ! empty( $_POST['restore'] );
+	if ( gasf_crm_vendor_set_aside( $id, ! $restore ) ) {
+		gasf_crm_log( 'CRM vendor: user ' . get_current_user_id() . ( $restore ? ' brought back' : ' set aside' ) . ' agreement ' . $id );
+	}
+	gasf_crm_vendor_back( $id, $restore ? 'restore' : 'aside' );
+}
+add_action( 'template_redirect', 'gasf_crm_vendor_handle_aside', 0 );
+
+/* --------------------------------------------------------------------------
+ * The screen
+ * -------------------------------------------------------------------------- */
+
+/** One status chip. */
+function gasf_crm_vendor_chip( array $chip ) {
+	return '<span class="gva-chip ' . esc_attr( $chip[2] ) . '" data-chip="' . esc_attr( $chip[0] ) . '"><i></i>' . esc_html( $chip[1] ) . '</span>';
+}
+
+/**
+ * The reviewer's screen: the list, then one agreement at a time.
+ *
+ * The list is the page. It used to open with the event settings, five
+ * paragraphs and a save button that change once a season, with the
+ * agreements - which change weekly - starting below the fold as a column of
+ * names that said nothing about where any of them stood. Now a row says who,
+ * what they applied as, when, and what is still owed, and what needs a
+ * reviewer comes first.
+ *
+ * One agreement is a focused view rather than a panel in an accordion: the
+ * actions at the top, the application beneath, the contract text behind a
+ * toggle because it is the thing read least. Every agreement is rendered and
+ * shown or hidden by the address, so the server draws the right one on a
+ * reload or after a save, and the script only animates the switch.
  */
 function gasf_crm_vendor_render_section( $hidden = true ) {
 	if ( ! gasf_crm_vendor_may_read() ) { return; }
 
 	$rows = gasf_crm_vendor_list( 200 );
+	$open = gasf_crm_vendor_requested_id();
+	// phpcs:ignore WordPress.Security.NonceVerification -- a note to show once; nothing is acted on.
+	$saved = isset( $_GET['saved'] ) ? gasf_crm_vendor_saved_notice( sanitize_key( wp_unslash( $_GET['saved'] ) ) ) : '';
+
+	$states = array();
+	$dups   = gasf_crm_vendor_duplicates( $rows );
+	$counts = array( 'action' => 0, 'force' => 0, 'aside' => 0 );
+	foreach ( $rows as $r ) {
+		$st = gasf_crm_vendor_state( $r );
+		$states[ (int) $r['id'] ] = $st;
+		if ( $st['aside'] ) { $counts['aside']++; }
+		elseif ( $st['needs_action'] ) { $counts['action']++; }
+		else { $counts['force']++; }
+	}
+	// What needs a reviewer first, newest first inside each band; the
+	// set-aside rows last, where the default filter hides them anyway.
+	usort( $rows, static function ( $a, $b ) use ( $states ) {
+		$sa = $states[ (int) $a['id'] ];
+		$sb = $states[ (int) $b['id'] ];
+		$ba = $sa['aside'] ? 2 : ( $sa['needs_action'] ? 0 : 1 );
+		$bb = $sb['aside'] ? 2 : ( $sb['needs_action'] ? 0 : 1 );
+		if ( $ba !== $bb ) { return $ba <=> $bb; }
+		return strcmp( (string) $b['created_at'], (string) $a['created_at'] ) ?: ( (int) $b['id'] <=> (int) $a['id'] );
+	} );
+
+	$found = false;
+	foreach ( $rows as $r ) { if ( (int) $r['id'] === $open ) { $found = true; } }
+	if ( ! $found ) { $open = 0; }
+
+	$types  = gasf_crm_vendor_types();
+	$booths = gasf_crm_vendor_booths();
+	$flash  = gasf_crm_vendor_settings_flash();
+	$settings_open = '' !== $flash || 'Event settings saved.' === $saved;
+
 	gasf_crm_vendor_styles();
+	gasf_crm_vendor_admin_styles();
 	?>
 <div class="wrap" id="contractsview" <?php echo $hidden ? 'hidden' : ''; ?>>
-	<h2>Vendor agreements</h2>
+<div class="gva">
+	<?php if ( '' !== $saved ) : ?>
+		<div class="gva-toast" role="status"><span class="gva-seal" aria-hidden="true">&#10003;</span><?php echo esc_html( $saved ); ?></div>
+	<?php endif; ?>
 
-	<?php gasf_crm_vendor_render_settings(); ?>
-
-	<?php if ( ! $rows ) : ?>
-		<p class="muted">Nothing has come in yet. Agreements signed through the vendor page appear here.</p>
-	<?php else : ?>
-		<p class="muted"><?php echo esc_html( count( $rows ) . ( 1 === count( $rows ) ? ' agreement' : ' agreements' ) ); ?>, newest first.</p>
-
-		<?php foreach ( $rows as $r ) : ?>
-			<details class="vapp">
-				<summary>
-					<strong><?php echo esc_html( $r['vendor_name'] ); ?></strong>
-					<?php if ( $r['event_text'] ) : ?>
-						&mdash; <?php echo esc_html( $r['event_text'] ); ?>
-					<?php endif; ?>
-					<span class="muted"><?php echo esc_html( mysql2date( 'j M Y', $r['created_at'] ) ); ?></span>
-				</summary>
-
-				<?php
-				/*
-				 * The acceptance record, above the document and shown in full.
-				 *
-				 * It is only worth anything if a person can read all of it at
-				 * once: who signed, when, from where, and WHICH version of the
-				 * agreement was in front of them. Hiding the version because it
-				 * looks like plumbing would leave a reader unable to answer the
-				 * only question ever asked about a signature.
-				 */
-				?>
-				<?php
-				$rec = json_decode( (string) $r['paid_json'], true );
-				$rec = is_array( $rec ) ? $rec : array();
-				?>
-				<p class="gv-status">
-					<?php if ( ! empty( $rec['sign_gas'] ) ) : ?>
-						<strong>Countersigned</strong> by <?php echo esc_html( $rec['gas_officer'] ? $rec['gas_officer'] : $rec['sign_gas'] ); ?>
-						<?php if ( ! empty( $rec['sign_gas_date'] ) ) : ?>on <?php echo esc_html( $rec['sign_gas_date'] ); ?><?php endif; ?>
-						&mdash; this agreement is in force.
+	<section class="gva-list gva-in" <?php echo $open ? 'hidden' : ''; ?>>
+		<header class="gva-bar">
+			<div>
+				<h2>Vendor agreements</h2>
+				<p class="gva-sub">
+					<?php if ( ! $rows ) : ?>
+						Nothing has come in yet. Agreements signed through the vendor page appear here.
 					<?php else : ?>
-						<strong>Not countersigned yet.</strong> The vendor has signed; the agreement is not in
-						force until an officer of the Society signs it below.
+						<?php echo esc_html( sprintf( '%d need%s a reviewer', $counts['action'], 1 === $counts['action'] ? 's' : '' ) ); ?>
+						&middot; <?php echo esc_html( $counts['force'] . ' in force' ); ?>
+						<?php if ( $counts['aside'] ) : ?>&middot; <?php echo esc_html( $counts['aside'] . ' set aside' ); ?><?php endif; ?>
 					<?php endif; ?>
 				</p>
+			</div>
+			<?php if ( $rows ) : ?>
+				<div class="gva-filter" role="tablist">
+					<button type="button" class="on" data-filter="all">All</button>
+					<button type="button" data-filter="action">Needs a reviewer <b><?php echo (int) $counts['action']; ?></b></button>
+					<button type="button" data-filter="force">In force <b><?php echo (int) $counts['force']; ?></b></button>
+					<button type="button" data-filter="aside">Set aside <b><?php echo (int) $counts['aside']; ?></b></button>
+				</div>
+			<?php endif; ?>
+		</header>
 
-				<p class="gv-legend">
-					Signed by <strong><?php echo esc_html( $r['agreed_name'] ? $r['agreed_name'] : 'nobody' ); ?></strong>
-					on <?php echo esc_html( mysql2date( 'j M Y \a\t H:i', $r['agreed_at'] ) ); ?>
-					&middot; agreement version <?php echo esc_html( $r['terms_version'] ? $r['terms_version'] : 'not recorded' ); ?>
-					<?php if ( $r['agreed_ip'] ) : ?>
-						&middot; from <?php echo esc_html( $r['agreed_ip'] ); ?>
-					<?php endif; ?>
-					<br>
-					Insurance certificate:
-					<?php if ( $r['coi_path'] ) : ?>
-						<a href="<?php echo esc_url( home_url( '/email/contracts/coi/' . (int) $r['id'] ) ); ?>">download
-							<?php echo esc_html( $r['coi_name'] ? $r['coi_name'] : 'certificate' ); ?></a>
-						(<?php echo esc_html( size_format( (int) $r['coi_bytes'] ) ); ?>)
-					<?php else : ?>
-						not supplied yet &mdash; the agreement asks for it at least 30 days before the event.
-					<?php endif; ?>
+		<?php if ( $rows ) : ?>
+			<div class="gva-table">
+				<div class="gva-th"><span>Vendor</span><span>Event</span><span>Submitted</span><span>Where it stands</span><span></span></div>
+				<?php $i = 0; foreach ( $rows as $r ) : $st = $states[ (int) $r['id'] ]; $i++; ?>
+					<a class="gva-row" style="--i:<?php echo (int) $i; ?>"
+					   href="<?php echo esc_url( gasf_crm_vendor_return_url( (int) $r['id'] ) ); ?>"
+					   data-agreement="<?php echo (int) $r['id']; ?>"
+					   data-state="<?php echo $st['aside'] ? 'archived' : ( $st['countersigned'] ? 'countersigned' : 'new' ); ?>"
+					   data-action="<?php echo $st['needs_action'] ? '1' : '0'; ?>"
+					   <?php echo $st['aside'] ? 'hidden' : ''; ?>>
+						<span class="gva-who">
+							<strong><?php echo esc_html( $r['vendor_name'] ); ?></strong>
+							<small><?php echo esc_html( $types[ $r['vendor_type'] ] ?? 'type not stated' ); ?>
+								<?php if ( $r['poc_name'] && $r['poc_name'] !== $r['vendor_name'] ) : ?>&middot; <?php echo esc_html( $r['poc_name'] ); ?><?php endif; ?></small>
+						</span>
+						<span class="gva-ev"><?php echo esc_html( $r['event_text'] ? $r['event_text'] : 'no event named' ); ?></span>
+						<span class="gva-when"><?php echo esc_html( mysql2date( 'j M Y', $r['created_at'] ) ); ?></span>
+						<span class="gva-chips">
+							<?php foreach ( $st['chips'] as $chip ) { echo gasf_crm_vendor_chip( $chip ); } // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside the helper. ?>
+							<?php if ( isset( $dups[ (int) $r['id'] ] ) ) { echo gasf_crm_vendor_chip( array( 'dup', 'Possible duplicate', 'info' ) ); } // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+						</span>
+						<span class="gva-go" aria-hidden="true">&rarr;</span>
+					</a>
+				<?php endforeach; ?>
+				<p class="gva-empty" hidden>Nothing here under this filter.</p>
+			</div>
+		<?php endif; ?>
+
+		<details class="gva-settings" <?php echo $settings_open ? 'open' : ''; ?>>
+			<summary><span class="gva-cog" aria-hidden="true">&#9881;</span> Event settings <small>what prints onto the agreement, and where new applications are sent</small></summary>
+			<div class="gva-settings-body">
+				<?php gasf_crm_vendor_render_settings(); ?>
+			</div>
+		</details>
+	</section>
+
+	<?php foreach ( $rows as $r ) : $st = $states[ (int) $r['id'] ]; $paid = gasf_crm_vendor_record( $r ); $is_open = (int) $r['id'] === $open; ?>
+		<section class="gva-detail<?php echo $is_open ? ' gva-in' : ''; ?>" data-id="<?php echo (int) $r['id']; ?>" <?php echo $is_open ? '' : 'hidden'; ?>>
+			<div class="gva-top">
+				<a class="gva-back" href="<?php echo esc_url( gasf_crm_vendor_return_url() ); ?>" data-agreement="">&larr; All agreements</a>
+				<div class="gva-title">
+					<h2><?php echo esc_html( $r['vendor_name'] ); ?></h2>
+					<span class="gva-meta"><?php echo esc_html( $types[ $r['vendor_type'] ] ?? 'type not stated' ); ?>
+						<?php if ( $r['event_text'] ) : ?>&middot; <?php echo esc_html( $r['event_text'] ); ?><?php endif; ?>
+						&middot; submitted <?php echo esc_html( mysql2date( 'j M Y', $r['created_at'] ) ); ?></span>
+				</div>
+				<span class="gva-chips">
+					<?php foreach ( $st['chips'] as $chip ) { echo gasf_crm_vendor_chip( $chip ); } // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped ?>
+				</span>
+			</div>
+
+			<?php if ( isset( $dups[ (int) $r['id'] ] ) ) : ?>
+				<p class="gva-dup">
+					<strong>Looks like a second copy.</strong> The same vendor name and event as
+					<?php
+					$links = array();
+					foreach ( $dups[ (int) $r['id'] ] as $other ) {
+						$links[] = '<a href="' . esc_url( gasf_crm_vendor_return_url( $other ) ) . '" data-agreement="' . (int) $other . '">agreement ' . (int) $other . '</a>';
+					}
+					echo implode( ', ', $links ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped above.
+					?>. If one is a double-click, set it aside and the flag clears on the other.
 				</p>
+			<?php endif; ?>
 
-				<?php
-				/*
-				 * The application, above the contract it is attached to.
-				 *
-				 * This is what the club is actually deciding on -- what they
-				 * make, where they will stand, whether they may serve food --
-				 * and it is deliberately not folded into the agreement, because
-				 * none of it is a term of the agreement. A reviewer reads the
-				 * application to decide, then the contract to check what was
-				 * signed.
-				 */
-				$fields = json_decode( (string) $r['fields_json'], true );
-				$app    = is_array( $fields ) && isset( $fields['application'] ) ? (array) $fields['application'] : array();
-				$crafts = is_array( $fields ) && isset( $fields['crafts'] ) ? (array) $fields['crafts'] : array();
-				$booth  = is_array( $fields ) && isset( $fields['booth'] ) ? (string) $fields['booth'] : '';
-				$files  = json_decode( (string) $r['files_json'], true );
-				$types  = gasf_crm_vendor_types();
-				$ctypes = gasf_crm_vendor_craft_types();
-				$booths = gasf_crm_vendor_booths();
-				?>
+			<ol class="gva-steps" style="--p:<?php echo esc_attr( (string) ( max( 0, $st['done'] - 1 ) / 3 ) ); ?>">
+				<?php foreach ( $st['steps'] as $n => $step ) : ?>
+					<li class="<?php echo $step[1] ? 'done' : ''; ?>" style="--i:<?php echo (int) $n; ?>"><i><?php echo $step[1] ? '&#10003;' : (int) ( $n + 1 ); ?></i><?php echo esc_html( $step[0] ); ?></li>
+				<?php endforeach; ?>
+			</ol>
 
-				<dl class="gv-files">
-					<dt>Applying as</dt>
-					<dd><?php echo esc_html( $types[ $r['vendor_type'] ] ?? 'not stated' ); ?></dd>
+			<div class="gva-card gva-actions">
+				<?php gasf_crm_vendor_render_countersign( $r, $paid ); ?>
 
-					<?php if ( $crafts ) : ?>
-						<dt>Makes</dt>
-						<dd>
-							<?php
-							$named = array();
-							foreach ( $crafts as $c ) { $named[] = $ctypes[ $c ] ?? $c; }
-							echo esc_html( implode( ', ', $named ) );
-							if ( ! empty( $app['craft_other'] ) ) {
-								echo ' &mdash; ' . esc_html( $app['craft_other'] );
-							}
-							?>
-						</dd>
-					<?php endif; ?>
-
-					<?php if ( $booth ) : ?>
-						<dt>Space asked for</dt>
-						<dd><?php echo esc_html( $booths[ $booth ] ?? $booth ); ?></dd>
-					<?php endif; ?>
-
-					<?php if ( ! empty( $app['health_permit'] ) ) : ?>
-						<dt>Health permit</dt>
-						<dd><?php echo esc_html( $app['health_permit'] ); ?></dd>
-					<?php endif; ?>
-
-					<?php if ( ! empty( $app['power_needs'] ) ) : ?>
-						<dt>Power needed</dt>
-						<dd><?php echo esc_html( $app['power_needs'] ); ?></dd>
-					<?php endif; ?>
-
-					<?php if ( ! empty( $app['website'] ) || ! empty( $app['facebook'] ) || ! empty( $app['instagram'] ) ) : ?>
-						<dt>Find them at</dt>
-						<dd>
-							<?php
-							foreach ( array( 'website' => 'Web', 'facebook' => 'Facebook', 'instagram' => 'Instagram' ) as $k => $lbl ) {
-								if ( empty( $app[ $k ] ) ) { continue; }
-								// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside the helper.
-								echo esc_html( $lbl ) . ': ' . gasf_crm_vendor_link( $app[ $k ] ) . '<br>';
-							}
-							?>
-						</dd>
-					<?php endif; ?>
-
-					<dt>Photographs</dt>
-					<dd>
-						<?php if ( is_array( $files ) && $files ) : ?>
-							<?php foreach ( $files as $i => $f ) : ?>
-								<a href="<?php echo esc_url( home_url( '/email/contracts/file/' . (int) $r['id'] . '/' . (int) $i ) ); ?>">
-									<?php echo esc_html( ! empty( $f['label'] ) ? $f['label'] : 'photograph ' . ( (int) $i + 1 ) ); ?></a>
-								<span class="muted">(<?php echo esc_html( size_format( (int) ( $f['bytes'] ?? 0 ) ) ); ?>)</span><br>
-							<?php endforeach; ?>
-							<?php if ( ! empty( $r['photo_consent'] ) ) : ?>
-								<strong>They have agreed these may be used publicly to promote the event.</strong>
-							<?php else : ?>
-								<strong>Not cleared for public use.</strong> They did not tick the permission box,
-								so these are for reviewing the application only.
-							<?php endif; ?>
-						<?php else : ?>
-							<span class="muted">None sent.</span>
-						<?php endif; ?>
-					</dd>
-				</dl>
-
-				<?php
-				/*
-				 * The treasurer's rows, which used to sit unfillable on the
-				 * vendor's copy of the contract. They are an edit to the club's
-				 * record of an agreement, never to the agreement.
-				 */
-				$paid = json_decode( (string) $r['paid_json'], true );
-				if ( ! is_array( $paid ) ) { $paid = array(); }
-				?>
-				<form method="post" class="gv-pay">
+				<form method="post" class="gva-record">
 					<h4>Money and paperwork</h4>
 					<?php wp_nonce_field( 'gasf_vendor_pay_' . (int) $r['id'], 'gasf_vendor_pay_nonce' ); ?>
 					<input type="hidden" name="gasf_vendor_pay" value="<?php echo (int) $r['id']; ?>">
 
-					<p><label>Fee agreed $<input type="text" name="fee_quoted" value="<?php echo esc_attr( $r['fee_quoted'] ); ?>" size="8"></label>
-						<span class="muted">What the signed agreement says. Changing it here does not alter the contract below.</span></p>
-
-					<div class="gv-paygrid">
+					<div class="gva-grid">
+						<label class="gva-fee">Fee agreed
+							<span class="gva-money"><b>$</b><input type="text" name="fee_quoted" value="<?php echo esc_attr( $r['fee_quoted'] ); ?>"></span>
+							<small>What the signed agreement says. Changing it here does not alter the contract.</small></label>
 						<?php foreach ( gasf_crm_vendor_payment_fields() as $key => $label ) : ?>
 							<?php if ( 'notes' === $key ) { continue; } ?>
 							<label><?php echo esc_html( $label ); ?>
@@ -2489,52 +2671,407 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 						<?php endforeach; ?>
 					</div>
 
-					<p class="gv-checks">
+					<div class="gva-checks">
 						<?php foreach ( gasf_crm_vendor_record_checks() as $key => $label ) : ?>
-							<label class="gv-check">
+							<label class="gva-check">
 								<input type="checkbox" name="pay[<?php echo esc_attr( $key ); ?>]" value="1" <?php checked( ! empty( $paid[ $key ] ) ); ?>>
-								<?php echo esc_html( $label ); ?>
+								<span><?php echo esc_html( $label ); ?></span>
 							</label>
 						<?php endforeach; ?>
-					</p>
+					</div>
 
-					<p><label>Notes<br>
-						<textarea name="pay[notes]" rows="2"><?php echo esc_textarea( $paid['notes'] ?? '' ); ?></textarea></label></p>
+					<label class="gva-notes">Notes
+						<textarea name="pay[notes]" rows="2"><?php echo esc_textarea( $paid['notes'] ?? '' ); ?></textarea></label>
 
-					<p><button class="btn">Save the record</button></p>
-					<p class="muted">Accepting the agreement is a separate act, at the foot of the contract below.</p>
+					<div class="gva-save"><button class="btn">Save the record</button></div>
 				</form>
 
-				<?php
-				if ( ! empty( $r['contract_snapshot'] ) ) {
-					/*
-					 * The stored snapshot, printed as stored.
-					 *
-					 * Deliberately not escaped and deliberately not re-rendered
-					 * from the current template. Escaping it would show a
-					 * reviewer a wall of markup instead of the contract, and
-					 * re-rendering would quietly restate an old signature in
-					 * today's words. It is markup this plugin generated itself,
-					 * from values that were sanitised and escaped on the way in.
-					 */
-					echo $r['contract_snapshot']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
-				} else {
-					// Rows from before snapshots existed, or a snapshot that
-					// failed to store. Rebuild from the fields so the reviewer
-					// still sees a contract rather than nothing.
-					$vals = json_decode( (string) $r['fields_json'], true );
-					if ( is_array( $vals ) ) {
-						gasf_crm_vendor_contract( 'record', $vals );
-					} else {
-						echo '<p class="muted">This agreement was stored without a readable copy. The details are in the database row.</p>';
-					}
-				}
-				?>
+				<form method="post" class="gva-aside">
+					<?php wp_nonce_field( 'gasf_vendor_aside_' . (int) $r['id'], 'gasf_vendor_aside_nonce' ); ?>
+					<input type="hidden" name="gasf_vendor_aside" value="<?php echo (int) $r['id']; ?>">
+					<?php if ( $st['aside'] ) : ?>
+						<button class="btn sec" name="restore" value="1">Bring it back into the list</button>
+						<span class="gva-hint">It was set aside. Nothing was deleted.</span>
+					<?php else : ?>
+						<button class="btn sec">Set this one aside</button>
+						<span class="gva-hint">For a test or a double submission. It stays on record under the Set aside filter, and nothing is deleted.</span>
+					<?php endif; ?>
+				</form>
+			</div>
 
-				<?php gasf_crm_vendor_render_countersign( $r, $paid ); ?>
+			<?php
+			$fields = json_decode( (string) $r['fields_json'], true );
+			$app    = is_array( $fields ) && isset( $fields['application'] ) ? (array) $fields['application'] : array();
+			$crafts = is_array( $fields ) && isset( $fields['crafts'] ) ? (array) $fields['crafts'] : array();
+			$booth  = is_array( $fields ) && isset( $fields['booth'] ) ? (string) $fields['booth'] : '';
+			$files  = json_decode( (string) $r['files_json'], true );
+			$ctypes = gasf_crm_vendor_craft_types();
+			?>
+			<div class="gva-two">
+				<div class="gva-card">
+					<h4>The application</h4>
+					<dl class="gva-dl">
+						<dt>Applying as</dt>
+						<dd><?php echo esc_html( $types[ $r['vendor_type'] ] ?? 'not stated' ); ?></dd>
+						<?php if ( $crafts ) : ?>
+							<dt>Makes</dt>
+							<dd><?php
+								$named = array();
+								foreach ( $crafts as $c ) { $named[] = $ctypes[ $c ] ?? $c; }
+								echo esc_html( implode( ', ', $named ) );
+								if ( ! empty( $app['craft_other'] ) ) { echo ' &mdash; ' . esc_html( $app['craft_other'] ); }
+							?></dd>
+						<?php endif; ?>
+						<?php if ( $booth ) : ?>
+							<dt>Space asked for</dt>
+							<dd><?php echo esc_html( $booths[ $booth ] ?? $booth ); ?></dd>
+						<?php endif; ?>
+						<?php if ( ! empty( $r['products'] ) ) : ?>
+							<dt>Selling</dt>
+							<dd><?php echo esc_html( $r['products'] ); ?></dd>
+						<?php endif; ?>
+						<?php if ( ! empty( $app['health_permit'] ) ) : ?>
+							<dt>Health permit</dt>
+							<dd><?php echo esc_html( $app['health_permit'] ); ?></dd>
+						<?php endif; ?>
+						<?php if ( ! empty( $app['power_needs'] ) ) : ?>
+							<dt>Power needed</dt>
+							<dd><?php echo esc_html( $app['power_needs'] ); ?></dd>
+						<?php endif; ?>
+						<?php if ( ! empty( $app['website'] ) || ! empty( $app['facebook'] ) || ! empty( $app['instagram'] ) ) : ?>
+							<dt>Find them at</dt>
+							<dd><?php
+								foreach ( array( 'website' => 'Web', 'facebook' => 'Facebook', 'instagram' => 'Instagram' ) as $k => $lbl ) {
+									if ( empty( $app[ $k ] ) ) { continue; }
+									// phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- escaped inside the helper.
+									echo esc_html( $lbl ) . ': ' . gasf_crm_vendor_link( $app[ $k ] ) . '<br>';
+								}
+							?></dd>
+						<?php endif; ?>
+					</dl>
+				</div>
+
+				<div class="gva-card">
+					<h4>Contact and paperwork</h4>
+					<dl class="gva-dl">
+						<?php if ( $r['poc_name'] || $r['poc_email'] || $r['poc_mobile'] ) : ?>
+							<dt>Contact</dt>
+							<dd><?php echo esc_html( $r['poc_name'] ); ?>
+								<?php if ( $r['poc_email'] ) : ?><br><a href="mailto:<?php echo esc_attr( $r['poc_email'] ); ?>"><?php echo esc_html( $r['poc_email'] ); ?></a><?php endif; ?>
+								<?php if ( $r['poc_mobile'] ) : ?><br><?php echo esc_html( $r['poc_mobile'] ); ?><?php endif; ?></dd>
+						<?php endif; ?>
+						<?php if ( $r['vendor_address'] || $r['vendor_city'] ) : ?>
+							<dt>Address</dt>
+							<dd><?php echo esc_html( trim( $r['vendor_address'] . ', ' . trim( $r['vendor_city'] . ' ' . $r['vendor_state'] . ' ' . $r['vendor_zip'] ), ', ' ) ); ?></dd>
+						<?php endif; ?>
+						<dt>Insurance certificate</dt>
+						<dd>
+							<?php if ( $r['coi_path'] ) : ?>
+								<a href="<?php echo esc_url( home_url( '/email/contracts/coi/' . (int) $r['id'] ) ); ?>">Download <?php echo esc_html( $r['coi_name'] ? $r['coi_name'] : 'certificate' ); ?></a>
+								<small>(<?php echo esc_html( size_format( (int) $r['coi_bytes'] ) ); ?>)</small>
+							<?php else : ?>
+								<span class="gva-miss">Not supplied yet.</span> The agreement asks for it at least 30 days before the event.
+							<?php endif; ?>
+						</dd>
+						<dt>Photographs</dt>
+						<dd>
+							<?php if ( is_array( $files ) && $files ) : ?>
+								<?php foreach ( $files as $n => $f ) : ?>
+									<a href="<?php echo esc_url( home_url( '/email/contracts/file/' . (int) $r['id'] . '/' . (int) $n ) ); ?>"><?php echo esc_html( ! empty( $f['label'] ) ? $f['label'] : 'photograph ' . ( (int) $n + 1 ) ); ?></a>
+									<small>(<?php echo esc_html( size_format( (int) ( $f['bytes'] ?? 0 ) ) ); ?>)</small><br>
+								<?php endforeach; ?>
+								<?php if ( ! empty( $r['photo_consent'] ) ) : ?>
+									<span class="gva-ok">Cleared for public use to promote the event.</span>
+								<?php else : ?>
+									<span class="gva-miss">Not cleared for public use.</span> They did not tick the permission box, so these are for reviewing the application only.
+								<?php endif; ?>
+							<?php else : ?>
+								<span class="gva-hint">None sent.</span>
+							<?php endif; ?>
+						</dd>
+					</dl>
+				</div>
+			</div>
+
+			<details class="gva-contract">
+				<summary>Show the signed agreement <small>as the vendor saw it, byte for byte</small></summary>
+				<div class="gva-contract-body">
+					<p class="gva-legend">
+						Signed by <strong><?php echo esc_html( $r['agreed_name'] ? $r['agreed_name'] : 'nobody' ); ?></strong>
+						on <?php echo esc_html( mysql2date( 'j M Y \a\t H:i', $r['agreed_at'] ) ); ?>
+						&middot; agreement version <?php echo esc_html( $r['terms_version'] ? $r['terms_version'] : 'not recorded' ); ?>
+						<?php if ( $r['agreed_ip'] ) : ?>&middot; from <?php echo esc_html( $r['agreed_ip'] ); ?><?php endif; ?>
+					</p>
+					<?php
+					if ( ! empty( $r['contract_snapshot'] ) ) {
+						/*
+						 * The stored snapshot, printed as stored.
+						 *
+						 * Deliberately not escaped and deliberately not re-rendered
+						 * from the current template. Escaping it would show a
+						 * reviewer a wall of markup instead of the contract, and
+						 * re-rendering would quietly restate an old signature in
+						 * today's words. It is markup this plugin generated itself,
+						 * from values that were sanitised and escaped on the way in.
+						 */
+						echo $r['contract_snapshot']; // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped
+					} else {
+						// Rows from before snapshots existed, or a snapshot that
+						// failed to store. Rebuild from the fields so the reviewer
+						// still sees a contract rather than nothing.
+						$vals = json_decode( (string) $r['fields_json'], true );
+						if ( is_array( $vals ) ) {
+							gasf_crm_vendor_contract( 'record', $vals );
+						} else {
+							echo '<p class="gva-hint">This agreement was stored without a readable copy. The details are in the database row.</p>';
+						}
+					}
+					?>
+				</div>
 			</details>
-		<?php endforeach; ?>
-	<?php endif; ?>
+		</section>
+	<?php endforeach; ?>
 </div>
+</div>
+<script>
+/*
+ * The contracts screen's own script: switching between the list and one
+ * agreement without a round trip, the filter chips, and tidying the address
+ * after a save. Everything degrades: every row is a real link, every form
+ * posts, and the server draws the right view for any address on its own.
+ */
+(function () {
+	var root = document.getElementById('contractsview');
+	if (!root) { return; }
+	var list = root.querySelector('.gva-list');
+	var details = root.querySelectorAll('.gva-detail');
+
+	function replay(el) {
+		el.classList.remove('gva-in');
+		void el.offsetWidth;
+		el.classList.add('gva-in');
+	}
+
+	function show(id, push) {
+		var found = null;
+		Array.prototype.forEach.call(details, function (d) {
+			var on = id && String(d.getAttribute('data-id')) === String(id);
+			d.hidden = !on;
+			if (on) { found = d; }
+		});
+		if (list) { list.hidden = !!found; }
+		replay(found || list);
+		window.scrollTo(0, 0);
+		if (push) {
+			try {
+				var u = new URL(window.location.href);
+				if (found) { u.searchParams.set('agreement', String(id)); } else { u.searchParams.delete('agreement'); }
+				u.searchParams.delete('saved');
+				window.history.pushState(null, '', u.toString());
+			} catch (e) { /* the link still worked */ }
+		}
+	}
+
+	root.addEventListener('click', function (e) {
+		var a = e.target && e.target.closest ? e.target.closest('a[data-agreement]') : null;
+		if (!a || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button) { return; }
+		e.preventDefault();
+		show(a.getAttribute('data-agreement') || '', true);
+	});
+
+	window.addEventListener('popstate', function () {
+		try {
+			var q = new URLSearchParams(window.location.search || '');
+			show(q.get('agreement') || '', false);
+		} catch (e) { /* a reload still works */ }
+	});
+
+	var chips = root.querySelectorAll('.gva-filter button');
+	function filter(which) {
+		Array.prototype.forEach.call(chips, function (b) { b.classList.toggle('on', b.getAttribute('data-filter') === which); });
+		var any = false;
+		var n = 0;
+		Array.prototype.forEach.call(root.querySelectorAll('.gva-row'), function (r) {
+			var s = r.getAttribute('data-state') || '';
+			var act = r.getAttribute('data-action') === '1';
+			var on;
+			if (which === 'aside') { on = s === 'archived'; }
+			else if (which === 'action') { on = act && s !== 'archived'; }
+			else if (which === 'force') { on = s === 'countersigned'; }
+			else { on = s !== 'archived'; }
+			r.hidden = !on;
+			if (on) { any = true; n++; r.style.setProperty('--i', String(n)); replay(r); }
+		});
+		var empty = root.querySelector('.gva-empty');
+		if (empty) { empty.hidden = any; }
+	}
+	Array.prototype.forEach.call(chips, function (b) {
+		b.addEventListener('click', function () { filter(b.getAttribute('data-filter') || 'all'); });
+	});
+
+	var toast = root.querySelector('.gva-toast');
+	if (toast) {
+		try {
+			var u2 = new URL(window.location.href);
+			if (u2.searchParams.has('saved')) {
+				u2.searchParams.delete('saved');
+				window.history.replaceState(null, '', u2.toString());
+			}
+		} catch (e) { /* the note shows either way */ }
+		window.setTimeout(function () { if (toast.parentNode) { toast.parentNode.removeChild(toast); } }, 5200);
+	}
+})();
+</script>
+	<?php
+}
+
+/**
+ * The reviewer screen's look.
+ *
+ * Separate from gasf_crm_vendor_styles(), which the public page shares, so
+ * nothing here can lean on the /email app's tokens and then render on the
+ * club's theme without them. Every variable has a fallback for the same
+ * reason. Motion is short and purposeful - a row lifts, a view slides in, the
+ * progress line draws itself - and switches off entirely for anybody who has
+ * asked their system for less of it.
+ */
+function gasf_crm_vendor_admin_styles() {
+	?>
+<style>
+.gva{--gva-ink:var(--gasf-text,#241d15);--gva-muted:var(--gasf-muted,#665845);--gva-border:var(--gasf-border,#c9b997);--gva-surface:var(--gasf-surface,#faf6ec);--gva-accent:var(--gasf-accent,#9a7419);--gva-chip:var(--gasf-chip,#e9dfc9);--gva-dark:var(--gasf-dark,#241d15);--gva-ok:#3f6b34;--gva-warn:#b7791f;--gva-danger:#b3261e;--gva-info:#4a5b8c;--gva-ease:cubic-bezier(.2,.7,.2,1);color:var(--gva-ink);padding:8px 0 48px}
+.gva h2{font-size:22px;margin:0;letter-spacing:-.01em}
+.gva h4{margin:0 0 12px;font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--gva-muted)}
+.gva a{color:var(--gva-accent)}
+.gva small{font-size:12px;color:var(--gva-muted);font-weight:400}
+@keyframes gva-rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+@keyframes gva-slide{from{opacity:0;transform:translateX(26px)}to{opacity:1;transform:none}}
+@keyframes gva-pulse{0%,100%{box-shadow:0 0 0 0 rgba(183,121,31,.45)}60%{box-shadow:0 0 0 7px rgba(183,121,31,0)}}
+@keyframes gva-toast{0%{opacity:0;transform:translate(-50%,-16px)}8%,82%{opacity:1;transform:translate(-50%,0)}100%{opacity:0;transform:translate(-50%,-10px)}}
+@keyframes gva-draw{from{transform:scaleX(0)}to{transform:scaleX(1)}}
+@keyframes gva-pop{0%{transform:scale(.6);opacity:0}70%{transform:scale(1.12)}100%{transform:scale(1);opacity:1}}
+@keyframes gva-shine{from{transform:translateX(-140%) skewX(-20deg)}to{transform:translateX(240%) skewX(-20deg)}}
+.gva-in{animation:gva-slide .34s var(--gva-ease) both}
+.gva-bar{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;flex-wrap:wrap;margin:14px 0 14px}
+.gva-sub{margin:4px 0 0;color:var(--gva-muted);font-size:13px}
+.gva-filter{display:flex;gap:6px;flex-wrap:wrap}
+.gva-filter button{border:1px solid var(--gva-border);background:var(--gva-surface);color:var(--gva-muted);border-radius:999px;padding:5px 12px;font:inherit;font-size:12px;font-weight:600;cursor:pointer;transition:background .18s,color .18s,transform .18s,box-shadow .18s}
+.gva-filter button b{font-weight:700;margin-left:4px;opacity:.75}
+.gva-filter button:hover{transform:translateY(-1px);box-shadow:0 2px 6px rgba(36,29,21,.12)}
+.gva-filter button.on{background:var(--gva-dark);color:#fff;border-color:var(--gva-dark)}
+.gva-table{background:var(--gva-surface);border:1px solid var(--gva-border);border-radius:6px;overflow:hidden;box-shadow:0 1px 2px rgba(36,29,21,.06),0 8px 24px -18px rgba(36,29,21,.35)}
+.gva-th,.gva-row{display:grid;grid-template-columns:minmax(0,2.1fr) minmax(0,1.4fr) 7.5rem minmax(0,2.4fr) 2rem;gap:12px;align-items:center;padding:12px 16px}
+.gva-th{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--gva-muted);background:var(--gva-chip);border-bottom:1px solid var(--gva-border)}
+.gva-row{color:inherit;text-decoration:none;border-bottom:1px solid var(--gva-border);border-left:4px solid transparent;position:relative;animation:gva-rise .4s var(--gva-ease) both;animation-delay:calc(var(--i,1) * 38ms);transition:background .18s,border-color .18s,transform .18s,box-shadow .18s}
+.gva-row:last-of-type{border-bottom:0}
+.gva-row:hover{background:#fff;border-left-color:var(--gva-accent);transform:translateX(2px);box-shadow:0 6px 18px -12px rgba(36,29,21,.5);z-index:1}
+.gva-row[data-action="1"]{border-left-color:rgba(183,121,31,.55)}
+.gva-row[data-state="archived"]{opacity:.65}
+.gva-who strong{display:block;font-size:15px}
+.gva-who small,.gva-when{color:var(--gva-muted);font-size:12px}
+.gva-ev{font-size:13px}
+.gva-chips{display:flex;flex-wrap:wrap;gap:5px}
+.gva-chip{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px 3px 8px;font-size:11.5px;font-weight:600;line-height:1.3;background:var(--gva-chip);color:var(--gva-ink);white-space:nowrap}
+.gva-chip i{width:7px;height:7px;border-radius:50%;background:currentColor;flex:none}
+.gva-chip.ok{background:#e6efe2;color:var(--gva-ok)}
+.gva-chip.warn{background:#fbefd9;color:var(--gva-warn)}
+.gva-chip.warn i{animation:gva-pulse 1.8s ease-out infinite}
+.gva-chip.danger{background:#f9e3e1;color:var(--gva-danger)}
+.gva-chip.info{background:#e6e9f3;color:var(--gva-info)}
+.gva-chip.muted{background:#eee8dc;color:var(--gva-muted)}
+.gva-go{color:var(--gva-muted);font-size:18px;text-align:right;transition:transform .18s,color .18s}
+.gva-row:hover .gva-go{transform:translateX(4px);color:var(--gva-accent)}
+.gva-empty{padding:28px 16px;text-align:center;color:var(--gva-muted);margin:0}
+.gva-settings{margin:18px 0 0;border:1px dashed var(--gva-border);border-radius:6px;background:transparent}
+.gva-settings summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13px;list-style:none;display:flex;align-items:center;gap:10px;color:var(--gva-muted);transition:color .18s}
+.gva-settings summary::-webkit-details-marker{display:none}
+.gva-settings summary:hover{color:var(--gva-ink)}
+.gva-settings summary small{font-weight:400}
+.gva-cog{display:inline-block;font-size:16px;transition:transform .5s var(--gva-ease)}
+.gva-settings[open] .gva-cog{transform:rotate(90deg)}
+.gva-settings[open]{background:var(--gva-surface);border-style:solid}
+.gva-settings-body{padding:0 12px 8px;animation:gva-rise .3s var(--gva-ease) both}
+.gva-settings .gv-pay{border:0;background:transparent;padding:4px 4px 0;margin:0}
+.gva-settings .gv-pay h4{display:none}
+.gva-top{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:12px 0 12px;margin:0 0 8px;background:linear-gradient(to bottom,var(--gasf-page,#ece3d1) 80%,rgba(236,227,209,0));backdrop-filter:blur(6px)}
+.gva-back{font-size:13px;font-weight:600;text-decoration:none;white-space:nowrap;padding:6px 10px;border-radius:999px;border:1px solid var(--gva-border);background:var(--gva-surface);color:var(--gva-ink);transition:transform .18s,box-shadow .18s}
+.gva-back:hover{transform:translateX(-2px);box-shadow:0 2px 8px rgba(36,29,21,.15)}
+.gva-title{flex:1 1 auto;min-width:0}
+.gva-meta{display:block;font-size:12.5px;color:var(--gva-muted)}
+.gva-dup{background:#e6e9f3;color:var(--gva-info);border-left:4px solid var(--gva-info);border-radius:4px;padding:10px 14px;margin:0 0 14px;font-size:13px;animation:gva-rise .4s var(--gva-ease) both}
+.gva-dup a{color:inherit;font-weight:600}
+.gva-steps{list-style:none;display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin:6px 0 18px;padding:0;position:relative}
+.gva-steps::before,.gva-steps::after{content:"";position:absolute;top:15px;left:12.5%;right:12.5%;height:3px;border-radius:2px;background:var(--gva-border)}
+.gva-steps::after{right:auto;width:75%;background:linear-gradient(90deg,var(--gva-ok),var(--gva-accent));transform-origin:left;transform:scaleX(var(--p,0));animation:gva-draw .9s var(--gva-ease) .15s both;--p:0}
+.gva-steps li{position:relative;z-index:1;text-align:center;font-size:12px;font-weight:600;color:var(--gva-muted)}
+.gva-steps li i{display:flex;align-items:center;justify-content:center;width:32px;height:32px;margin:0 auto 6px;border-radius:50%;border:3px solid var(--gva-border);background:var(--gva-surface);font-style:normal;font-size:12px;transition:background .3s,border-color .3s,color .3s}
+.gva-steps li.done{color:var(--gva-ink)}
+.gva-steps li.done i{background:var(--gva-ok);border-color:var(--gva-ok);color:#fff;animation:gva-pop .45s var(--gva-ease) both;animation-delay:calc(.25s + var(--i,0) * .12s)}
+.gva-card{background:var(--gva-surface);border:1px solid var(--gva-border);border-radius:6px;padding:18px 20px;margin:0 0 16px;box-shadow:0 1px 2px rgba(36,29,21,.06),0 10px 28px -22px rgba(36,29,21,.45);animation:gva-rise .4s var(--gva-ease) both}
+.gva-actions{border-top:4px solid var(--gva-accent);padding-top:16px}
+.gva-sign{margin:0 0 18px;padding:0 0 18px;border-bottom:1px solid var(--gva-border)}
+.gva-signrow{display:grid;grid-template-columns:1fr 1fr 9rem auto;gap:12px;align-items:end}
+.gva-signrow label,.gva-grid label,.gva-notes{display:block;font-size:12px;font-weight:600;color:var(--gva-muted);margin:0}
+.gva-signrow input,.gva-grid input,.gva-notes textarea,.gva-money input{display:block;width:100%;margin-top:4px;padding:8px 10px;border:1px solid var(--gva-border);border-radius:4px;background:#fff;color:var(--gva-ink);font:inherit;font-size:14px;box-sizing:border-box;transition:border-color .18s,box-shadow .18s}
+.gva-signrow input:focus,.gva-grid input:focus,.gva-notes textarea:focus,.gva-money input:focus{outline:0;border-color:var(--gva-accent);box-shadow:0 0 0 3px rgba(154,116,25,.18)}
+.gva-script{font-family:"Segoe Script","Brush Script MT",cursive;font-size:17px !important}
+.gva-cta{position:relative;overflow:hidden;border:0;border-radius:6px;padding:11px 20px;font:inherit;font-size:14px;font-weight:700;color:#fff;cursor:pointer;background:linear-gradient(135deg,#4f8a43,var(--gva-ok));box-shadow:0 4px 14px -6px rgba(63,107,52,.8);white-space:nowrap;transition:transform .18s,box-shadow .18s,filter .18s}
+.gva-cta::after{content:"";position:absolute;top:0;bottom:0;left:0;width:40%;background:linear-gradient(90deg,rgba(255,255,255,0),rgba(255,255,255,.35),rgba(255,255,255,0));transform:translateX(-140%) skewX(-20deg)}
+.gva-cta:hover{transform:translateY(-1px);box-shadow:0 8px 20px -8px rgba(63,107,52,.9)}
+.gva-cta:hover::after{animation:gva-shine .7s var(--gva-ease)}
+.gva-cta:active{transform:translateY(0);filter:brightness(.95)}
+.gva-signed{display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.gva-signed > div{flex:1 1 320px;font-size:14px}
+.gva-seal{display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:50%;background:var(--gva-ok);color:#fff;font-weight:700;flex:none;animation:gva-pop .5s var(--gva-ease) both}
+.gva-undo{font-size:12px !important}
+.gva-hint{display:block;font-size:12px;color:var(--gva-muted);margin:8px 0 0;font-weight:400;line-height:1.5}
+.gva-signed .gva-hint{margin-top:4px}
+.gva-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(10.5rem,1fr));gap:10px 14px}
+.gva-fee{grid-column:1 / -1}
+.gva-money{display:flex;align-items:center;gap:0;max-width:14rem}
+.gva-money b{padding:0 10px;font-size:16px;color:var(--gva-muted);margin-top:4px}
+.gva-money input{margin-top:4px}
+.gva-fee small{display:block;margin-top:4px}
+.gva-checks{display:flex;gap:8px 22px;flex-wrap:wrap;margin:14px 0 10px}
+.gva-check{display:inline-flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+.gva-check input{accent-color:var(--gva-ok);width:16px;height:16px}
+.gva-notes textarea{min-height:52px;resize:vertical}
+.gva-save{display:flex;align-items:center;gap:12px;margin-top:14px}
+.gva-aside{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:18px 0 0;padding-top:14px;border-top:1px dashed var(--gva-border)}
+.gva-aside .gva-hint{margin:0;flex:1 1 300px}
+.gva-two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.gva-two .gva-card{margin:0 0 16px}
+.gva-two .gva-card:nth-child(2){animation-delay:.08s}
+.gva-dl{margin:0;display:grid;grid-template-columns:9rem 1fr;gap:8px 14px;font-size:13.5px}
+.gva-dl dt{font-weight:600;color:var(--gva-muted);margin:0}
+.gva-dl dd{margin:0;overflow-wrap:anywhere}
+.gva-miss{color:var(--gva-danger);font-weight:600}
+.gva-ok{color:var(--gva-ok);font-weight:600}
+.gva-contract{border:1px solid var(--gva-border);border-radius:6px;background:var(--gva-surface);margin:0 0 16px}
+.gva-contract summary{cursor:pointer;padding:14px 18px;font-weight:600;font-size:14px;list-style:none;display:flex;align-items:center;gap:10px;transition:background .18s}
+.gva-contract summary::-webkit-details-marker{display:none}
+.gva-contract summary::before{content:"";width:0;height:0;border-left:7px solid var(--gva-accent);border-top:5px solid transparent;border-bottom:5px solid transparent;transition:transform .3s var(--gva-ease)}
+.gva-contract[open] summary::before{transform:rotate(90deg)}
+.gva-contract summary:hover{background:var(--gva-chip)}
+.gva-contract-body{padding:0 18px 18px;animation:gva-rise .35s var(--gva-ease) both}
+.gva-contract-body .gv-contract{margin-top:8px}
+.gva-legend{font-size:12.5px;color:var(--gva-muted);margin:0 0 10px}
+.gva-toast{position:fixed;top:18px;left:50%;transform:translate(-50%,0);z-index:50;display:flex;align-items:center;gap:10px;padding:10px 18px 10px 10px;border-radius:999px;background:var(--gva-dark);color:#fff;font-size:14px;font-weight:600;box-shadow:0 10px 30px -10px rgba(0,0,0,.6);animation:gva-toast 5s var(--gva-ease) both;pointer-events:none}
+.gva-toast .gva-seal{width:26px;height:26px;font-size:13px}
+@media (max-width:860px){
+	.gva-th{display:none}
+	.gva-row{grid-template-columns:1fr auto;grid-template-areas:"who go" "ev go" "chips go";row-gap:4px}
+	.gva-who{grid-area:who}.gva-ev{grid-area:ev}.gva-when{display:none}.gva-chips{grid-area:chips}.gva-go{grid-area:go}
+	.gva-two{grid-template-columns:1fr}
+	.gva-signrow{grid-template-columns:1fr 1fr}
+	.gva-signrow .gva-cta{grid-column:1 / -1}
+	.gva-dl{grid-template-columns:1fr}
+	.gva-dl dt{margin-top:6px}
+	.gva-top{position:static;backdrop-filter:none;background:none}
+}
+@media (prefers-reduced-motion:reduce){
+	.gva *,.gva *::before,.gva *::after{animation:none !important;transition:none !important}
+	.gva-steps::after{transform:scaleX(var(--p,0))}
+}
+</style>
 	<?php
 }
