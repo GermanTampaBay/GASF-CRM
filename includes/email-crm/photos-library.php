@@ -754,7 +754,12 @@ function gasf_crm_photo_zip_build( array $ids, $convert = false ) {
 	$refused = array();
 	$bytes   = 0;
 	foreach ( $ids as $id ) {
-		if ( 'attachment' !== get_post_type( $id ) ) { continue; }
+		// The same membership test the grid, the editor, and the file route
+		// apply. Without it the ids were taken on trust: anything in the media
+		// library - a held door photo nobody has reviewed, a sponsor's logo, a
+		// document - came out in the zip for whoever could reach the library.
+		// Pinned by test_zip_is_library_only.
+		if ( ! gasf_crm_photo_in_library( $id ) ) { continue; }
 		// No silent skip of privately stored photos here: a limited-permission
 		// photo lives in the private store, and skipping it before the
 		// permission check left it out of the count that exists to name it.

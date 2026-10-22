@@ -185,11 +185,19 @@ function gasf_crm_flush_notifications( $force = false ) {
 	 * batch as well would announce the same threads again to whoever already
 	 * received them.
 	 *
-	 * Total failure is the exception: nothing was attempted successfully, so the
-	 * interval stamp is left alone and the next hourly sync retries the batch as
-	 * a whole. The hourly cadence is the backoff.
+	 * Total failure is the exception: every attempt failed, so the interval
+	 * stamp is left alone and the next hourly sync retries the batch as a
+	 * whole. The hourly cadence is the backoff.
+	 *
+	 * Total failure is judged on the attempts, not on the deliveries. A batch
+	 * whose threads sit in streams nobody holds, or an owed list that was all
+	 * answered before the hour came round, makes no attempt at all - and that
+	 * used to count as failure: the queue was held, the stamp never moved, and
+	 * the log said "delivery failed" every hour about mail nobody could have
+	 * been sent. Nothing attempted is nothing to retry, so it drains like a
+	 * delivered batch. Pinned by test_notify_nothing_to_send_drains.
 	 */
-	if ( 0 === $delivered ) {
+	if ( 0 === $delivered && $failed > 0 ) {
 		gasf_crm_log( sprintf(
 			'CRM: notification delivery failed for all %d recipient(s); batch of %d thread(s) held for retry.',
 			count( $recipients ), count( $threads )
@@ -199,6 +207,14 @@ function gasf_crm_flush_notifications( $force = false ) {
 
 	$dequeue();
 	update_option( 'gasf_crm_notify_last', time(), false );
+
+	if ( 0 === $delivered ) {
+		gasf_crm_log( sprintf(
+			'CRM: %d queued thread(s) in streams none of the %d recipient(s) holds; dropped without a notification.',
+			count( $threads ), count( $recipients )
+		) );
+		return count( $threads );
+	}
 
 	gasf_crm_log( sprintf(
 		'CRM: notified %d of %d recipient(s) about %d thread(s)%s.',

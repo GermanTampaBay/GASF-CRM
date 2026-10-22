@@ -4229,6 +4229,240 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The video scrub blanks the coordinates where they are, front or back.
+	 *
+	 * gasf_crm_video_ends() reads the first and last two megabytes of a clip
+	 * and hands them over end to end. An index into that buffer is a file
+	 * offset only in the front half; in the back half it is short by every
+	 * frame that was skipped. The first scrub applied the back half's
+	 * correction to every match, so a GPS atom in the front of a clip longer
+	 * than four megabytes - the ordinary "fast start" layout a phone writes -
+	 * was "blanked" a megabyte into the picture. The frames took the spaces,
+	 * the coordinates stayed, and the clip was refused. Confirmed against the
+	 * live function on this host before the fix.
+	 */
+	public function test_video_scrub_front_and_back() {
+		$gps  = '+27.8756-082.7784/';
+		$atom = chr( 0xA9 ) . 'xyz' . pack( 'n', strlen( $gps ) ) . "\x15\xC7" . $gps;
+		$mb   = 1024 * 1024;
+
+		// Front-loaded: the atom at byte 1000, then five megabytes of frames.
+		$front = wp_tempnam( 'st-vid-front.mp4' );
+		$fill  = str_repeat( 'A', 1000 ) . $atom;
+		file_put_contents( $front, $fill . str_repeat( 'B', 2 * $mb - strlen( $fill ) ) . str_repeat( 'C', 3 * $mb ) );
+		$this->ok( '' !== gasf_crm_video_has_location( $front ), 'video scrub: the front-loaded fixture carries GPS before' );
+		$r   = gasf_crm_video_scrub( $front );
+		$buf = (string) file_get_contents( $front );
+		$this->ok( true === $r, 'video scrub: a front-loaded atom is scrubbed' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
+		$this->ok( str_repeat( ' ', strlen( $gps ) ) === substr( $buf, 1008, strlen( $gps ) ), 'video scrub: the coordinates themselves are the bytes blanked' );
+		$this->ok( str_repeat( 'B', 64 ) === substr( $buf, $mb + 1000, 64 ), 'video scrub: nothing a megabyte into the frames was touched' );
+		$this->ok( '' === gasf_crm_video_has_location( $front ), 'video scrub: the front-loaded clip reads clean afterwards' );
+		@unlink( $front ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		// Back-loaded: five megabytes of frames, then the atom near the end.
+		$back = wp_tempnam( 'st-vid-back.mp4' );
+		file_put_contents( $back, str_repeat( 'D', 5 * $mb ) . $atom . str_repeat( 'E', 500 ) );
+		$r   = gasf_crm_video_scrub( $back );
+		$buf = (string) file_get_contents( $back );
+		$this->ok( true === $r, 'video scrub: a back-loaded atom is still scrubbed' . ( is_wp_error( $r ) ? ' (' . $r->get_error_message() . ')' : '' ) );
+		$this->ok( str_repeat( ' ', strlen( $gps ) ) === substr( $buf, 5 * $mb + 8, strlen( $gps ) ), 'video scrub: the back-loaded coordinates are the bytes blanked' );
+		$this->ok( 5 * $mb + strlen( $atom ) + 500 === strlen( $buf ), 'video scrub: the file is the same length afterwards' );
+		@unlink( $back ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		// The arithmetic itself, including the one case that must refuse.
+		$this->ok( 100 === gasf_crm_video_offset( 100, 20, 3000, 2048 ), 'video offset: the head is the file' );
+		$this->ok( 5100 === gasf_crm_video_offset( 2100, 20, 3000, 2048 ), 'video offset: the tail is short by the gap' );
+		$this->ok( -1 === gasf_crm_video_offset( 2040, 20, 3000, 2048 ), 'video offset: a run across the gap is nowhere' );
+		$this->ok( 2040 === gasf_crm_video_offset( 2040, 20, 0, 2048 ), 'video offset: no gap means the buffer is the file' );
+	}
+
+	/**
+	 * An account approved before streams existed still sees General.
+	 *
+	 * get_user_meta() answers '' for a row that was never written, and
+	 * (array) '' is array( '' ): one element, so not empty, so the fallback
+	 * that was written for exactly this account never ran. Every pre-streams
+	 * volunteer was shown an empty app, while the admin page promised they
+	 * kept their General access. Confirmed on this host before the fix.
+	 */
+	public function test_legacy_account_streams() {
+		$rand = wp_generate_password( 10, false );
+		$uid  = wp_insert_user( array(
+			'user_login' => 'gasf-selftest-' . $rand,
+			'user_pass'  => wp_generate_password( 24 ),
+			'user_email' => 'selftest-' . $rand . '@invalid.local',
+			'role'       => '',
+		) );
+		if ( is_wp_error( $uid ) ) {
+			$this->ok( false, 'legacy streams: could not create a synthetic account' );
+			return;
+		}
+		try {
+			update_user_meta( $uid, 'gasf_crm_provider', 'google' );
+			update_user_meta( $uid, 'gasf_crm_status', 'approved' );
+			$this->ok( '' === get_user_meta( $uid, 'gasf_crm_streams', true ), 'legacy streams: the fixture has no grant row, as a pre-streams account has' );
+
+			$seen = gasf_crm_user_streams( $uid );
+			$this->ok( array( 'general' ) === $seen, 'legacy streams: no grant row on an approved account means General (' . wp_json_encode( $seen ) . ')' );
+
+			// An administrator's deliberate "nothing" is still nothing.
+			update_user_meta( $uid, 'gasf_crm_streams', array() );
+			update_user_meta( $uid, 'gasf_crm_streams_set', 1 );
+			$this->ok( array() === gasf_crm_user_streams( $uid ), 'legacy streams: an explicit empty grant stays empty' );
+		} finally {
+			require_once ABSPATH . 'wp-admin/includes/user.php';
+			wp_delete_user( $uid );
+		}
+	}
+
+	/**
+	 * A batch nobody can be told about leaves the queue; a batch nobody could
+	 * be told about is kept.
+	 *
+	 * The flush used to read "zero delivered" as "every delivery failed". A
+	 * thread in a stream no recipient holds is never attempted, so the batch
+	 * was held for retry every hour, the interval stamp never moved, and the
+	 * log said delivery had failed for mail that was never sent. The queue
+	 * and the owed list are swapped for this run's own and put back merged,
+	 * so a thread the sync queues meanwhile is not lost.
+	 */
+	public function test_notify_nothing_to_send_drains() {
+		global $wpdb;
+		$T = gasf_crm_table( 'threads' );
+
+		$rand = wp_generate_password( 10, false );
+		$uid  = wp_insert_user( array(
+			'user_login' => 'gasf-selftest-' . $rand,
+			'user_pass'  => wp_generate_password( 24 ),
+			'user_email' => 'selftest-' . $rand . '@example.org',
+			'role'       => '',
+		) );
+		if ( is_wp_error( $uid ) ) {
+			$this->ok( false, 'notify drain: could not create a synthetic recipient' );
+			return;
+		}
+
+		$queue_was = (array) get_option( 'gasf_crm_notify_queue', array() );
+		$owed_was  = get_option( 'gasf_crm_notify_owed', null );
+		$last_was  = get_option( 'gasf_crm_notify_last', null );
+		$tid       = 0;
+		$sent      = array();
+		$answer    = true;
+		$catch     = function ( $handled, $to ) use ( &$sent, &$answer ) { $sent[] = $to; return $answer; };
+		add_filter( 'gasf_crm_notify_send', $catch, 10, 2 );
+		try {
+			update_user_meta( $uid, 'gasf_crm_provider', 'google' );
+			update_user_meta( $uid, 'gasf_crm_status', 'approved' );
+			update_user_meta( $uid, 'gasf_crm_streams', array( 'general' ) );
+			update_user_meta( $uid, 'gasf_crm_streams_set', 1 );
+
+			// A thread in a stream that is not a stream at all, so no recipient
+			// - not the fixture, not an administrator who holds everything -
+			// is ever handed it.
+			$t   = gasf_crm_upsert_thread( 'st-notify-' . $rand, 'Selftest notify', 'A Member', 'st-notify-' . $rand . '@example.com', current_time( 'mysql', true ), true, 'selftest-void' );
+			$tid = (int) $t['id'];
+			if ( ! $this->ok( $tid > 0, 'notify drain: the fixture thread exists' ) ) { return; }
+
+			update_option( 'gasf_crm_notify_queue', array( $tid ), false );
+			delete_option( 'gasf_crm_notify_owed' );
+			update_option( 'gasf_crm_notify_last', 0, false );
+
+			$n = gasf_crm_flush_notifications( true );
+			$this->ok( array() === $sent, 'notify drain: nobody holds the stream, so nobody is written to' );
+			$this->ok( ! in_array( $tid, array_map( 'intval', (array) get_option( 'gasf_crm_notify_queue', array() ) ), true ),
+				'notify drain: a thread nobody can be told about leaves the queue' );
+			$this->ok( (int) get_option( 'gasf_crm_notify_last', 0 ) > 0, 'notify drain: the interval stamp moves on' );
+			$this->ok( 1 === $n, 'notify drain: the flush reports the thread as dealt with' );
+
+			// The same thread in a held stream, with every send failing: that
+			// IS a failure, and the batch is kept.
+			$wpdb->update( $T, array( 'stream' => 'general' ), array( 'id' => $tid ) );
+			update_option( 'gasf_crm_notify_queue', array( $tid ), false );
+			update_option( 'gasf_crm_notify_last', 0, false );
+			$answer = false;
+			$sent   = array();
+			$n = gasf_crm_flush_notifications( true );
+			$this->ok( count( $sent ) >= 1, 'notify hold: a held stream is attempted' );
+			$this->ok( in_array( $tid, array_map( 'intval', (array) get_option( 'gasf_crm_notify_queue', array() ) ), true ),
+				'notify hold: a batch every attempt failed on is kept for retry' );
+			$this->ok( 0 === $n, 'notify hold: and reported as not dealt with' );
+		} finally {
+			remove_filter( 'gasf_crm_notify_send', $catch, 10 );
+			// Put back what was there, plus anything queued meanwhile, minus ours.
+			$now = array_map( 'intval', (array) get_option( 'gasf_crm_notify_queue', array() ) );
+			$put = array_values( array_unique( array_diff( array_merge( array_map( 'intval', $queue_was ), $now ), array( $tid ) ) ) );
+			update_option( 'gasf_crm_notify_queue', $put, false );
+			if ( null === $owed_was ) { delete_option( 'gasf_crm_notify_owed' ); } else { update_option( 'gasf_crm_notify_owed', $owed_was, false ); }
+			if ( null === $last_was ) { delete_option( 'gasf_crm_notify_last' ); } else { update_option( 'gasf_crm_notify_last', $last_was, false ); }
+			if ( $tid ) { $wpdb->query( $wpdb->prepare( "DELETE FROM {$T} WHERE id = %d", $tid ) ); }
+			require_once ABSPATH . 'wp-admin/includes/user.php';
+			wp_delete_user( $uid );
+			$this->ok( array_map( 'intval', $queue_was ) === array_values( array_intersect( array_map( 'intval', (array) get_option( 'gasf_crm_notify_queue', array() ) ), array_map( 'intval', $queue_was ) ) ),
+				'notify drain: the live queue is back as it was' );
+		}
+	}
+
+	/**
+	 * A redrawn vendor form keeps the time it was first shown.
+	 *
+	 * The speed floor measures from the hidden stamp, and the redisplay after
+	 * a rejected submission restamped it with now - so fixing one field and
+	 * pressing Submit again inside ten seconds was answered as a bot. The
+	 * stamp is carried over on a redisplay, and only then; a fresh page, or a
+	 * posted stamp from the future, starts the clock again.
+	 */
+	public function test_vendor_resubmit_keeps_its_stamp() {
+		$this->snapshot_option( 'gasf_crm_vendor' );
+		update_option( 'gasf_crm_vendor', array( 'terms_url' => '', 'terms_version' => '2026-07' ), false );
+
+		$then = time() - 30;
+		$post = $_POST;
+		try {
+			$_POST['gasf_vendor_t'] = (string) $then;
+
+			gasf_crm_vendor_last_errors( array( 'Selftest: one field was wrong.' ) );
+			$html = gasf_crm_vendor_shortcode();
+			$this->ok( false !== strpos( $html, 'name="gasf_vendor_t" value="' . $then . '"' ), 'vendor stamp: a redisplay carries the posted stamp' );
+			$this->ok( $then === gasf_crm_vendor_form_stamp( true ), 'vendor stamp: the helper agrees' );
+
+			gasf_crm_vendor_last_errors( array() );
+			$this->ok( gasf_crm_vendor_form_stamp( false ) >= time() - 1, 'vendor stamp: a fresh page starts the clock now' );
+
+			$_POST['gasf_vendor_t'] = (string) ( time() + 3600 );
+			$this->ok( gasf_crm_vendor_form_stamp( true ) >= time() - 1, 'vendor stamp: a stamp from the future is not carried' );
+			$_POST['gasf_vendor_t'] = '0';
+			$this->ok( gasf_crm_vendor_form_stamp( true ) >= time() - 1, 'vendor stamp: a zero stamp is not carried' );
+		} finally {
+			gasf_crm_vendor_last_errors( array() );
+			$_POST = $post;
+		}
+	}
+
+	/**
+	 * The zip takes library photos and nothing else.
+	 *
+	 * The builder checked only that each id was an attachment, where the
+	 * save, delete, and file routes all ask gasf_crm_photo_in_library(). A
+	 * held door photo nobody had reviewed, a sponsor's logo, a document in the
+	 * media library: any of them came out in the download for whoever could
+	 * reach the library.
+	 */
+	public function test_zip_is_library_only() {
+		$lib  = $this->library_photo( 'st-zip-lib' );
+		$held = $this->held_photo( 'st-zip-held' );
+		if ( is_wp_error( $held ) ) { $this->ok( false, 'zip library: could not make a held fixture' ); return; }
+		$this->ok( ! gasf_crm_photo_in_library( $held ), 'zip library: the held fixture is not in the library' );
+
+		$zip = gasf_crm_photo_zip_build( array( $lib, $held ) );
+		if ( ! $this->ok( ! is_wp_error( $zip ), 'zip library: builds with a mixed selection' ) ) { return; }
+		$this->ok( 1 === (int) $zip['files'], 'zip library: only the library photo is inside (' . (int) $zip['files'] . ')' );
+		@unlink( trailingslashit( gasf_crm_photo_zip_dir() ) . $zip['token'] . '.zip' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
+
+		$only = gasf_crm_photo_zip_build( array( $held ) );
+		$this->ok( is_wp_error( $only ), 'zip library: a selection of nothing but held photos builds nothing' );
+	}
+
+	/**
 	 * The fee follows the pitch, and the vendor cannot set it.
 	 *
 	 * This is the one number on the page somebody has an obvious motive to

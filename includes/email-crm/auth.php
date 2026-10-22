@@ -824,7 +824,12 @@ function gasf_crm_user_streams( $user_id = 0 ) {
 	$active = array_keys( gasf_crm_active_streams() );
 	if ( user_can( $user_id, 'manage_options' ) ) { return $active; }
 
-	$granted = (array) get_user_meta( $user_id, 'gasf_crm_streams', true );
+	// Read as whatever was stored, not cast: a cast of the '' that
+	// get_user_meta returns for a missing row is array( '' ), which is not
+	// empty, so the fallback below never ran and every account approved before
+	// streams existed saw nothing at all. Pinned by test_legacy_account_streams.
+	$granted = get_user_meta( $user_id, 'gasf_crm_streams', true );
+	$granted = is_array( $granted ) ? $granted : array();
 
 	// Accounts approved before streams existed keep working: an empty grant on
 	// a pre-existing account means general, which is all there was to see.

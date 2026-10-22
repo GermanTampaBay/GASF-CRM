@@ -959,7 +959,18 @@ function gasf_crm_video_markers() {
  * Never the whole thing: these run to a hundred megabytes, and the moov atom
  * lives at the front or the back, never buried among the frames.
  *
- * @return array{0:string,1:int} the buffer, and how far its indexes sit from the file's.
+ * The buffer is the head and the tail laid end to end, so an index into it is
+ * a file offset only in the head. Past the head it is short by the stretch of
+ * frames that was skipped, and that stretch is the gap returned alongside.
+ * gasf_crm_video_offset() does the sum; nothing should do it by hand. The
+ * first version returned one correction and applied it to every match, which
+ * put the blanking of a front-loaded atom (the usual "fast start" layout) a
+ * megabyte into the picture: the frames were overwritten, the coordinates
+ * stayed, and the clip was refused as unscrubbable. The arithmetic is pinned
+ * by test_video_scrub_front_and_back.
+ *
+ * @return array{0:string,1:int,2:int} the buffer, the bytes skipped between its
+ *         two halves, and where the head ends inside it.
  */
 function gasf_crm_video_ends( $path, $window = 2097152 ) {
 	$size = (int) filesize( $path );
@@ -976,7 +987,20 @@ function gasf_crm_video_ends( $path, $window = 2097152 ) {
 	}
 	fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 
-	return array( $head . $tail, $at ? $at - strlen( $head ) : 0 );
+	return array( $head . $tail, $at ? $at - strlen( $head ) : 0, strlen( $head ) );
+}
+
+/**
+ * The file offset of a byte in the buffer gasf_crm_video_ends() returns.
+ *
+ * -1 when a run of bytes straddles the gap between the two halves: nothing
+ * contiguous in the file corresponds to it, so it is a coincidence of the
+ * concatenation and must not send a write anywhere.
+ */
+function gasf_crm_video_offset( $index, $length, $gap, $head_len ) {
+	if ( $index + $length <= $head_len ) { return (int) $index; }
+	if ( $index >= $head_len ) { return (int) ( $index + $gap ); }
+	return $gap > 0 ? -1 : (int) $index;
 }
 
 /**
@@ -1058,7 +1082,7 @@ function gasf_crm_video_has_location( $path ) {
 function gasf_crm_video_scrub( $path ) {
 	if ( ! is_file( $path ) ) { return true; }
 
-	list( $buf, $base ) = gasf_crm_video_ends( $path );
+	list( $buf, $gap, $head_len ) = gasf_crm_video_ends( $path );
 	if ( '' === $buf ) {
 		return new WP_Error( 'gasf_crm_scrub', 'Could not read ' . basename( $path ) . ' to check it for location data.' );
 	}
@@ -1078,7 +1102,10 @@ function gasf_crm_video_scrub( $path ) {
 		$len = is_array( $n ) ? (int) reset( $n ) : 0;
 		if ( $len < 1 || $len > 128 || ( $t + 8 + $len ) > strlen( $buf ) ) { continue; }
 
-		fseek( $fh, $base + $t + 8 );
+		$where = gasf_crm_video_offset( $t, 8 + $len, $gap, $head_len );
+		if ( $where < 0 ) { continue; }
+
+		fseek( $fh, $where + 8 );
 		fwrite( $fh, str_repeat( ' ', $len ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions
 	}
 	fclose( $fh ); // phpcs:ignore WordPress.WP.AlternativeFunctions

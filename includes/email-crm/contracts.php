@@ -1263,7 +1263,7 @@ function gasf_crm_vendor_shortcode() {
 		<form method="post" enctype="multipart/form-data" novalidate>
 			<?php wp_nonce_field( 'gasf_vendor_apply', 'gasf_vendor_nonce' ); ?>
 			<input type="hidden" name="gasf_vendor_submit" value="1">
-			<input type="hidden" name="gasf_vendor_t" value="<?php echo esc_attr( (string) time() ); ?>">
+			<input type="hidden" name="gasf_vendor_t" value="<?php echo esc_attr( (string) gasf_crm_vendor_form_stamp( (bool) $errors ) ); ?>">
 
 			<?php /* Honeypot. Real people never see it, so anything in it is a bot. */ ?>
 			<div aria-hidden="true" style="position:absolute;left:-9999px;top:-9999px">
@@ -1452,6 +1452,25 @@ function gasf_crm_vendor_last_errors( $set = null ) {
 	static $errors = array();
 	if ( is_array( $set ) ) { $errors = $set; }
 	return $errors;
+}
+
+/**
+ * When this form was first put in front of the vendor.
+ *
+ * A fresh page stamps now. A page redrawn after a rejected submission carries
+ * the stamp it was posted with, because the speed floor in gasf_crm_vendor_handle
+ * measures from this value: restamping the redisplay meant a vendor who fixed
+ * the one bad field and pressed Submit inside ten seconds was turned away as a
+ * bot, with the generic message, and nothing to say what had gone wrong. The
+ * posted value is only carried when it is a time that has already happened;
+ * anything else starts the clock again. Pinned by test_vendor_resubmit_keeps_its_stamp.
+ */
+function gasf_crm_vendor_form_stamp( $redisplay ) {
+	if ( $redisplay && isset( $_POST['gasf_vendor_t'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification -- redisplay only; nothing is acted on here.
+		$then = (int) $_POST['gasf_vendor_t']; // phpcs:ignore WordPress.Security.NonceVerification
+		if ( $then > 0 && $then <= time() ) { return $then; }
+	}
+	return time();
 }
 
 /** The event post id on a submission being redisplayed, or 0. */
