@@ -1112,6 +1112,17 @@ add_action( 'rest_api_init', function () {
 		return gasf_crm_user_can_stream( 'photos' );
 	};
 
+	// One card by id - for a photo the grid is not showing, such as the twin a
+	// near-duplicate note points at.
+	register_rest_route( 'gasf/v1', '/crm/photos/library/card', array(
+		'methods'             => 'GET',
+		'permission_callback' => $lib_guard,
+		'callback'            => function ( WP_REST_Request $req ) {
+			$card = gasf_crm_photo_library_card( (int) $req->get_param( 'photo' ) );
+			return $card ? $card : new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
+		},
+	) );
+
 	register_rest_route( 'gasf/v1', '/crm/photos/library', array(
 		'methods'             => 'GET',
 		'permission_callback' => $lib_guard,

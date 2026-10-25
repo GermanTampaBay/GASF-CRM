@@ -1473,12 +1473,33 @@ function gasf_crm_render_inbox_script() {
 	function nearNote(p){
 		if (!p || !p.near) { return ''; }
 		var n = p.near;
-		return '<div class="note warn pnear" data-photo="' + p.id + '">' +
-			(n.thumb ? '<img src="' + esc(n.thumb) + '" alt="">' : '') +
-			'<span>Looks like a copy of <strong>#' + n.id + '</strong>' + (n.title ? ' — ' + esc(n.title) : '') + ', ' + esc(n.where || '') +
+		// The twin's picture and number open it full-size in a new tab, so the
+		// two can sit side by side; in the viewer there is also a way to swap to
+		// it here.
+		var href = n.full || n.thumb || '';
+		var link = function(inner){ return href ? '<a href="' + esc(href) + '" target="_blank" rel="noopener" title="Open #' + n.id + ' full size in a new tab">' + inner + '</a>' : inner; };
+		return '<div class="note warn pnear" data-photo="' + p.id + '" data-near="' + n.id + '">' +
+			(n.thumb ? link('<img src="' + esc(n.thumb) + '" alt="">') : '') +
+			'<span>Looks like a copy of ' + link('<strong>#' + n.id + '</strong>') + (n.title ? ' — ' + esc(n.title) : '') + ', ' + esc(n.where || '') +
 			' (' + n.distance + ' of 64 bits apart). If it is, delete this one as usual.</span> ' +
-			'<button type="button" class="btn sec pnearkeep">Not a copy — keep both</button></div>';
+			'<span class="pnearacts">' +
+			(href ? '<a class="btn sec" href="' + esc(href) + '" target="_blank" rel="noopener">Compare in a new tab</a> ' : '') +
+			'<button type="button" class="btn sec pnearopen">Open #' + n.id + ' here</button> ' +
+			'<button type="button" class="btn sec pnearkeep">Not a copy — keep both</button></span></div>';
 	}
+	// "Open #N here": swap the viewer to the twin. The grid may not be showing
+	// it, so its card is fetched when it is not already to hand.
+	document.addEventListener('click', function(ev){
+		var b = ev.target.closest ? ev.target.closest('.pnearopen') : null;
+		if (!b) { return; }
+		var id = Number(b.closest('.pnear').dataset.near);
+		if (typeof lgrid !== 'undefined' && lgrid && lgrid._photos && lgrid._photos[id]) { lbOpen(id); return; }
+		b.disabled = true;
+		api('/photos/library/card?photo=' + id).then(function(card){
+			if (typeof lgrid !== 'undefined' && lgrid) { lgrid._photos = lgrid._photos || {}; lgrid._photos[card.id] = card; }
+			lbOpen(card.id, false, card);
+		}, function(e){ b.disabled = false; b.textContent = (e && e.message) || 'Could not open it'; });
+	});
 	document.addEventListener('click', function(ev){
 		var b = ev.target.closest ? ev.target.closest('.pnearkeep') : null;
 		if (!b) { return; }

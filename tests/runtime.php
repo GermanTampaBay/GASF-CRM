@@ -1096,6 +1096,13 @@ final class GASF_CRM_Selftest {
 		$js = (string) file_get_contents( GASF_CRM_DIR . '/ui-script.php' );
 		$this->ok( false !== strpos( $js, 'function nearNote(p)' ) && false !== strpos( $js, 'h += nearNote(p);' ) && false !== strpos( $js, 'if (p.near) { bits.push(nearNote(p)); }' ),
 			'near: the review screen and the library editor both show the note' );
+		$this->ok( false !== strpos( $js, 'target="_blank" rel="noopener" title="Open #' ) && false !== strpos( $js, "api('/photos/library/card?photo=' + id)" ),
+			'near: the twin opens full size in a new tab, or in the viewer here' );
+		$lib = (string) file_get_contents( GASF_CRM_DIR . '/photos-library.php' );
+		$this->ok( false !== strpos( $lib, "'/crm/photos/library/card', array(\n\t\t'methods'             => 'GET',\n\t\t'permission_callback' => \$lib_guard," ),
+			'near: the single-card route is behind the library guard' );
+		$css = (string) file_get_contents( GASF_CRM_DIR . '/ui-styles.php' );
+		$this->ok( false !== strpos( $css, '.pnear{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:#2b2b2b' ), 'near: the note sets its own text colour, so the viewer\'s white does not reach it' );
 	}
 
 	/** Five or more door photos carry the batch's names as chips; a photo tapped off sends its own list. */

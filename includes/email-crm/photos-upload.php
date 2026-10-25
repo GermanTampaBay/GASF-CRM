@@ -427,6 +427,7 @@ function gasf_crm_photo_near_info( $attachment_id ) {
 		'id'       => $other,
 		'distance' => (int) ( $near['distance'] ?? 0 ),
 		'thumb'    => function_exists( 'gasf_crm_photo_img_url' ) ? gasf_crm_photo_img_url( $other, 'medium' ) : '',
+		'full'     => function_exists( 'gasf_crm_photo_img_url' ) ? gasf_crm_photo_img_url( $other, 'large' ) : '',
 		'title'    => function_exists( 'gasf_crm_photo_display_title' ) ? gasf_crm_photo_display_title( $other ) : (string) get_the_title( $other ),
 		'where'    => ( function_exists( 'gasf_crm_photo_is_private' ) && gasf_crm_photo_is_private( $other ) ) ? 'waiting for review' : 'in the library',
 	);

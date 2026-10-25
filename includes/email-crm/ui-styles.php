@@ -675,9 +675,15 @@ input:focus,select:focus,textarea:focus,.edbody:focus{
 .lf-where .ptile[aria-pressed="true"]{background:#0f6e56;border-color:#0f6e56;color:#fff;opacity:1}
 .lf-where select{margin-top:4px}
 /* "Looks like a copy of #N": the twin's picture beside the words. */
-.pnear{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.pnear img{height:56px;width:auto;border-radius:3px;flex:0 0 auto}
-.pnear span{flex:1 1 200px}
+/* Its own colours: inside the viewer the info panel's text is white, and
+   white on this cream was unreadable. */
+.pnear{display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:#2b2b2b;text-align:left}
+.pnear a{color:#1d4ed8}
+.pnear strong{color:inherit}
+.pnear img{height:56px;width:auto;border-radius:3px;flex:0 0 auto;display:block}
+.pnear>span{flex:1 1 200px}
+.pnear .pnearacts{flex:0 0 auto;display:flex;gap:6px;flex-wrap:wrap}
+.pnear .pnearacts .btn{color:#2b2b2b}
 /* "One name per box, please" under a name box that holds several. */
 .pnote{display:block;font-size:11px;color:#b3261e;margin:2px 0 0 2px}
 .lf-ev input{width:100%}
