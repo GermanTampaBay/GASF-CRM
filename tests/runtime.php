@@ -1144,6 +1144,43 @@ final class GASF_CRM_Selftest {
 		foreach ( array( $tmp, $tmp2 ) as $t ) { @unlink( $t ); } // phpcs:ignore WordPress.PHP.NoSilencedErrors
 	}
 
+	/** A picture in a news post is not a library photo, so it is never somebody's twin. */
+	public function test_near_ignores_pictures_outside_the_library() {
+		$h    = substr( md5( uniqid( '', true ) ), 0, 16 );
+		$site = wp_insert_attachment( array( 'post_title' => 'st-site-image', 'post_mime_type' => 'image/jpeg', 'post_status' => 'inherit' ), '' );
+		$this->made[] = $site;
+		update_post_meta( $site, '_gasf_photo_dhash', $h );
+		$this->ok( ! gasf_crm_photo_near_eligible( $site ), 'near scope: an attachment with no catalogue standing is not eligible' );
+		$this->ok( null === gasf_crm_photo_near_find( $h, 0 ), 'near scope: a hash that only a site image carries finds nothing' );
+
+		$lib = $this->library_photo( 'st-near-scope-lib' );
+		update_post_meta( $lib, '_gasf_photo_dhash', $h );
+		$this->ok( gasf_crm_photo_near_eligible( $lib ), 'near scope: a library photo is eligible' );
+		$found = gasf_crm_photo_near_find( $h, $site );
+		$this->ok( $found && $lib === $found['id'], 'near scope: a library photo is still found beside the site image' );
+
+		$held = $this->held_photo( 'st-near-scope-held' );
+		$this->ok( gasf_crm_photo_near_eligible( $held ), 'near scope: a photo waiting for review is eligible too' );
+
+		// A note raised before the scope was fixed, pointing at a site image, comes off by itself.
+		$new = $this->library_photo( 'st-near-scope-new' );
+		update_post_meta( $new, '_gasf_photo_near', array( 'id' => $site, 'distance' => 0, 'at' => time() ) );
+		$this->ok( null === gasf_crm_photo_near_info( $new ) && ! get_post_meta( $new, '_gasf_photo_near', true ),
+			'near scope: an old note that points at a site image is cleared when the card is read' );
+
+		update_post_meta( $new, '_gasf_photo_dhash', $h );
+		$in_report = false; $with_site = false;
+		foreach ( gasf_crm_photo_twins() as $pr ) {
+			if ( $pr['a'] === min( $lib, $new ) && $pr['b'] === max( $lib, $new ) ) { $in_report = true; }
+			if ( in_array( $site, array( $pr['a'], $pr['b'] ), true ) ) { $with_site = true; }
+		}
+		$this->ok( $in_report && ! $with_site, 'near scope: the twins report lists the library pair and none that involves the site image' );
+
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/photos-upload.php' );
+		$this->ok( false !== strpos( $src, 'if ( ! gasf_crm_photo_near_eligible( (int) $r->post_id ) ) { continue; }' ) && false === strpos( $src, "if ( 'attachment' !== get_post_type( (int) \$r->post_id ) ) { continue; }" ),
+			'near scope: the finder asks for catalogue standing, not just an attachment' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );

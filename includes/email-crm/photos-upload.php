@@ -365,6 +365,24 @@ function gasf_crm_photo_dhash_distance( $a, $b ) {
 }
 
 /**
+ * Is this a photo the club's catalogue holds - in the library, or waiting for
+ * a volunteer? Only those can be twins.
+ *
+ * The hash sweep covers every image attachment on the site, and a site has
+ * pictures that are not catalogue photos: the Facebook-share images attached
+ * to news posts, theme art, logos. The first version matched against all of
+ * them, so a volunteer was told to "delete this one as usual" about a copy
+ * that was never in the library and was, in fact, the picture in a published
+ * post. A match is only worth raising when both photos are the library's.
+ */
+function gasf_crm_photo_near_eligible( $attachment_id ) {
+	$id = (int) $attachment_id;
+	if ( ! $id || 'attachment' !== get_post_type( $id ) ) { return false; }
+	return ( function_exists( 'gasf_crm_photo_in_library' ) && gasf_crm_photo_in_library( $id ) )
+		|| ( function_exists( 'gasf_crm_photo_awaits_review' ) && gasf_crm_photo_awaits_review( $id ) );
+}
+
+/**
  * The closest other photo within the distance, as {id, distance}, or null.
  *
  * One query over every stored hash and a sixteen-step compare each: five
@@ -381,7 +399,7 @@ function gasf_crm_photo_near_find( $hash, $exclude = 0, $max = GASF_CRM_NEAR_DIS
 	foreach ( (array) $rows as $r ) {
 		$d = gasf_crm_photo_dhash_distance( $hash, $r->meta_value );
 		if ( $d > $max || ( $best && $d >= $best['distance'] ) ) { continue; }
-		if ( 'attachment' !== get_post_type( (int) $r->post_id ) ) { continue; }
+		if ( ! gasf_crm_photo_near_eligible( (int) $r->post_id ) ) { continue; }
 		$best = array( 'id' => (int) $r->post_id, 'distance' => $d );
 	}
 	return $best;
@@ -419,7 +437,9 @@ function gasf_crm_photo_near_info( $attachment_id ) {
 	$near = get_post_meta( $id, '_gasf_photo_near', true );
 	if ( ! is_array( $near ) || empty( $near['id'] ) ) { return null; }
 	$other = (int) $near['id'];
-	if ( 'attachment' !== get_post_type( $other ) ) {
+	// Gone, or never a catalogue photo (a note raised before 2.106.1 could point
+	// at a picture in a news post): there is no twin, and the note comes off.
+	if ( ! gasf_crm_photo_near_eligible( $other ) ) {
 		delete_post_meta( $id, '_gasf_photo_near' );
 		return null;
 	}
@@ -527,6 +547,9 @@ function gasf_crm_photo_twins( $max = GASF_CRM_NEAR_DISTANCE ) {
 			}
 		}
 	}
+	$pairs = array_values( array_filter( $pairs, function ( $pr ) {
+		return gasf_crm_photo_near_eligible( $pr['a'] ) && gasf_crm_photo_near_eligible( $pr['b'] );
+	} ) );
 	usort( $pairs, function ( $x, $y ) { return $x['distance'] <=> $y['distance'] ?: $x['a'] <=> $y['a']; } );
 	return $pairs;
 }
