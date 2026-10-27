@@ -2824,7 +2824,7 @@ function gasf_crm_render_inbox_script() {
 				// Named, not rendered as a broken image: "the file is gone" and
 				// "the page is broken" look identical otherwise, and only one of
 				// them is worth anybody's time.
-				? '<div class="note err">The image file is missing from the server, though its record is still here. ' +
+				? '<div class="note err">The image file is missing or empty on the server, though its record is still here. ' +
 				  'Nothing can be done with it — reject it.</div>'
 				: '<div class="pbigwrap"><button type="button" class="pbig" aria-label="Open this photo full size">' +
 				  '<img src="' + esc(p.full || p.thumb) + '" alt=""></button></div>';

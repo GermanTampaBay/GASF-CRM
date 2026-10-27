@@ -158,6 +158,11 @@ function gasf_crm_backup_folder( $year ) {
 function gasf_crm_backup_put( $folder, $name, $path ) {
 	$cfg  = gasf_crm_backup_cfg();
 	$size = (int) filesize( $path );
+	// An empty body goes out with no Content-Length, and Graph answers 411 - an
+	// error that says nothing about the file being empty. Say so here instead.
+	if ( $size < 1 ) {
+		return new WP_Error( 'gasf_crm_backup_empty', basename( $path ) . ' is empty (0 bytes) on this server, so there is nothing to back up.' );
+	}
 	$base = 'https://graph.microsoft.com/v1.0/drives/' . rawurlencode( $cfg['drive_id'] )
 		. '/root:/' . str_replace( '%2F', '/', rawurlencode( $folder . '/' . $name ) ) . ':';
 
@@ -652,6 +657,8 @@ function gasf_crm_backup_run( $dry = false ) {
 	@ini_set( 'max_execution_time', '300' ); // phpcs:ignore WordPress.PHP.NoSilencedErrors,WordPress.PHP.IniSet
 
 	$ids        = gasf_crm_photo_library_ids();
+	$parked     = gasf_crm_backup_damaged();
+	$parked_was = $parked;
 	$done       = 0;
 	$bytes      = 0;
 	$fail       = 0;
@@ -661,6 +668,16 @@ function gasf_crm_backup_run( $dry = false ) {
 	foreach ( $ids as $id ) {
 		if ( $done >= GASF_CRM_BACKUP_MAX_ITEMS || $bytes >= GASF_CRM_BACKUP_MAX_BYTES ) { break; }
 		if ( microtime( true ) - $t0 > 180 ) { break; } // leave the cron slot politely
+
+		// An empty file cannot be sent and no retry changes that: park it.
+		if ( gasf_crm_backup_source_empty( $id ) ) {
+			if ( ! isset( $parked[ (int) $id ] ) ) {
+				$parked[ (int) $id ] = time();
+				gasf_crm_log( sprintf( 'Backup: #%d has an EMPTY file on this server and cannot be backed up - set aside, not counted as a failure. Send the photo again, then delete this one.', $id ) );
+			}
+			continue;
+		}
+		if ( isset( $parked[ (int) $id ] ) ) { unset( $parked[ (int) $id ] ); } // it has a file again
 
 		$why = gasf_crm_backup_needed( $id );
 		if ( '' === $why ) { continue; }
@@ -725,7 +742,13 @@ function gasf_crm_backup_run( $dry = false ) {
 		if ( $removed ) { update_option( 'gasf_crm_backup_index', $index, false ); }
 	}
 
-	$out = array( 'backed_up' => $done, 'failed' => $fail, 'removed' => $removed, 'bytes' => $bytes );
+	if ( ! $dry ) {
+		// A photo that has left the library is no longer anybody's to fix.
+		$parked = array_intersect_key( $parked, array_flip( array_map( 'intval', $ids ) ) );
+		if ( $parked !== $parked_was ) { update_option( 'gasf_crm_backup_damaged', $parked, false ); }
+	}
+
+	$out = array( 'backed_up' => $done, 'failed' => $fail, 'removed' => $removed, 'bytes' => $bytes, 'parked' => count( $parked ) );
 	if ( $done || $fail || $removed ) {
 		gasf_crm_log( sprintf( 'Backup: pass complete — %d up (%s), %d failed, %d removed, %.1fs',
 			$done, size_format( $bytes ), $fail, $removed, microtime( true ) - $t0 ) );
@@ -785,6 +808,30 @@ function gasf_crm_backup_run( $dry = false ) {
  * banner still appears, because it is computed at admin request time from the
  * stored record, and last_ok going stale IS the signal.
  * -------------------------------------------------------------------------- */
+
+/*
+ * Photos whose file on this server is EMPTY.
+ *
+ * One of these - #35203, a Google Photos import whose file came out of intake
+ * at 0 bytes - failed every pass for two days with HTTP 411, turned the whole
+ * backup red, and emailed every administrator daily about a problem no retry
+ * could fix. A photo with nothing in it is not the backup being unhealthy; it
+ * is one damaged photo, and wants a person to send it again. So it is parked:
+ * left out of the failure count, remembered here, and shown in its own banner
+ * until the file is replaced or the photo is gone.
+ */
+function gasf_crm_backup_source_empty( $id ) {
+	$f = get_attached_file( (int) $id );
+	if ( ! $f || ! is_file( $f ) ) { return false; }
+	clearstatcache( true, $f );
+	return 0 === (int) filesize( $f );
+}
+
+/** id => the time it was first seen empty. */
+function gasf_crm_backup_damaged() {
+	$d = get_option( 'gasf_crm_backup_damaged', array() );
+	return is_array( $d ) ? $d : array();
+}
 
 function gasf_crm_backup_health() {
 	return wp_parse_args( (array) get_option( 'gasf_crm_backup_health', array() ), array(
@@ -865,6 +912,18 @@ add_action( 'admin_notices', function () {
 	if ( ! current_user_can( 'manage_options' ) ) { return; }
 	$cfg = gasf_crm_backup_cfg();
 	if ( empty( $cfg['enabled'] ) ) { return; }
+
+	// Damaged photos get their own notice and never hide - or are hidden by -
+	// the health banners below: the backup can be perfectly healthy and still
+	// be unable to hold one photo.
+	$damaged = array_map( 'intval', array_keys( gasf_crm_backup_damaged() ) );
+	if ( $damaged ) {
+		echo '<div class="notice notice-warning"><p><strong>Photo backup:</strong> '
+			. count( $damaged ) . ' photo(s) cannot be backed up because their file on this server is empty ('
+			. esc_html( '#' . implode( ', #', array_slice( $damaged, 0, 10 ) ) )
+			. '). They arrived damaged. Send each photo again, then delete the empty one. '
+			. 'The rest of the backup is not affected.</p></div>';
+	}
 
 	$h = gasf_crm_backup_health();
 	if ( ! $h['last_ok'] ) { return; }

@@ -2646,7 +2646,9 @@ function gasf_crm_photo_card( $attachment_id ) {
 	// image and says nothing, which is the worst of both — it looks like the
 	// page is broken rather than the photo being absent. Say which it is.
 	$path    = get_attached_file( $id );
-	$missing = ! $path || ! file_exists( $path );
+	// Missing, or there at 0 bytes - the second reads as a blank picture, which
+	// is the "page is broken" look this flag exists to explain.
+	$missing = ! $path || ! file_exists( $path ) || 0 === (int) filesize( $path );
 
 	// Private until approved, so these go through the handler rather than
 	// straight at the uploads folder.

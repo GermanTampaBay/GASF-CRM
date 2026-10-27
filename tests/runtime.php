@@ -534,6 +534,42 @@ final class GASF_CRM_Selftest {
 		$this->ok( gasf_crm_backup_deletions_allowed( 0, 0, 0 ), 'backup floor: nothing to delete is always fine' );
 	}
 
+	/** A photo whose file is empty is parked - never uploaded, never a failure, always visible. */
+	public function test_backup_parks_empty_files() {
+		$this->snapshot_option( 'gasf_crm_backup_damaged' );
+		$id = $this->library_photo( 'st-empty-src' );
+		$f  = get_attached_file( $id );
+		$this->ok( ! gasf_crm_backup_source_empty( $id ) && gasf_crm_photo_file_landed( $f ), 'empty files: a photo with bytes is neither empty nor unlanded' );
+		file_put_contents( $f, '' );
+		$this->ok( gasf_crm_backup_source_empty( $id ) && ! gasf_crm_photo_file_landed( $f ), 'empty files: a 0-byte file is empty, and has not landed' );
+		$this->ok( ! gasf_crm_backup_source_empty( 0 ) && ! gasf_crm_backup_source_empty( 999999999 ), 'empty files: a photo with no file is missing, not empty' );
+
+		$r = gasf_crm_backup_put( 'Nowhere/2026', 'st-empty.jpg', $f );
+		$this->ok( is_wp_error( $r ) && 'gasf_crm_backup_empty' === $r->get_error_code() && false !== strpos( $r->get_error_message(), 'is empty (0 bytes)' ),
+			'empty files: the upload is refused up front, in words, instead of as HTTP 411' );
+
+		$run = (string) file_get_contents( GASF_CRM_DIR . '/photos-backup.php' );
+		$this->ok( false !== strpos( $run, "if ( gasf_crm_backup_source_empty( \$id ) ) {" ) && false !== strpos( $run, 'not counted as a failure' ),
+			'empty files: the pass sets an empty photo aside before judging whether it is needed' );
+		$this->ok( false !== strpos( $run, "update_option( 'gasf_crm_backup_damaged', \$parked, false );" ) && false !== strpos( $run, "'parked' => count( \$parked )" ),
+			'empty files: the parked list is saved, and reported by the pass' );
+		$this->ok( false !== strpos( $run, 'cannot be backed up because their file on this server is empty' ) && false !== strpos( $run, 'The rest of the backup is not affected.' ),
+			'empty files: the banner names them and says the backup itself is fine' );
+		// The banner must come BEFORE the health banners' early returns, or a failing
+		// backup would hide it.
+		$notice_at = strpos( $run, 'array_keys( gasf_crm_backup_damaged() )' );
+		$health_at = strpos( $run, '$failing = $h[\'last_error_at\'] > $h[\'last_ok\'];' );
+		$this->ok( false !== $notice_at && false !== $health_at && $notice_at < $health_at,
+			'empty files: the damaged-photo notice is not hidden by the health notices' );
+
+		$up = (string) file_get_contents( GASF_CRM_DIR . '/photos-upload.php' );
+		$this->ok( false !== strpos( $up, '! gasf_crm_photo_file_landed( $path ) ) : ( gasf_crm_photo_is_private( $id ) || ! $path || ! gasf_crm_photo_file_landed( $path ) )' ),
+			'empty files: intake refuses a photo whose stored file came out empty' );
+
+		$lib = (string) file_get_contents( GASF_CRM_DIR . '/photos.php' );
+		$this->ok( false !== strpos( $lib, '|| 0 === (int) filesize( $path );' ), 'empty files: the review card treats an empty file as missing' );
+	}
+
 	/** A current photo is recognised by size and mtime, without hashing it. */
 	public function test_backup_stat_before_md5() {
 		$id   = $this->library_photo( 'st-stat' );

@@ -298,6 +298,14 @@ add_action( 'init', function () {
 	if ( function_exists( 'gasf_crm_cron_ensure' ) ) { gasf_crm_cron_ensure( 'gasf_crm_photo_sizes_event', 120 ); }
 } );
 
+/** A file that is there AND has something in it. */
+function gasf_crm_photo_file_landed( $path ) {
+	$path = (string) $path;
+	if ( '' === $path || ! is_file( $path ) ) { return false; }
+	clearstatcache( true, $path );
+	return (int) filesize( $path ) > 0;
+}
+
 /* =====================================================================
  * Near-duplicates: the same picture, re-encoded
  * ================================================================== */
@@ -1154,7 +1162,9 @@ function gasf_crm_photo_upload_one( array $f, array $in ) {
 	// limited-scope upload the moment the branch above started honouring the
 	// permission — the protection eating exactly what it was taught to protect.
 	$expect_private = $hold || ! $web_allowed;
-	if ( $expect_private ? ( ! $path || ! is_file( $path ) ) : ( gasf_crm_photo_is_private( $id ) || ! $path || ! is_file( $path ) ) ) {
+	// "There" now means there with something in it: a file can exist at 0 bytes
+	// (2.106.2 - #35203 did), and a photo of nothing is not filed away safely.
+	if ( $expect_private ? ( ! $path || ! gasf_crm_photo_file_landed( $path ) ) : ( gasf_crm_photo_is_private( $id ) || ! $path || ! gasf_crm_photo_file_landed( $path ) ) ) {
 		gasf_crm_log( sprintf( 'CRM upload: media #%d did not publish cleanly (still private=%s, file=%s) — removed',
 			$id, gasf_crm_photo_is_private( $id ) ? 'yes' : 'no', $path ?: 'none' ) );
 		wp_delete_attachment( $id, true );
