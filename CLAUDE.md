@@ -112,7 +112,7 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 960 assertions in 127 tests, run on the server against live
+- **`tests/runtime.php`** — 970 assertions in 128 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
   that survives fatals, options snapshotted, mail disabled. **Never point a test
@@ -181,7 +181,14 @@ club may keep it but never show it. **Enforced in the zip export.**
 **Backup** — mirrors every library photo plus a JSON sidecar to the Teams
 "Photo Archive" (SharePoint) via Graph. Failed deletions go to a retry queue;
 orphans stuck past a day raise their own admin banner. Health alerts email the
-WP admins after 24h without a clean pass.
+WP admins after 24h without a clean pass. **A photo whose file on this server is
+0 bytes is parked, not failed** (2.106.2, `gasf_crm_backup_damaged`): it cannot
+be uploaded (Graph answers HTTP 411 to an empty PUT), no retry fixes it, and
+one such photo - #35203, a Google Photos import - once kept the whole backup
+red and the admins emailed daily for two days. It gets its own wp-admin notice
+instead. What emptied that file was never established (it arrived as a valid
+image, was zeroed within the second, nothing was logged, no copy survives),
+so intake now also refuses a stored file with no bytes in it.
 
 **Face suggestions** (`photos-faces.php`, v2.15.0) — see below. Since 2.100.0
 every deleted image leaves a dated tombstone (`gasf_face_tombstones`, 180
@@ -433,7 +440,7 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.106.1** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.106.2** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
