@@ -112,10 +112,12 @@ instead (see `test_revision_bump`) rather than a scenario that passes either way
 
 ## Tests
 
-- **`tests/runtime.php`** — 970 assertions in 128 tests, run on the server against live
+- **`tests/runtime.php`** — 973 assertions in 129 tests, run on the server against live
   WordPress (there is no second environment) after **every** deploy, no
   exceptions. Safe by construction: synthetic fixtures only, a shutdown reaper
-  that survives fatals, options snapshotted, mail disabled. **Never point a test
+  that survives fatals and also deletes any file left beside a fixture (by its
+  random-numbered name, in uploads and the private store), options snapshotted,
+  mail disabled. **Never point a test
   at a real photo** — a drill once did, died before its restore line, and left
   drill data in a member's consent record.
   - Add an assertion with every behavioural change. A fix with no test is a fix
