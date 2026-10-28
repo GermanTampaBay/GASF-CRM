@@ -47,8 +47,11 @@ final class GASF_CRM_Selftest {
 	/** Options snapshotted before a test altered them. */
 	private $saved_options = array();
 
-	/** Upload-relative paths of library fixtures, without extension - see cleanup(). */
+	/** Upload-relative paths of library fixtures, without extension - see reap(). */
 	private $made_stems = array();
+
+	/** Full paths of fixture files, without extension, in every place one can be - see reap(). */
+	private $made_files = array();
 
 	/** The newest term id when the run began; anything a test strands is above it. */
 	private $term_floor = null;
@@ -151,6 +154,27 @@ final class GASF_CRM_Selftest {
 		}
 		$this->made_stems = array();
 
+		/*
+		 * Then whatever is still on disk beside them.
+		 *
+		 * Deleting an attachment deletes the files its metadata names, and no
+		 * others. On 2026-10-02 public uploads held 1,004 WebP files from this
+		 * suite, two for each library fixture of every run, which nothing
+		 * deleted. The optimiser that wrote them no longer sees a fixture, but
+		 * the thumbnail sweeper takes the newest photos first, and a resize it
+		 * makes mid-test is orphaned the moment a test rewrites the metadata.
+		 * Every fixture name carries a random number, so "<stem>.*" and
+		 * "<stem>-*" are this run's files and nobody else's - and only stems a
+		 * fixture helper wrote down, still in a fixture's shape, are swept.
+		 */
+		foreach ( $this->made_files as $stem ) {
+			if ( ! preg_match( '~/st-[a-z0-9-]+-\d+$~', $stem ) ) { continue; }
+			foreach ( array_merge( glob( $stem . '.*' ) ?: array(), glob( $stem . '-*' ) ?: array() ) as $f ) {
+				if ( is_file( $f ) && ! @unlink( $f ) ) { echo "  cleanup could not remove $f\n"; } // phpcs:ignore WordPress.PHP.NoSilencedErrors
+			}
+		}
+		$this->made_files = array();
+
 		foreach ( $this->made_people as $term_id ) {
 			if ( term_exists( $term_id, 'gasf_photo_person' ) ) {
 				wp_delete_term( $term_id, 'gasf_photo_person' );
@@ -234,6 +258,20 @@ final class GASF_CRM_Selftest {
 		return substr( $jpeg, 0, 2 ) . $app1 . substr( $jpeg, 2 );
 	}
 
+	/**
+	 * Note every place a fixture's files can be, for reap() to sweep.
+	 *
+	 * Both places, whichever it starts in: publishing moves a held photo into
+	 * this month's uploads folder, and a consent that rules out the web moves a
+	 * library photo into the private store. Either way it keeps its name, with
+	 * a number added if that name was taken.
+	 */
+	private function track_files( $name ) {
+		$stem = substr( $name, 0, -4 );
+		$this->made_files[] = trailingslashit( wp_upload_dir()['path'] ) . $stem;
+		$this->made_files[] = trailingslashit( gasf_crm_photo_private_root() ) . $stem;
+	}
+
 	/** A synthetic photo in the LIBRARY (published area, confirmed). */
 	private function library_photo( $slug ) {
 		// Written straight to disk, not through wp_upload_bits(): that fires
@@ -243,6 +281,7 @@ final class GASF_CRM_Selftest {
 		$name = $slug . '-' . wp_rand() . '.jpg';
 		$up   = array( 'file' => trailingslashit( $dir['path'] ) . $name );
 		file_put_contents( $up['file'], $this->jpeg_bytes() );
+		$this->track_files( $name );
 		$rel = ltrim( trailingslashit( ltrim( (string) $dir['subdir'], '/' ) ) . $name, '/' );
 		$this->made_stems[] = substr( $rel, 0, -4 );
 
@@ -272,6 +311,7 @@ final class GASF_CRM_Selftest {
 		$rel  = GASF_CRM_PHOTO_REVIEW_DIR . '/' . $name;
 		$path = trailingslashit( $dir ) . $name;
 		file_put_contents( $path, null === $bytes ? $this->jpeg_bytes() : $bytes );
+		$this->track_files( $name );
 
 		$id = wp_insert_attachment( array(
 			'post_title' => $slug, 'post_mime_type' => 'image/jpeg', 'post_status' => 'private',
@@ -5958,6 +5998,38 @@ final class GASF_CRM_Selftest {
 			}
 			$wpdb->query( $wpdb->prepare( 'DELETE FROM ' . gasf_crm_table( 'events' ) . ' WHERE thread_id = %d', $tid ) );
 			$wpdb->query( $wpdb->prepare( "DELETE FROM {$T} WHERE id = %d", $tid ) );
+		}
+	}
+
+	/**
+	 * A file left beside a fixture goes with it, wherever the fixture went.
+	 *
+	 * Pins the reaper, not any one way a file gets there: the host's optimiser
+	 * once left two beside every library fixture, 1,004 before anybody counted,
+	 * and the next thing to do it will not announce itself either.
+	 */
+	public function test_reap_sweeps_beside_fixtures() {
+		$lib  = $this->library_photo( 'st-beside' );
+		$held = $this->held_photo( 'st-beside-held' );
+		$up   = trailingslashit( wp_upload_dir()['path'] );
+		$priv = trailingslashit( gasf_crm_photo_private_root() );
+		$a    = pathinfo( (string) get_post_meta( $lib, '_wp_attached_file', true ), PATHINFO_FILENAME );
+		$b    = pathinfo( (string) get_post_meta( $held, '_wp_attached_file', true ), PATHINFO_FILENAME );
+		$left = array(
+			$up . $a . '.webp', $up . $a . '-100x75.webp', // what the host's optimiser used to leave
+			$priv . $b . '-150x150.jpg',                   // a resize no metadata names
+			$up . $b . '.webp', $priv . $a . '-1.jpg',     // each in the other's home: publishing and withdrawing move them
+		);
+		$near = $up . $a . '0.webp';                       // another fixture's number can begin with this one's
+		foreach ( array_merge( $left, array( $near ) ) as $f ) { file_put_contents( $f, 'selftest' ); }
+		try {
+			$this->reap();
+			clearstatcache();
+			$this->ok( ! is_file( $up . $a . '.jpg' ) && ! is_file( $priv . $b . '.jpg' ), 'reap: the fixtures themselves are gone' );
+			$this->ok( ! array_filter( $left, 'is_file' ), 'reap: and so is every file left beside them, in either place a photo can be' );
+			$this->ok( is_file( $near ), 'reap: but not a file whose name only begins the same way' );
+		} finally {
+			@unlink( $near ); // phpcs:ignore WordPress.PHP.NoSilencedErrors
 		}
 	}
 
