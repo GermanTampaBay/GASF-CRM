@@ -104,6 +104,10 @@ if ( true ) {
 	// After photos-library.php: face suggestions read library membership and
 	// term names, and store nothing the library itself reads.
 	require_once GASF_CRM_DIR . '/photos-faces.php';
+	// After photos-faces.php and photos-kiosk.php: kiosk tag suggestions
+	// compare names with gasf_crm_face_name_same() and sit behind the kiosk
+	// feed's own token guard.
+	require_once GASF_CRM_DIR . '/photos-kiosk-tags.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
 	// The agreement's own words and blanks, split from the plumbing so that

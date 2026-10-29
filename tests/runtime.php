@@ -3401,6 +3401,103 @@ final class GASF_CRM_Selftest {
 		delete_post_meta( $id, '_gasf_photo_flyer' );
 	}
 
+	/**
+	 * Names typed at the kiosk are held for a volunteer, never written as tags.
+	 *
+	 * Pins the whole contract the NUC's retrying outbox relies on: a ref seen
+	 * once is answered "duplicate" for ever after (so a lost answer cannot
+	 * double a suggestion, and a late retry cannot bring back one a volunteer
+	 * dismissed), refusals carry the status the NUC uses to decide whether to
+	 * retry, and nothing a visitor types reaches the taxonomy, the kiosk card,
+	 * or the backup sidecar until a save puts it there.
+	 */
+	public function test_kiosk_tags() {
+		$hour = gasf_crm_kiosk_tags_hour_key();
+		$had  = get_transient( $hour );
+		try {
+			$id  = $this->library_photo( 'st-kiosk-tag' );
+			$ref = 'selftest-' . wp_rand( 100000, 999999 );
+			$in  = array( 'photo' => $id, 'first' => 'Selftestina', 'last' => '', 'fx' => 0.25, 'fy' => 0.75, 'rev' => gasf_crm_photo_revision( $id ), 'ref' => $ref );
+
+			$r = gasf_crm_kiosk_tag_submit( $in );
+			$this->ok( is_array( $r ) && 'stored' === $r['status'], 'kiosk tags: a first name alone is taken in' );
+			$rows = gasf_crm_kiosk_tags_for( $id );
+			$this->ok( 1 === count( $rows ) && 'Selftestina' === $rows[0]['name'], 'kiosk tags: and is read back from the photo' );
+			$this->ok( 0.25 === $rows[0]['fx'] && 0.75 === $rows[0]['fy'], 'kiosk tags: with the spot as fractions of the picture' );
+			$this->ok( ! gasf_crm_photo_term_names( $id, 'gasf_photo_person' ), 'kiosk tags: no person term is written' );
+			$this->ok( ! in_array( 'Selftestina', (array) gasf_kiosk_photo_card( $id )['people'], true ), 'kiosk tags: the kiosk card does not show it' );
+			$side = wp_json_encode( gasf_crm_backup_sidecar( $id ) );
+			$this->ok( false === strpos( (string) $side, 'Selftestina' ), 'kiosk tags: the backup sidecar does not carry it' );
+			$this->ok( in_array( $id, gasf_crm_photo_library_filter( array( $id ), array( 'review' => 'kiosk' ) ), true ), 'kiosk tags: the Named at the kiosk filter finds the photo' );
+
+			$r = gasf_crm_kiosk_tag_submit( $in );
+			$this->ok( is_array( $r ) && 'duplicate' === $r['status'] && 1 === count( gasf_crm_kiosk_tags_for( $id ) ), 'kiosk tags: a retried ref is not stored twice' );
+
+			$again = array_merge( $in, array( 'ref' => $ref . '-b', 'first' => 'selftestina' ) );
+			$r = gasf_crm_kiosk_tag_submit( $again );
+			$rows = gasf_crm_kiosk_tags_for( $id );
+			$this->ok( is_array( $r ) && 'merged' === $r['status'] && 1 === count( $rows ) && 2 === $rows[0]['count'], 'kiosk tags: the same name again is counted, not queued twice' );
+
+			$bad = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-c', 'first' => 'R2D2' ) ) );
+			$this->ok( is_wp_error( $bad ) && 400 === (int) ( $bad->get_error_data()['status'] ?? 0 ), 'kiosk tags: a name with digits is refused as final (400)' );
+			$bad = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-d', 'last' => '<b>' ) ) );
+			$this->ok( is_wp_error( $bad ) && 400 === (int) ( $bad->get_error_data()['status'] ?? 0 ), 'kiosk tags: an unusable last name is refused, not silently dropped' );
+			$bad = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-e', 'fx' => 1.5 ) ) );
+			$this->ok( is_wp_error( $bad ), 'kiosk tags: a spot off the picture is refused' );
+			$ok = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-f', 'first' => 'Hans-Jürgen', 'last' => "O\u{2019}Brien" ) ) );
+			$this->ok( is_array( $ok ) && 'stored' === $ok['status'], 'kiosk tags: hyphens, umlauts and curly apostrophes are names' );
+
+			$tag = '';
+			foreach ( gasf_crm_kiosk_tags_for( $id ) as $row ) { if ( 'Selftestina' === $row['name'] ) { $tag = $row['id']; } }
+			$this->ok( gasf_crm_kiosk_tag_dismiss( $id, $tag ), 'kiosk tags: a volunteer can dismiss one' );
+			$person = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-p', 'first' => 'Selftestperson', 'last' => 'Kiosk' ) ) );
+			$this->ok( is_array( $person ) && 'stored' === $person['status'], 'kiosk tags: a first and last name are taken in together' );
+			$r = gasf_crm_kiosk_tag_submit( $in );
+			$names = wp_list_pluck( gasf_crm_kiosk_tags_for( $id ), 'name' );
+			$this->ok( is_array( $r ) && 'duplicate' === $r['status'] && ! in_array( 'Selftestina', $names, true ), 'kiosk tags: a late retry does not bring a dismissed one back' );
+
+			// Approval is a save that puts the name on the photo.
+			$term = $this->person_term( 'Selftestperson Kiosk' );
+			if ( ! is_wp_error( $term ) ) {
+				wp_set_object_terms( $id, array( (int) $term['term_id'] ), 'gasf_photo_person' );
+				$this->ok( 1 === gasf_crm_kiosk_tags_prune_tagged( $id ), 'kiosk tags: naming the person on the photo clears that suggestion' );
+				$this->ok( 1 === count( gasf_crm_kiosk_tags_for( $id ) ), 'kiosk tags: and leaves the others waiting' );
+				$r = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-g', 'first' => 'Selftestperson', 'last' => 'Kiosk' ) ) );
+				$this->ok( is_array( $r ) && 'already_tagged' === $r['status'] && 1 === count( gasf_crm_kiosk_tags_for( $id ) ), 'kiosk tags: a name already on the photo needs nobody' );
+			} else {
+				$this->ok( false, 'kiosk tags: could not make the person term the approval check needs' );
+			}
+
+			// Only what the kiosk may show.
+			$this->consent( $id, 'refused' );
+			$bad = gasf_crm_kiosk_tag_submit( array_merge( $in, array( 'ref' => $ref . '-h' ) ) );
+			$this->ok( is_wp_error( $bad ) && 404 === (int) ( $bad->get_error_data()['status'] ?? 0 ), 'kiosk tags: a photo the kiosk may not show takes no suggestions' );
+
+			$this->ok( is_wp_error( gasf_kiosk_guard( new WP_REST_Request( 'POST', '' ) ) ), 'kiosk tags: the route refuses a request with no kiosk token' );
+		} finally {
+			if ( false === $had ) { delete_transient( $hour ); } else { set_transient( $hour, $had, 2 * HOUR_IN_SECONDS ); }
+		}
+		$this->ok( get_transient( $hour ) === $had, 'kiosk tags: the hourly counter is put back as it was' );
+	}
+
+	/**
+	 * The hourly ceiling answers 429, which the NUC retries, without storing.
+	 */
+	public function test_kiosk_tags_hourly_cap() {
+		$hour = gasf_crm_kiosk_tags_hour_key();
+		$had  = get_transient( $hour );
+		try {
+			$id = $this->library_photo( 'st-kiosk-cap' );
+			set_transient( $hour, GASF_CRM_KIOSK_TAGS_PER_HOUR, 2 * HOUR_IN_SECONDS );
+			$r = gasf_crm_kiosk_tag_submit( array( 'photo' => $id, 'first' => 'Selftest', 'fx' => 0.5, 'fy' => 0.5, 'rev' => 0, 'ref' => 'selftest-cap-' . wp_rand( 1000, 9999 ) ) );
+			$this->ok( is_wp_error( $r ) && 429 === (int) ( $r->get_error_data()['status'] ?? 0 ), 'kiosk tags: past the hourly ceiling the answer is 429' );
+			$this->ok( ! gasf_crm_kiosk_tags_for( $id ), 'kiosk tags: and nothing is stored' );
+		} finally {
+			if ( false === $had ) { delete_transient( $hour ); } else { set_transient( $hour, $had, 2 * HOUR_IN_SECONDS ); }
+		}
+		$this->ok( get_transient( $hour ) === $had, 'kiosk tags: the cap test puts the counter back' );
+	}
+
 	/** Origin telemetry expires; fresh records and the latch survive. */
 	public function test_origin_prune() {
 		$old = $this->library_photo( 'st-origin-old' );

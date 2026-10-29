@@ -192,6 +192,21 @@ instead. What emptied that file was never established (it arrived as a valid
 image, was zeroed within the second, nothing was logged, no copy survives),
 so intake now also refuses a stored file with no bytes in it.
 
+**Kiosk tag suggestions** (`photos-kiosk-tags.php`, v2.107.0) — a visitor at the
+clubhouse kiosk long-presses a spot on a photo (or uses its pin button) and
+types a first name and, optionally, a last name. The NUC relays it to
+`POST /kiosk/photos/tag` behind the kiosk feed's own token. It is stored as a
+suggestion in `_gasf_kiosk_tags`, never as a term, and is **never
+auto-accepted** - anybody can walk up to that screen. Volunteers find these
+with the library's Review filter *Named at the kiosk*; the editor shows each
+one with the pressed spot marked. Clicking the name fills a name box, Save
+clears the suggestion, *Not right* dismisses it. The spot is stored as fractions
+of the picture plus the revision the kiosk showed, so a later crop is flagged
+instead of pointing at the wrong face. Every submission carries the NUC
+outbox's `ref`; a ref seen once is answered `duplicate` for ever, so a retry can
+neither double a suggestion nor revive a dismissed one. Capped at 20 pending
+per photo (409, final) and 120 new per clock hour (429, the NUC retries).
+
 **Face suggestions** (`photos-faces.php`, v2.15.0) — see below. Since 2.100.0
 every deleted image leaves a dated tombstone (`gasf_face_tombstones`, 180
 days) and the scanner asks `faces/tombstones?since=` before each learn, so a
@@ -442,7 +457,7 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.106.2** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.107.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 

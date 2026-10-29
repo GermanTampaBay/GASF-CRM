@@ -380,6 +380,20 @@ textarea{width:100%;min-height:150px;padding:10px;border:1px solid var(--gasf-bo
 .fchip.used{opacity:.45}
 .fchip .fmeta{opacity:.65;font-size:11px}
 .fchip-all{border-style:dashed}
+.kchips{margin:0 0 7px;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.kset{display:inline-flex;gap:6px;align-items:flex-start;padding:4px;border:1px solid var(--gasf-border);border-radius:8px}
+.kprev{position:relative;display:block;width:96px;line-height:0}
+.kprev img{width:100%;height:auto;border-radius:4px}
+.kloupe{position:relative;display:block;width:72px;height:72px;border-radius:4px;background-size:400%;background-repeat:no-repeat}
+.kdot{position:absolute;width:12px;height:12px;margin:-6px 0 0 -6px;border-radius:50%;border:2px solid #fff;background:#e0218a;box-shadow:0 0 0 1px rgba(0,0,0,.55);pointer-events:none}
+.kside{display:flex;flex-direction:column;gap:4px;max-width:220px}
+.kchip{font:inherit;font-size:12px;line-height:1.5;padding:3px 9px;cursor:pointer;border:1px solid var(--s-accent);background:var(--card);color:var(--s-accent);border-radius:11px 0 0 11px}
+.kchip:hover{background:var(--s-accent);color:var(--card)}
+.kchip.used{opacity:.45}
+.kchip-dismiss{font:inherit;font-size:11px;line-height:1.5;padding:3px 8px;cursor:pointer;border:1px solid var(--gasf-border);border-left:0;background:var(--card);color:var(--gasf-muted);border-radius:0 11px 11px 0}
+.kchip-dismiss:hover{background:#fff0f0;color:#8a2424}
+.kchip-dismiss:disabled{opacity:.55;cursor:wait}
+.kmoved{font-size:11px;color:#8a5a00}
 .addp{background:none;border:0;padding:2px 0;margin:4px 0 0;font:inherit;font-size:12px;color:var(--s-accent);cursor:pointer}
 .addp:hover{text-decoration:underline}
 .prow{display:flex;gap:8px;flex-wrap:wrap}
