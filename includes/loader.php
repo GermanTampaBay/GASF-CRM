@@ -108,6 +108,9 @@ if ( true ) {
 	// compare names with gasf_crm_face_name_same() and sit behind the kiosk
 	// feed's own token guard.
 	require_once GASF_CRM_DIR . '/photos-kiosk-tags.php';
+	// After photos-kiosk-tags.php: change requests share its ref list, hourly
+	// counter and dismiss route.
+	require_once GASF_CRM_DIR . '/photos-kiosk-requests.php';
 	require_once GASF_CRM_DIR . '/ui.php';
 	require_once GASF_CRM_DIR . '/admin.php';
 	// The agreement's own words and blanks, split from the plumbing so that

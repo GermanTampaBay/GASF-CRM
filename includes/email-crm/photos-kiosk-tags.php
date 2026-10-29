@@ -290,11 +290,17 @@ add_action( 'rest_api_init', function () {
 			if ( ! $id || ! gasf_crm_photo_in_library( $id ) ) {
 				return new WP_Error( 'gasf_crm_404', 'No such photo.', array( 'status' => 404 ) );
 			}
-			if ( ! gasf_crm_kiosk_tag_dismiss( $id, $tag ) ) {
+			// One route for both kinds of kiosk item: a new-name suggestion or a
+			// change request (photos-kiosk-requests.php). Ids are random and
+			// per photo, so the two lists cannot collide.
+			$gone = gasf_crm_kiosk_tag_dismiss( $id, $tag )
+				|| ( function_exists( 'gasf_crm_kiosk_request_dismiss' ) && gasf_crm_kiosk_request_dismiss( $id, $tag ) );
+			if ( ! $gone ) {
 				return new WP_Error( 'gasf_crm_conflict', 'That kiosk suggestion is no longer pending.', array( 'status' => 409 ) );
 			}
-			gasf_crm_log( sprintf( 'CRM kiosk: dismissed tag suggestion %s on photo #%d — user %d', $tag, $id, get_current_user_id() ) );
-			return array( 'ok' => true, 'photo' => $id, 'remaining' => count( gasf_crm_kiosk_tags_for( $id ) ) );
+			gasf_crm_log( sprintf( 'CRM kiosk: dismissed kiosk item %s on photo #%d — user %d', $tag, $id, get_current_user_id() ) );
+			$left = count( gasf_crm_kiosk_tags_for( $id ) ) + ( function_exists( 'gasf_crm_kiosk_requests_for' ) ? count( gasf_crm_kiosk_requests_for( $id ) ) : 0 );
+			return array( 'ok' => true, 'photo' => $id, 'remaining' => $left );
 		},
 	) );
 } );

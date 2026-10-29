@@ -3481,6 +3481,75 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * Change requests from the kiosk: held for a volunteer, never applied, and
+	 * a "does not want to be listed" entry holds the name off the KIOSK feed
+	 * only - the tag, the library, and the backup sidecar keep it - until a
+	 * volunteer acts. Dismissing puts it back; removing the name clears it.
+	 */
+	public function test_kiosk_requests() {
+		$hour = gasf_crm_kiosk_tags_hour_key();
+		$had  = get_transient( $hour );
+		try {
+			$id  = $this->library_photo( 'st-kiosk-req' );
+			$bob = $this->person_term( 'Selftestbob Kiosk' );
+			$ern = $this->person_term( 'Selftesterna Kiosk' );
+			if ( is_wp_error( $bob ) || is_wp_error( $ern ) ) {
+				$this->ok( false, 'kiosk requests: could not make the person terms' );
+				return;
+			}
+			wp_set_object_terms( $id, array( (int) $bob['term_id'], (int) $ern['term_id'] ), 'gasf_photo_person' );
+			$ref = 'selftest-req-' . wp_rand( 100000, 999999 );
+			$in  = array(
+				'photo' => $id, 'kind' => 'remove', 'rev' => gasf_crm_photo_revision( $id ), 'ref' => $ref, 'comment' => 'selftest',
+				'entries' => array(
+					array( 'name' => 'Selftestbob Kiosk', 'reasons' => array( 'dont_list' ) ),
+					array( 'name' => 'Selftesterna Kiosk', 'reasons' => array( 'not_in_photo' ) ),
+				),
+			);
+
+			$r = gasf_crm_kiosk_request_submit( $in );
+			$this->ok( is_array( $r ) && 'stored' === $r['status'], 'kiosk requests: a removal request is taken in' );
+			$this->ok( 2 === count( gasf_crm_photo_term_names( $id, 'gasf_photo_person' ) ), 'kiosk requests: no tag is changed by asking' );
+			$card = gasf_kiosk_photo_card( $id );
+			$this->ok( ! in_array( 'Selftestbob Kiosk', (array) $card['people'], true ), 'kiosk requests: a does-not-want-to-be-listed name is held off the kiosk card' );
+			$this->ok( in_array( 'Selftesterna Kiosk', (array) $card['people'], true ), 'kiosk requests: a not-in-picture name is not held' );
+			$this->ok( in_array( 'Selftestbob Kiosk', gasf_crm_photo_library_card( $id )['saved']['people'], true ), 'kiosk requests: the volunteer library still shows the held name' );
+			$side = wp_json_encode( gasf_crm_backup_sidecar( $id ) );
+			$this->ok( false !== strpos( (string) $side, 'Selftestbob Kiosk' ) && false === strpos( (string) $side, 'not_in_photo' ), 'kiosk requests: the sidecar keeps the name and carries no request' );
+			$this->ok( in_array( $id, gasf_crm_photo_library_filter( array( $id ), array( 'review' => 'kiosk' ) ), true ), 'kiosk requests: the From the kiosk filter finds the photo' );
+			$this->ok( 'duplicate' === ( gasf_crm_kiosk_request_submit( $in )['status'] ?? '' ), 'kiosk requests: a retried ref is not stored twice' );
+
+			$bad = gasf_crm_kiosk_request_submit( array_merge( $in, array( 'ref' => $ref . '-b', 'entries' => array( array( 'name' => 'Selftestbob Kiosk', 'reasons' => array( 'misspelled' ) ) ) ) ) );
+			$this->ok( is_wp_error( $bad ) && 400 === (int) ( $bad->get_error_data()['status'] ?? 0 ), 'kiosk requests: a reason from the other kind is refused' );
+			$gone = gasf_crm_kiosk_request_submit( array_merge( $in, array( 'ref' => $ref . '-c', 'entries' => array( array( 'name' => 'Nobody Selftest' ) ) ) ) );
+			$this->ok( is_wp_error( $gone ) && 409 === (int) ( $gone->get_error_data()['status'] ?? 0 ), 'kiosk requests: a name not on the photo is a final 409' );
+			$ren = gasf_crm_kiosk_request_submit( array(
+				'photo' => $id, 'kind' => 'rename', 'rev' => 0, 'ref' => $ref . '-d',
+				'entries' => array( array( 'name' => 'Selftesterna Kiosk', 'to' => 'Selftesterna Kiosky', 'reasons' => array( 'misspelled' ) ) ),
+			) );
+			$this->ok( is_array( $ren ) && 'stored' === $ren['status'], 'kiosk requests: a rename request is taken in' );
+
+			// The volunteer takes Bob off and saves: the hold has done its job.
+			wp_set_object_terms( $id, array( (int) $ern['term_id'] ), 'gasf_photo_person' );
+			gasf_crm_kiosk_requests_prune( $id );
+			$this->ok( ! gasf_crm_kiosk_held_names( $id ), 'kiosk requests: removing the name ends the hold' );
+			$this->ok( 2 === count( gasf_crm_kiosk_requests_for( $id ) ), 'kiosk requests: entries for names still on the photo stay waiting' );
+
+			// A fresh hold, dismissed: the name comes back to the kiosk.
+			wp_set_object_terms( $id, array( (int) $bob['term_id'], (int) $ern['term_id'] ), 'gasf_photo_person' );
+			gasf_crm_kiosk_requests_write( $id, array() );
+			gasf_crm_kiosk_request_submit( array_merge( $in, array( 'ref' => $ref . '-e' ) ) );
+			$req = gasf_crm_kiosk_requests_for( $id );
+			$this->ok( gasf_crm_kiosk_request_dismiss( $id, $req[0]['id'] ?? '' ), 'kiosk requests: a volunteer can dismiss a request' );
+			$this->ok( in_array( 'Selftestbob Kiosk', (array) gasf_kiosk_photo_card( $id )['people'], true ), 'kiosk requests: dismissing puts the held name back on the kiosk' );
+			$this->ok( 'duplicate' === ( gasf_crm_kiosk_request_submit( array_merge( $in, array( 'ref' => $ref . '-e' ) ) )['status'] ?? '' ), 'kiosk requests: a late retry does not bring a dismissed request back' );
+		} finally {
+			if ( false === $had ) { delete_transient( $hour ); } else { set_transient( $hour, $had, 2 * HOUR_IN_SECONDS ); }
+		}
+		$this->ok( get_transient( $hour ) === $had, 'kiosk requests: the hourly counter is put back as it was' );
+	}
+
+	/**
 	 * The hourly ceiling answers 429, which the NUC retries, without storing.
 	 */
 	public function test_kiosk_tags_hourly_cap() {

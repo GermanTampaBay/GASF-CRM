@@ -207,6 +207,23 @@ outbox's `ref`; a ref seen once is answered `duplicate` for ever, so a retry can
 neither double a suggestion nor revive a dismissed one. Capped at 20 pending
 per photo (409, final) and 120 new per clock hour (429, the NUC retries).
 
+**Kiosk change requests** (`photos-kiosk-requests.php`, v2.108.0) — the same
+kiosk, for names already on a photo: *Fix a name* (old name, corrected name,
+quick reasons *Wrong person* / *Name misspelled*) and *Remove someone* (quick
+reasons *Not in this picture* / *Does not want to be listed*), several names per
+request, one free-form comment. `POST /kiosk/photos/request`, stored in
+`_gasf_kiosk_requests`, shown in the editor under the name boxes with
+**Use** / **Remove** buttons that fill or empty the box; Save clears each entry
+whose name is off the photo, *Not right* dismisses. The library filter is now
+*From the kiosk* (tags and requests). **One deliberate exception to "nothing
+changes until a volunteer acts":** an entry marked *Does not want to be listed*
+holds that name off the KIOSK FEED ONLY (`gasf_kiosk_card_people()`) while the
+request is pending. The tag, the volunteer library, the website, and the backup
+are untouched; dismissing the request puts the name back on the kiosk at its
+next sync. Owner's call (2026-10-29): a real privacy request is honoured at
+once, and a prank costs one name a few hours off one wall screen. Shares the
+tag module's ref list, hourly counter, and dismiss route.
+
 **Face suggestions** (`photos-faces.php`, v2.15.0) — see below. Since 2.100.0
 every deleted image leaves a dated tombstone (`gasf_face_tombstones`, 180
 days) and the scanner asks `faces/tombstones?since=` before each learn, so a
@@ -457,7 +474,7 @@ look at what it was in the middle of** - the option list is short
 ## Version note
 
 The header in `gasf-crm.php` is the real version — `wp plugin list` reports the
-loader shim's 1.0.0, not this. It currently reads **2.107.0** and matches the
+loader shim's 1.0.0, not this. It currently reads **2.108.0** and matches the
 newest commit. Bump it with every behavioural change: that header is the only
 way to tell from the server what is actually deployed.
 
