@@ -103,9 +103,9 @@ function gasf_kiosk_photo_card( $id ) {
         // event is the most public surface the club operates, so somebody who
         // asked not to be named publicly is not named on it either. The photo
         // still shows, and volunteers still see the tag everywhere they work.
-        'people'   => function_exists( 'gasf_photo_public_people_names' )
+        'people'   => gasf_kiosk_card_people( $id, function_exists( 'gasf_photo_public_people_names' )
             ? gasf_photo_public_people_names( $id )
-            : $names( 'gasf_photo_person' ),
+            : $names( 'gasf_photo_person' ) ),
         'places'   => $names( 'gasf_photo_place' ),
         'events'   => $names( 'gasf_photo_event' ),
         'kind'     => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
@@ -129,6 +129,24 @@ function gasf_kiosk_photo_card( $id ) {
         'rev'      => (int) get_post_meta( $id, '_gasf_photo_rev', true ),
         'modified' => str_replace( ' ', 'T', (string) get_post_field( 'post_modified_gmt', $id ) ) . 'Z',
     );
+}
+
+/**
+ * The kiosk card's name list, minus any name a visitor asked at the kiosk to
+ * have taken off ("doesn't want to be listed") while a volunteer has not yet
+ * decided (photos-kiosk-requests.php). Kiosk only: the tag itself is
+ * untouched, and dismissing the request brings the name back here.
+ */
+function gasf_kiosk_card_people( $id, array $people ) {
+    if ( ! function_exists( 'gasf_crm_kiosk_held_names' ) ) { return array_values( $people ); }
+    $held = gasf_crm_kiosk_held_names( $id );
+    if ( ! $held ) { return array_values( $people ); }
+    return array_values( array_filter( $people, function ( $name ) use ( $held ) {
+        foreach ( $held as $h ) {
+            if ( gasf_crm_face_name_same( $name, $h ) ) { return false; }
+        }
+        return true;
+    } ) );
 }
 
 add_action( 'rest_api_init', function () {

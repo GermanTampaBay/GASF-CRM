@@ -973,6 +973,82 @@ function gasf_crm_render_inbox_script() {
 			'</div>';
 	}
 
+	/* ============ names typed at the kiosk ============
+	 *
+	 * A visitor at the clubhouse screen pressed a spot on this photo and typed
+	 * a name. Shown with the spot marked, because "Erna" on a picture of forty
+	 * people is no help until you know which of the forty was meant. Clicking
+	 * the name fills a box exactly like a face chip - nothing is saved until
+	 * Save, and that save is what clears the suggestion. "Not right" throws
+	 * it away. None of this is ever auto-accepted: anybody can walk up to that
+	 * screen.
+	 */
+	function kioskChips(tags, p){
+		if (!tags || !tags.length) { return ''; }
+		var thumb = (p && (p.thumb || p.full)) || '';
+		var big = (p && (p.full || p.thumb)) || '';
+		return '<div class="kchips">' +
+			'<span class="fchips-lead">Named at the kiosk</span>' +
+			'<span class="fchips-note">A visitor pressed this spot and typed this name. Check it before you use it.</span>' +
+			tags.map(function(t){
+				var hasSpot = typeof t.fx === 'number' && typeof t.fy === 'number';
+				var x = hasSpot ? Math.round(t.fx * 1000) / 10 : 50;
+				var y = hasSpot ? Math.round(t.fy * 1000) / 10 : 50;
+				var dot = hasSpot ? '<i class="kdot" style="left:' + x + '%;top:' + y + '%"></i>' : '';
+				var preview = thumb
+					? '<span class="kprev" title="Where the visitor pressed"><img src="' + esc(thumb) + '" alt="">' + dot + '</span>' +
+					  (hasSpot && big ? '<span class="kloupe" title="Close up" style="background-image:url(&quot;' + esc(big) + '&quot;);background-position:' + x + '% ' + y + '%">' + dot + '</span>' : '')
+					: '';
+				var times = t.count > 1 ? ' <span class="fmeta">named ' + parseInt(t.count, 10) + ' times</span>' : '';
+				var moved = t.moved ? '<span class="kmoved">The photo was edited after this was typed, so the spot may be off.</span>' : '';
+				return '<span class="kset">' + preview +
+					'<span class="kside"><span class="fchipset">' +
+					'<button type="button" class="kchip" data-name="' + esc(t.name) + '" ' +
+						'title="Click to put this name in a box. Nothing is saved until you press the save button.">' +
+						esc(t.name) + times + '</button>' +
+					'<button type="button" class="kchip-dismiss" data-photo="' + parseInt((p && p.id) || 0, 10) + '" data-tag="' + esc(t.id) + '" ' +
+						'title="Throw this suggestion away. The photo is not changed.">Not right</button></span>' +
+					moved + '</span></span>';
+			}).join('') +
+			'</div>';
+	}
+
+	/* ============ changes asked at the kiosk ============
+	 *
+	 * A visitor looked at the names on this photo and asked for some to be
+	 * changed or taken off. Each line names the change and the visitor's
+	 * reasons; "Use" puts the corrected name in that person's box, "Remove"
+	 * empties it, and nothing is saved until Save, which also clears the
+	 * request. "Not right" throws the whole request away - and, for a
+	 * "does not want to be listed" request, puts the name back on the kiosk.
+	 */
+	function kioskRequests(reqs, p){
+		if (!reqs || !reqs.length) { return ''; }
+		var pid = parseInt((p && p.id) || 0, 10);
+		return reqs.map(function(r){
+			var lines = r.entries.map(function(e){
+				var why = e.reason_words && e.reason_words.length ? ' <span class="fmeta">' + esc(e.reason_words.join(', ')) + '</span>' : '';
+				var held = e.held ? '<span class="kmoved">Hidden on the kiosk until you decide.</span>' : '';
+				if (r.kind === 'rename') {
+					return '<span class="krow"><span>' + esc(e.name) + ' &rarr; <b>' + esc(e.to) + '</b>' + why + '</span>' +
+						'<button type="button" class="kreq-use" data-from="' + esc(e.name) + '" data-to="' + esc(e.to) + '" ' +
+						'title="Put the corrected name in the box. Nothing is saved until you press the save button.">Use</button></span>';
+				}
+				return '<span class="krow"><span>Take off <b>' + esc(e.name) + '</b>' + why + '</span>' +
+					'<button type="button" class="kreq-remove" data-from="' + esc(e.name) + '" ' +
+					'title="Empty this person\'s box. Nothing is saved until you press the save button.">Remove</button>' + held + '</span>';
+			}).join('');
+			var lead = r.kind === 'rename' ? 'Name fix asked at the kiosk' : 'Removal asked at the kiosk';
+			return '<div class="kchips kreq"><span class="fchips-lead">' + esc(lead) + '</span>' +
+				(r.comment ? '<span class="fchips-note">&ldquo;' + esc(r.comment) + '&rdquo;</span>' : '') +
+				lines +
+				(r.moved ? '<span class="kmoved">The photo was edited after this was asked.</span>' : '') +
+				'<span class="fchipset"><button type="button" class="kchip-dismiss" data-photo="' + pid + '" data-tag="' + esc(r.id) + '" ' +
+				'title="Throw this request away. The photo is not changed.">Not right</button></span>' +
+				'</div>';
+		}).join('');
+	}
+
 	function withAiSummarySuffix(text){
 		var clean = (text || '').trim().replace(/\s*\(ai summary\)\s*$/i, '');
 		return clean ? (clean + ' (AI Summary)') : '';
@@ -1166,6 +1242,76 @@ function gasf_crm_render_inbox_script() {
 		 * to put the name back.
 		 */
 		root.addEventListener('click', function(ev){
+			var kc = ev.target.closest ? ev.target.closest('.kchip') : null;
+			if (kc && root.contains(kc)) {
+				ev.preventDefault();
+				var kbox = kc.closest('.pf').querySelector('.p-people');
+				if (!kbox) { return; }
+				var kin = addSuggestedName(kbox, kc.dataset.name);
+				if (!kin) { return; }
+				kc.classList.add('used');
+				kin.focus();
+				return;
+			}
+
+			var ku = ev.target.closest ? ev.target.closest('.kreq-use, .kreq-remove') : null;
+			if (ku && root.contains(ku)) {
+				ev.preventDefault();
+				var kpf = ku.closest('.pf');
+				var from = (ku.dataset.from || '').trim().toLocaleLowerCase();
+				var hit = null;
+				Array.prototype.forEach.call(kpf ? kpf.querySelectorAll('.p-person') : [], function(i){
+					if (!hit && i.value.trim().toLocaleLowerCase() === from) { hit = i; }
+				});
+				if (!hit) {
+					var knote2 = ku.closest('.kreq') && ku.closest('.kreq').querySelector('.fchips-note');
+					if (knote2) { knote2.textContent = 'That name is no longer in a box here.'; }
+					return;
+				}
+				hit.value = ku.classList.contains('kreq-use') ? (ku.dataset.to || '') : '';
+				hit.dispatchEvent(new Event('input', { bubbles: true }));
+				ku.classList.add('used');
+				ku.disabled = true;
+				hit.focus();
+				return;
+			}
+
+			var kd = ev.target.closest ? ev.target.closest('.kchip-dismiss') : null;
+			if (kd && root.contains(kd)) {
+				ev.preventDefault();
+				var kphoto = parseInt(kd.dataset.photo || 0, 10);
+				var ktag = kd.dataset.tag || '';
+				if (!kphoto || !ktag) { return; }
+				var kset = kd.closest('.kset');
+				var kchips = kd.closest('.kchips');
+				var kold = kd.textContent;
+				kd.disabled = true;
+				kd.textContent = 'Saving...';
+				api('/photos/kiosk-tags/dismiss', {
+					method:'POST',
+					body:JSON.stringify({photo:kphoto,tag:ktag})
+				}).then(function(){
+					if (kset) { kset.remove(); }
+					if (kchips && (kchips.classList.contains('kreq') || !kchips.querySelector('.kset'))) { kchips.remove(); }
+					var drop = function(card){
+						if (card && card.kiosk_tags) {
+							card.kiosk_tags = card.kiosk_tags.filter(function(t){ return String(t.id) !== ktag; });
+						}
+						if (card && card.kiosk_requests) {
+							card.kiosk_requests = card.kiosk_requests.filter(function(t){ return String(t.id) !== ktag; });
+						}
+					};
+					drop(window._crmPhotoCards && window._crmPhotoCards[kphoto]);
+					if (typeof lgrid !== 'undefined' && lgrid && lgrid._photos) { drop(lgrid._photos[kphoto]); }
+				}).catch(function(e){
+					kd.disabled = false;
+					kd.textContent = kold;
+					var knote = kchips && kchips.querySelector('.fchips-note');
+					if (knote) { knote.textContent = e.message; }
+				});
+				return;
+			}
+
 			var sum = ev.target.closest ? ev.target.closest('.psum-apply') : null;
 			if (sum && root.contains(sum)) {
 				ev.preventDefault();
@@ -1528,7 +1674,7 @@ function gasf_crm_render_inbox_script() {
 			: '<input type="text" class="p-caption" maxlength="150" value="' + esc(q.caption||'') + '">';
 		var sum = summaryChip(p.summary, q.caption || p.caption || '');
 
-		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces, p.id) + peopleField(q.people || []) + '</div>' +
+		var s = '<div class="pf"><span>Who is in it</span>' + faceChips(p.faces, p.id) + kioskChips(p.kiosk_tags, p) + kioskRequests(p.kiosk_requests, p) + peopleField(q.people || []) + '</div>' +
 			'<div class="pf"><span>Group</span>' + groupsField(q.groups || []) + '</div>' +
 			'<label class="pf"><span>' + (opts.big ? 'Notes — what is happening, anything worth remembering' : 'What is happening') + '</span>' +
 			sum +

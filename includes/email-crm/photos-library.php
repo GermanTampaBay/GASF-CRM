@@ -238,6 +238,11 @@ function gasf_crm_photo_library_filter( array $ids, array $f ) {
 		if ( 'none' === $desc && '' !== trim( (string) get_post_field( 'post_excerpt', $id ) ) ) { return false; }
 		$want_pending_faces = in_array( $review, array( 'face', 'pending', 'pending_matches' ), true );
 		if ( $want_pending_faces && ( ! function_exists( 'gasf_crm_faces_for' ) || ! gasf_crm_faces_for( $id ) ) ) { return false; }
+		if ( 'kiosk' === $review ) {
+			$has_tags     = function_exists( 'gasf_crm_kiosk_tags_for' ) && gasf_crm_kiosk_tags_for( $id );
+			$has_requests = function_exists( 'gasf_crm_kiosk_requests_for' ) && gasf_crm_kiosk_requests_for( $id );
+			if ( ! $has_tags && ! $has_requests ) { return false; }
+		}
 
 		return true;
 	} ) );
@@ -435,6 +440,11 @@ function gasf_crm_photo_library_card( $attachment_id ) {
 		'faces'     => function_exists( 'gasf_crm_face_rows_in' ) ? gasf_crm_face_rows_in( $id, gasf_crm_faces_for( $id ), (int) ( $meta['width'] ?? 0 ), (int) ( $meta['height'] ?? 0 ) ) : array(),
 		'face_boxes'=> function_exists( 'gasf_crm_face_rows_in' ) ? gasf_crm_face_rows_in( $id, gasf_crm_face_boxes_for( $id ), (int) ( $meta['width'] ?? 0 ), (int) ( $meta['height'] ?? 0 ) ) : array(),
 		'summary'   => function_exists( 'gasf_crm_caption_suggestion_for' ) ? gasf_crm_caption_suggestion_for( $id ) : array(),
+		// Names typed by visitors at the kiosk, waiting for a volunteer. Held
+		// apart from 'saved' for the same reason 'faces' is: a guess is not a fact.
+		'kiosk_tags' => function_exists( 'gasf_crm_kiosk_tags_card' ) ? gasf_crm_kiosk_tags_card( $id ) : array(),
+		// And the visitor's asks about names already on it: change or take off.
+		'kiosk_requests' => function_exists( 'gasf_crm_kiosk_requests_card' ) ? gasf_crm_kiosk_requests_card( $id ) : array(),
 	);
 }
 
@@ -577,6 +587,14 @@ function gasf_crm_photo_library_save( $attachment_id, array $in ) {
 	// A person taken off by hand is a rejection of any face label for them.
 	if ( null !== $people_before && function_exists( 'gasf_crm_face_people_removed' ) ) {
 		gasf_crm_face_people_removed( $id, $people_before );
+	}
+	// A kiosk suggestion whose name is now on the photo has been accepted.
+	if ( function_exists( 'gasf_crm_kiosk_tags_prune_tagged' ) ) {
+		gasf_crm_kiosk_tags_prune_tagged( $id );
+	}
+	// And a change request whose names are now off the photo has been acted on.
+	if ( function_exists( 'gasf_crm_kiosk_requests_prune' ) ) {
+		gasf_crm_kiosk_requests_prune( $id );
 	}
 
 	/*
