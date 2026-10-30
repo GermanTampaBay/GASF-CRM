@@ -4706,6 +4706,7 @@ final class GASF_CRM_Selftest {
 			$ids[] = $b = gasf_crm_vendor_insert( array( 'vendor_name' => 'selftest  screen', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair', 'vendor_type' => 'craft' ) );
 			$ids[] = $c = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Aside', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair' ) );
 			gasf_crm_vendor_set_aside( $c, true );
+			$ids[] = $food_id = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Food Stall', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair', 'vendor_type' => 'food' ) );
 
 			unset( $_GET['agreement'], $_GET['saved'] );
 			ob_start();
@@ -4718,7 +4719,11 @@ final class GASF_CRM_Selftest {
 			$this->ok( false !== strpos( $html, '<details class="gva-settings"' ) && false === strpos( $html, '<details class="gva-settings" open' ), 'screen: the settings are closed unless something was just saved there' );
 			$this->ok( false !== strpos( $html, 'name="notify_to"' ), 'screen: the settings form is still on the page' );
 			$this->ok( false !== strpos( $html, 'data-agreement="' . $a . '"' ) && false !== strpos( $html, 'agreement=' . $a ), 'screen: a row links to its agreement' );
-			$this->ok( false !== strpos( $html, 'Awaiting countersignature' ) && false !== strpos( $html, 'Insurance missing' ), 'screen: a row says what is still owed' );
+			$this->ok( false !== strpos( $html, 'Awaiting countersignature' ), 'screen: a row says what is still owed' );
+			// Per row, not by searching the page: the page also lists the club's real agreements.
+			$chips_of = function ( $id ) { return array_column( gasf_crm_vendor_state( gasf_crm_vendor_get( $id ) )['chips'], 0 ); };
+			$this->ok( in_array( 'await', $chips_of( $a ), true ) && ! in_array( 'coi', $chips_of( $a ), true ) && in_array( 'coi', $chips_of( $food_id ), true ),
+				'screen: a craft row is not told it is missing insurance, a food row is' );
 			$this->ok( false !== strpos( $html, 'Possible duplicate' ), 'screen: two submissions by one name for one event are flagged' );
 			$this->ok( false !== strpos( $html, 'data-state="archived"' ), 'screen: a set-aside row is marked' );
 			$this->ok( preg_match( '~<section class="gva-list[^>]*>~', $html, $m ) && false === strpos( $m[0], 'hidden' ), 'screen: with no agreement asked for, the list shows' );
