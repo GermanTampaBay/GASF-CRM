@@ -1257,6 +1257,42 @@ final class GASF_CRM_Selftest {
 			'near scope: the finder asks for catalogue standing, not just an attachment' );
 	}
 
+	/** Insurance is a food requirement: a craft agreement is not held open by a missing certificate. */
+	public function test_vendor_insurance_is_a_food_requirement() {
+		$row = function ( $type, array $paid = array(), $coi = '' ) {
+			return array( 'status' => 'countersigned', 'agreed_name' => 'A Vendor', 'coi_path' => $coi, 'vendor_type' => $type,
+				'paid_json' => wp_json_encode( $paid + array( 'sign_gas' => 'An Officer' ) ) );
+		};
+		$chip_keys = function ( $st ) { return array_map( function ( $c ) { return $c[0]; }, $st['chips'] ); };
+
+		$craft = gasf_crm_vendor_state( $row( 'craft', array( 'deposit_amount' => '50' ) ) );
+		$this->ok( ! $craft['needs_action'], 'craft insurance: countersigned with a deposit and no certificate is done' );
+		$this->ok( array( 'force' ) === $chip_keys( $craft ), 'craft insurance: the only chip is In force - no Insurance missing' );
+		$this->ok( 3 === count( $craft['steps'] ) && ! in_array( 'Insurance', array_column( $craft['steps'], 0 ), true ), 'craft insurance: three stations, none of them insurance' );
+		$this->ok( false === $craft['needs_insurance'], 'craft insurance: the state says insurance is not needed' );
+
+		$craft_nodep = gasf_crm_vendor_state( $row( 'craft' ) );
+		$this->ok( $craft_nodep['needs_action'] && in_array( 'deposit', $chip_keys( $craft_nodep ), true ) && ! in_array( 'coi', $chip_keys( $craft_nodep ), true ),
+			'craft insurance: a missing deposit still holds a craft agreement open, and says deposit' );
+
+		$food = gasf_crm_vendor_state( $row( 'food', array( 'deposit_amount' => '50' ) ) );
+		$this->ok( $food['needs_action'] && in_array( 'coi', $chip_keys( $food ), true ), 'craft insurance: a food agreement with no certificate is still held open' );
+		$this->ok( 4 === count( $food['steps'] ) && $food['needs_insurance'], 'craft insurance: food keeps all four stations' );
+
+		$food_ok = gasf_crm_vendor_state( $row( 'food', array( 'deposit_amount' => '50', 'poi_date' => '2026-10-01' ) ) );
+		$this->ok( ! $food_ok['needs_action'], 'craft insurance: food with proof of insurance recorded is done' );
+
+		$legacy = gasf_crm_vendor_state( $row( '', array( 'deposit_amount' => '50' ) ) );
+		$this->ok( $legacy['needs_action'] && $legacy['needs_insurance'], 'craft insurance: an older record with no type keeps asking, as it always did' );
+
+		$craft_sent = gasf_crm_vendor_state( $row( 'craft', array( 'deposit_amount' => '50' ), 'coi/x.pdf' ) );
+		$this->ok( true === $craft_sent['insured'] && ! $craft_sent['needs_action'], 'craft insurance: a craft vendor who sends one anyway is simply insured' );
+
+		$src = (string) file_get_contents( GASF_CRM_DIR . '/contracts.php' );
+		$this->ok( false !== strpos( $src, 'count( $st[\'steps\'] ) - 1' ) && false !== strpos( $src, "if ( \$st['needs_insurance'] || \$r['coi_path'] ) :" ),
+			'craft insurance: the progress line and the detail row follow the stations' );
+	}
+
 	/** Public-name privacy is term metadata; private tagging and face learning keep the name. */
 	public function test_public_name_opt_out() {
 		$suffix = (string) wp_rand( 100000, 999999 );
@@ -4836,6 +4872,7 @@ final class GASF_CRM_Selftest {
 			$ids[] = $b = gasf_crm_vendor_insert( array( 'vendor_name' => 'selftest  screen', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair', 'vendor_type' => 'craft' ) );
 			$ids[] = $c = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Aside', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair' ) );
 			gasf_crm_vendor_set_aside( $c, true );
+			$ids[] = $food_id = gasf_crm_vendor_insert( array( 'vendor_name' => 'Selftest Food Stall', 'agreed_name' => 'A Vendor', 'event_text' => 'Selftest Fair', 'vendor_type' => 'food' ) );
 
 			unset( $_GET['agreement'], $_GET['saved'] );
 			ob_start();
@@ -4848,7 +4885,11 @@ final class GASF_CRM_Selftest {
 			$this->ok( false !== strpos( $html, '<details class="gva-settings"' ) && false === strpos( $html, '<details class="gva-settings" open' ), 'screen: the settings are closed unless something was just saved there' );
 			$this->ok( false !== strpos( $html, 'name="notify_to"' ), 'screen: the settings form is still on the page' );
 			$this->ok( false !== strpos( $html, 'data-agreement="' . $a . '"' ) && false !== strpos( $html, 'agreement=' . $a ), 'screen: a row links to its agreement' );
-			$this->ok( false !== strpos( $html, 'Awaiting countersignature' ) && false !== strpos( $html, 'Insurance missing' ), 'screen: a row says what is still owed' );
+			$this->ok( false !== strpos( $html, 'Awaiting countersignature' ), 'screen: a row says what is still owed' );
+			// Per row, not by searching the page: the page also lists the club's real agreements.
+			$chips_of = function ( $id ) { return array_column( gasf_crm_vendor_state( gasf_crm_vendor_get( $id ) )['chips'], 0 ); };
+			$this->ok( in_array( 'await', $chips_of( $a ), true ) && ! in_array( 'coi', $chips_of( $a ), true ) && in_array( 'coi', $chips_of( $food_id ), true ),
+				'screen: a craft row is not told it is missing insurance, a food row is' );
 			$this->ok( false !== strpos( $html, 'Possible duplicate' ), 'screen: two submissions by one name for one event are flagged' );
 			$this->ok( false !== strpos( $html, 'data-state="archived"' ), 'screen: a set-aside row is marked' );
 			$this->ok( preg_match( '~<section class="gva-list[^>]*>~', $html, $m ) && false === strpos( $m[0], 'hidden' ), 'screen: with no agreement asked for, the list shows' );

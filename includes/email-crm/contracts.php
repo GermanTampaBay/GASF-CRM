@@ -2361,6 +2361,15 @@ function gasf_crm_vendor_state( array $r ) {
 	$insured = '' !== trim( (string) ( $r['coi_path'] ?? '' ) ) || '' !== trim( (string) ( $paid['poi_date'] ?? '' ) );
 	$deposit = '' !== trim( (string) ( $paid['deposit_amount'] ?? '' ) );
 
+	// Insurance is a FOOD requirement. The application form never asks a craft
+	// vendor for it, a craft vendor's signed copy omits the insurance clause, and
+	// intake stores no certificate for one - yet this screen counted a missing
+	// certificate against every agreement, so a craft vendor could never leave
+	// "needs a reviewer" (2.106.3: four Krampusnacht crafters, countersigned,
+	// still flagged). Waived only for an agreement explicitly marked craft; food,
+	// and older rows with no type, behave as they always did.
+	$needs_ins = 'craft' !== (string) ( $r['vendor_type'] ?? '' );
+
 	$chips = array();
 	if ( $aside ) {
 		$chips[] = array( 'aside', 'Set aside', 'muted' );
@@ -2370,17 +2379,18 @@ function gasf_crm_vendor_state( array $r ) {
 		$chips[] = array( 'await', 'Awaiting countersignature', 'warn' );
 	}
 	if ( ! $aside ) {
-		if ( ! $insured ) { $chips[] = array( 'coi', 'Insurance missing', 'danger' ); }
+		if ( $needs_ins && ! $insured ) { $chips[] = array( 'coi', 'Insurance missing', 'danger' ); }
 		if ( ! $deposit ) { $chips[] = array( 'deposit', 'No deposit yet', 'info' ); }
 	}
 
-	// The four stations of an agreement, in the order they happen.
+	// The stations of an agreement, in the order they happen: four for food,
+	// three where insurance is not asked for.
 	$steps = array(
 		array( 'Signed', $signed ),
 		array( 'Countersigned', $counter ),
 		array( 'Deposit', $deposit ),
-		array( 'Insurance', $insured ),
 	);
+	if ( $needs_ins ) { $steps[] = array( 'Insurance', $insured ); }
 	$done = 0;
 	foreach ( $steps as $st ) { if ( $st[1] ) { $done++; } }
 
@@ -2389,8 +2399,9 @@ function gasf_crm_vendor_state( array $r ) {
 		'signed'       => $signed,
 		'countersigned' => $counter,
 		'insured'      => $insured,
+		'needs_insurance' => $needs_ins,
 		'deposit'      => $deposit,
-		'needs_action' => ! $aside && ( ! $counter || ! $insured || ! $deposit ),
+		'needs_action' => ! $aside && ( ! $counter || ( $needs_ins && ! $insured ) || ! $deposit ),
 		'chips'        => $chips,
 		'steps'        => $steps,
 		'done'         => $done,
@@ -2645,7 +2656,7 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 				</p>
 			<?php endif; ?>
 
-			<ol class="gva-steps" style="--p:<?php echo esc_attr( (string) ( max( 0, $st['done'] - 1 ) / 3 ) ); ?>">
+			<ol class="gva-steps" style="--p:<?php echo esc_attr( (string) ( max( 0, $st['done'] - 1 ) / max( 1, count( $st['steps'] ) - 1 ) ) ); ?>">
 				<?php foreach ( $st['steps'] as $n => $step ) : ?>
 					<li class="<?php echo $step[1] ? 'done' : ''; ?>" style="--i:<?php echo (int) $n; ?>"><i><?php echo $step[1] ? '&#10003;' : (int) ( $n + 1 ); ?></i><?php echo esc_html( $step[0] ); ?></li>
 				<?php endforeach; ?>
@@ -2764,6 +2775,7 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 							<dt>Address</dt>
 							<dd><?php echo esc_html( trim( $r['vendor_address'] . ', ' . trim( $r['vendor_city'] . ' ' . $r['vendor_state'] . ' ' . $r['vendor_zip'] ), ', ' ) ); ?></dd>
 						<?php endif; ?>
+						<?php if ( $st['needs_insurance'] || $r['coi_path'] ) : /* craft vendors are not asked for one */ ?>
 						<dt>Insurance certificate</dt>
 						<dd>
 							<?php if ( $r['coi_path'] ) : ?>
@@ -2773,6 +2785,7 @@ function gasf_crm_vendor_render_section( $hidden = true ) {
 								<span class="gva-miss">Not supplied yet.</span> The agreement asks for it at least 30 days before the event.
 							<?php endif; ?>
 						</dd>
+						<?php endif; ?>
 						<dt>Photographs</dt>
 						<dd>
 							<?php if ( is_array( $files ) && $files ) : ?>
