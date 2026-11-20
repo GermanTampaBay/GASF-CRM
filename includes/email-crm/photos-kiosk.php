@@ -108,6 +108,9 @@ function gasf_kiosk_photo_card( $id ) {
             : $names( 'gasf_photo_person' ) ),
         'places'   => $names( 'gasf_photo_place' ),
         'events'   => $names( 'gasf_photo_event' ),
+        // The kiosk's Group filter (Schuhplattlers, Bayern Munich, ...). The
+        // NUC compares this on every sync, so a regrouped photo needs no rev bump.
+        'groups'   => $names( 'gasf_photo_group' ),
         'kind'     => wp_attachment_is( 'video', $id ) ? 'video' : 'image',
         /*
          * Poster or photograph. The kiosk's two columns want opposite halves

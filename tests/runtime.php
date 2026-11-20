@@ -3438,6 +3438,41 @@ final class GASF_CRM_Selftest {
 	}
 
 	/**
+	 * The kiosk's Group filter is fed by this field alone: the NUC stores what
+	 * the card says and computes its own facets from the stored rows.
+	 *
+	 * The empty case matters as much as the full one. The kiosk reads a card
+	 * with no `groups` key as "this plugin does not send groups", so an
+	 * ungrouped photo has to say so with an empty list rather than by leaving
+	 * the key out.
+	 */
+	public function test_kiosk_card_groups() {
+		$id = $this->library_photo( 'st-kiosk-groups' );
+
+		$card = gasf_kiosk_photo_card( $id );
+		$this->ok(
+			array_key_exists( 'groups', (array) $card ) && array() === $card['groups'],
+			'kiosk: an ungrouped photo carries an empty groups list, not a missing key'
+		);
+
+		wp_set_object_terms( $id, array( 'Selftest Kiosk Group' ), 'gasf_photo_group', false );
+		$card = gasf_kiosk_photo_card( $id );
+		$this->ok(
+			array( 'Selftest Kiosk Group' ) === array_values( (array) $card['groups'] ),
+			'kiosk: a grouped photo names its group on the card'
+		);
+
+		wp_set_object_terms( $id, array(), 'gasf_photo_group', false );
+		$this->ok(
+			array() === gasf_kiosk_photo_card( $id )['groups'],
+			'kiosk: taking the photo out of the group empties the list again'
+		);
+
+		$term = get_term_by( 'name', 'Selftest Kiosk Group', 'gasf_photo_group' );
+		if ( $term ) { wp_delete_term( (int) $term->term_id, 'gasf_photo_group' ); }
+	}
+
+	/**
 	 * Names typed at the kiosk are held for a volunteer, never written as tags.
 	 *
 	 * Pins the whole contract the NUC's retrying outbox relies on: a ref seen
